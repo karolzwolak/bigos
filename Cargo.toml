@@ -43,6 +43,3 @@ test-args = [
 ]
 test-success-exit-code = 33 # (0x10 << 1) | 1
 test-timeout = 60
-
-[lints.clippy]
-empty_loop = "allow"

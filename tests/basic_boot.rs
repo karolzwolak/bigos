@@ -5,13 +5,13 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use rdos::vga_println;
+use rdos::{hlt_loop, vga_println};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     test_main();
 
-    loop {}
+    hlt_loop()
 }
 
 #[panic_handler]

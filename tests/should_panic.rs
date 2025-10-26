@@ -3,7 +3,7 @@
 
 use core::panic::PanicInfo;
 use rdos::{
-    serial_print, serial_println,
+    hlt_loop, serial_print, serial_println,
     testing::{QemuExitCode, exit_qemu},
 };
 
@@ -11,7 +11,7 @@ use rdos::{
 fn panic(_info: &PanicInfo) -> ! {
     serial_println!("[ok]");
     exit_qemu(QemuExitCode::Success);
-    loop {}
+    hlt_loop()
 }
 
 #[unsafe(no_mangle)]
@@ -19,7 +19,7 @@ pub extern "C" fn _start() -> ! {
     should_fail();
     serial_println!("[test did not panic]");
     exit_qemu(QemuExitCode::Failed);
-    loop {}
+    hlt_loop()
 }
 
 fn should_fail() {

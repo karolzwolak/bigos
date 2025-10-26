@@ -15,13 +15,21 @@ pub fn init() {
     interrupts::init_idt();
 }
 
+#[inline(always)]
+/// Do nothing loop that tells the CPU to halt until the next interrupt
+pub fn hlt_loop() -> ! {
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
 /// Entry point for `cargo test`
 #[cfg(test)]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     init();
     test_main();
-    loop {}
+    hlt_loop()
 }
 
 #[cfg(test)]

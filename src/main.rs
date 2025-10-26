@@ -5,7 +5,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use rdos::{init, vga_println};
+use rdos::{hlt_loop, init, vga_println};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -29,7 +29,7 @@ pub extern "C" fn _start() -> ! {
 
     vga_println!("Hello, World!");
 
-    loop {}
+    hlt_loop()
 }
 
 #[cfg(test)]

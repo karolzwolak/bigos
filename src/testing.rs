@@ -1,4 +1,4 @@
-use crate::{serial_print, serial_println};
+use crate::{hlt_loop, serial_print, serial_println};
 use core::panic::PanicInfo;
 use x86_64::instructions::port::Port;
 
@@ -21,7 +21,7 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
     serial_println!("[failed]\n");
     serial_println!("Error: {}\n", info);
     exit_qemu(QemuExitCode::Failed);
-    loop {}
+    hlt_loop()
 }
 
 #[cfg(test)]
