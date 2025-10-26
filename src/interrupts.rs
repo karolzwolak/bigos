@@ -51,7 +51,8 @@ pub fn init_idt() {
     IDT.load();
 }
 
-pub const PIC_1_OFFSET: u8 = 32; // set the first PIC offset to 32 (to avoid overlap with the 32 exception slots)
+/// Set the first PIC offset to 32 to avoid overlap with the 32 exception slots
+pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 pub static PICS: spin::Mutex<ChainedPics> =
     spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
@@ -60,7 +61,7 @@ pub fn init_hw_interrupts() {
     unsafe {
         PICS.lock().initialize();
     }
-    x86_64::instructions::interrupts::enable(); // enable external interrupts
+    x86_64::instructions::interrupts::enable();
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
