@@ -36,3 +36,13 @@ macro_rules! serial_println {
     ($fmt:expr, $($arg:tt)*) => ($crate::serial_print!(
         concat!($fmt, "\n"), $($arg)*));
 }
+
+#[cfg(test)]
+mod tests {
+
+    #[test_case]
+    fn serial_print() {
+        serial_println!("serial_println!");
+        serial_print!("serial_print!");
+    }
+}

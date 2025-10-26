@@ -55,13 +55,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test_case]
-    fn serial_print() {
-        serial_println!("serial_println!");
-        serial_print!("serial_print!");
-    }
 
     #[test_case]
     fn true_assertion() {

@@ -14,3 +14,13 @@ pub extern "C" fn _start() -> ! {
     test_main();
     loop {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn lib() {
+        serial_println!("hello from lib");
+    }
+}

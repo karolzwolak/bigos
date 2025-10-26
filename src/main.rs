@@ -29,3 +29,13 @@ pub extern "C" fn _start() -> ! {
 
     loop {}
 }
+
+#[cfg(test)]
+mod tests {
+    use rdos::*;
+
+    #[test_case]
+    fn main() {
+        serial_println!("hello from main");
+    }
+}
