@@ -16,6 +16,22 @@ macro_rules! vga_println {
     ($($arg:tt)*) => ($crate::vga_print!("{}\n", format_args!($($arg)*)));
 }
 
+#[macro_export]
+macro_rules! vga_eprintln {
+    ($($arg:tt)*) => ($crate::io::vga::colors::push_style($crate::io::vga::colors::ERROR.0, $crate::io::vga::colors::ERROR.1);
+    $crate::vga_print!("[ERR]: {}\n", format_args!($($arg)*)); $crate::io::vga::colors::pop_style());
+}
+#[macro_export]
+macro_rules! vga_wprintln {
+    ($($arg:tt)*) => ($crate::io::vga::colors::push_style($crate::io::vga::colors::WARNING.0, $crate::io::vga::colors::WARNING.1);
+    $crate::vga_print!("[WAR]: {}\n", format_args!($($arg)*)); $crate::io::vga::colors::pop_style());
+}
+#[macro_export]
+macro_rules! vga_sprintln {
+    ($($arg:tt)*) => ($crate::io::vga::colors::push_style($crate::io::vga::colors::SUCCESS.0, $crate::io::vga::colors::SUCCESS.1);
+    $crate::vga_print!("[SUC]: {}\n", format_args!($($arg)*)); $crate::io::vga::colors::pop_style());
+}
+
 #[doc(hidden)]
 pub fn _vga_print(args: fmt::Arguments) {
     use core::fmt::Write;
@@ -52,11 +68,85 @@ impl ColorCode {
     fn new(foreground: Color, background: Color) -> ColorCode {
         ColorCode((background as u8) << 4 | (foreground as u8))
     }
+
+    fn decode(&self) -> colors::ColorPair {
+        let foreground: Color = unsafe { core::mem::transmute(self.0 & 0x0F) };
+        let background: Color = unsafe { core::mem::transmute((self.0 & 0xF0) >> 4) };
+        (foreground, background)
+    }
 }
 
 impl Default for ColorCode {
     fn default() -> Self {
         ColorCode::new(Color::White, Color::Black)
+    }
+}
+
+const STYLE_STACK_SIZE: usize = 32;
+struct StyleStack {
+    stack: [ColorCode; STYLE_STACK_SIZE],
+    count: usize,
+}
+impl StyleStack {
+    fn new() -> Self {
+        Self {
+            stack: [ColorCode::default(); STYLE_STACK_SIZE],
+            count: 0,
+        }
+    }
+
+    // TODO: idk if we want error handling everywhere
+    /*
+    fn push(&mut self, style: ColorCode) -> Result<(), ()> {
+        if self.count < STYLE_STACK_SIZE {
+            self.stack[self.count] = style;
+            self.count += 1;
+            Ok(())
+        }
+        else { Err(()) }
+    }
+    */
+    fn push(&mut self, fg_color: Color, bg_color: Color) -> ColorCode {
+        let color_code = ColorCode::new(fg_color, bg_color);
+        if self.count < STYLE_STACK_SIZE {
+            self.stack[self.count] = color_code;
+            self.count += 1;
+            color_code
+        } else {
+            color_code // return the new color if the stack overflowed
+        }
+    }
+
+    fn pop(&mut self) -> ColorCode {
+        if self.count > 1 {
+            self.count -= 1;
+            self.stack[self.count - 1]
+        } else {
+            ColorCode::default()
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref STYLE_STACK: spin::Mutex<StyleStack> = spin::Mutex::new(StyleStack::new());
+}
+
+pub mod colors {
+    use crate::io::vga::{Color, STYLE_STACK, WRITER};
+
+    pub type ColorPair = (Color, Color);
+    pub const ERROR: ColorPair = (Color::Red, Color::Black);
+    pub const WARNING: ColorPair = (Color::Yellow, Color::Black);
+    pub const SUCCESS: ColorPair = (Color::Green, Color::Black);
+
+    pub fn push_style(fg: Color, bg: Color) {
+        let mut writer = WRITER.lock();
+        let color_code = STYLE_STACK.lock().push(fg, bg);
+        writer.color_code = color_code;
+    }
+
+    pub fn pop_style() {
+        WRITER.lock().color_code = STYLE_STACK.lock().pop();
     }
 }
 
@@ -141,7 +231,7 @@ impl Writer {
     fn clear_row(&mut self, row: usize) {
         let blank = ScreenChar {
             ascii_character: b' ',
-            color_code: self.color_code,
+            color_code: ColorCode::default(), // if set as self.color_code, it will print out empty lines below with the background color, which doesn't look good
         };
         for col in 0..BUFFER_WIDTH {
             self.buffer.chars[row][col].write(blank);
@@ -153,6 +243,15 @@ impl Writer {
             self.write_byte(byte);
         }
     }
+
+    pub fn change_color(&mut self, fg_color: Color, bg_color: Color) {
+        self.color_code = ColorCode::new(fg_color, bg_color);
+    }
+}
+
+pub fn init() {
+    let init_colors = WRITER.lock().color_code.decode();
+    colors::push_style(init_colors.0, init_colors.1);
 }
 
 #[cfg(test)]
