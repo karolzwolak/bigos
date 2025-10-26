@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
-#![test_runner(rdos::test_runner)]
+#![test_runner(rdos::testing::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
@@ -17,9 +17,7 @@ fn panic(info: &PanicInfo) -> ! {
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    use rdos::test_panic_handler;
-
-    test_panic_handler(info)
+    rdos::testing::test_panic_handler(info)
 }
 
 #[unsafe(no_mangle)]
