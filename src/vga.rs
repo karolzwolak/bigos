@@ -6,18 +6,18 @@ lazy_static::lazy_static! {
 }
 
 #[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ($crate::vga::_print(format_args!($($arg)*)));
+macro_rules! vga_print {
+    ($($arg:tt)*) => ($crate::vga::_vga_print(format_args!($($arg)*)));
 }
 
 #[macro_export]
-macro_rules! println {
+macro_rules! vga_println {
     () => ($crate::print!("\n"));
-    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::vga_print!("{}\n", format_args!($($arg)*)));
 }
 
 #[doc(hidden)]
-pub fn _print(args: fmt::Arguments) {
+pub fn _vga_print(args: fmt::Arguments) {
     use core::fmt::Write;
     WRITER.lock().write_fmt(args).unwrap();
 }
@@ -161,13 +161,13 @@ mod tests {
 
     #[test_case]
     fn println_singular_line() {
-        println!("singular line");
+        vga_println!("singular line");
     }
 
     #[test_case]
     fn println_many() {
         for _ in 0..200 {
-            println!("many lines");
+            vga_println!("many lines");
         }
     }
 
@@ -175,7 +175,7 @@ mod tests {
     fn println_output() {
         let s = "I should fit on a single line";
         assert!(s.len() < BUFFER_WIDTH);
-        println!("{}", s);
+        vga_println!("{}", s);
         for (col, char) in s.chars().enumerate() {
             // the second to last row, since println! adds a new line at the end
             let row = BUFFER_HEIGHT - 2;
