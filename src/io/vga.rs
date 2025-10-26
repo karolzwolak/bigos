@@ -19,7 +19,12 @@ macro_rules! vga_println {
 #[doc(hidden)]
 pub fn _vga_print(args: fmt::Arguments) {
     use core::fmt::Write;
-    WRITER.lock().write_fmt(args).unwrap();
+    use x86_64::instructions::interrupts;
+
+    // disable interrupts to avoid WRITER deadlocks
+    interrupts::without_interrupts(|| {
+        WRITER.lock().write_fmt(args).unwrap();
+    });
 }
 
 #[allow(dead_code)]
@@ -173,14 +178,20 @@ mod tests {
 
     #[test_case]
     fn println_output() {
+        use core::fmt::Write;
+        use x86_64::instructions::interrupts;
+
         let s = "I should fit on a single line";
         assert!(s.len() < BUFFER_WIDTH);
-        vga_println!("{}", s);
-        for (col, char) in s.chars().enumerate() {
-            // the second to last row, since println! adds a new line at the end
-            let row = BUFFER_HEIGHT - 2;
-            let screen_char = WRITER.lock().buffer.chars[row][col].read();
-            assert_eq!(char::from(screen_char.ascii_character), char);
-        }
+        interrupts::without_interrupts(|| {
+            let mut writer = WRITER.lock();
+            writeln!(writer, "\n{}", s).expect("writeln failed");
+            for (col, char) in s.chars().enumerate() {
+                // the second to last row, since println! adds a new line at the end
+                let row = BUFFER_HEIGHT - 2;
+                let screen_char = writer.buffer.chars[row][col].read();
+                assert_eq!(char::from(screen_char.ascii_character), char);
+            }
+        });
     }
 }
