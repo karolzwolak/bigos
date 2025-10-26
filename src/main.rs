@@ -5,7 +5,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use rdos::vga_println;
+use rdos::{init, vga_println};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -22,6 +22,8 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    init();
+
     #[cfg(test)]
     test_main();
 
