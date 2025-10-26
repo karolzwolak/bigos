@@ -24,14 +24,14 @@ pub fn _print(args: ::core::fmt::Arguments) {
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {
-        $crate::serial::_print(format_args!($($arg)*));
+        $crate::io::serial::_print(format_args!($($arg)*));
     };
 }
 
 /// Prints to the host through the serial interface, appending a newline.
 #[macro_export]
 macro_rules! serial_println {
-    () => ($crate::serial_print!("\n"));
+    () => ($crate::io::serial_print!("\n"));
     ($fmt:expr) => ($crate::serial_print!(concat!($fmt, "\n")));
     ($fmt:expr, $($arg:tt)*) => ($crate::serial_print!(
         concat!($fmt, "\n"), $($arg)*));
