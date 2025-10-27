@@ -112,7 +112,6 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     }
 }
 
-
 extern "x86-interrupt" fn pagefault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: PageFaultErrorCode,
