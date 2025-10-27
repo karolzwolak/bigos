@@ -114,13 +114,13 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
 extern "x86-interrupt" fn pagefault_handler(
     stack_frame: InterruptStackFrame,
-    _error_code: PageFaultErrorCode,
+    error_code: PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
 
     vga_println!("EXCEPTION: PAGE FAULT");
     vga_println!("Accessed Address: {:?}", Cr2::read());
-    vga_println!("Error Code: {:?}", _error_code);
+    vga_println!("Error Code: {:?}", error_code);
     vga_println!("{:#?}", stack_frame);
     hlt_loop();
 }
