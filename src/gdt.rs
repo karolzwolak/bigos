@@ -52,6 +52,7 @@ struct Selectors {
 
 pub fn init() {
     GDT.table.load();
+    // SAFETY: We have just loaded the GDT, so the selectors are valid.
     unsafe {
         CS::set_reg(GDT.selectors.code_selector);
         load_tss(GDT.selectors.tss_selector);
