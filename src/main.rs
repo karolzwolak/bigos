@@ -4,6 +4,7 @@
 #![test_runner(rdos::testing::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+use bootloader::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 use rdos::{hlt_loop, init, vga_println};
 
@@ -20,9 +21,16 @@ fn panic(info: &PanicInfo) -> ! {
     rdos::testing::test_panic_handler(info)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+entry_point!(kernel_main);
+
+pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
+    use rdos::memory::get_active_level_4_table;
+    use x86_64::VirtAddr;
+
     init();
+
+    let phys_mem_offset = VirtAddr::new(bootinfo.physical_memory_offset);
+    let _level_4_table = unsafe { get_active_level_4_table(phys_mem_offset) };
 
     #[cfg(test)]
     test_main();

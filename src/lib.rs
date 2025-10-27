@@ -5,9 +5,13 @@
 #![test_runner(testing::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+#[cfg(test)]
+use bootloader::{BootInfo, entry_point};
+
 pub mod gdt;
 pub mod interrupts;
 pub mod io;
+pub mod memory;
 pub mod testing;
 
 pub fn init() {
@@ -26,8 +30,9 @@ pub fn hlt_loop() -> ! {
 
 /// Entry point for `cargo test`
 #[cfg(test)]
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+entry_point!(test_kernel_main);
+#[cfg(test)]
+pub fn test_kernel_main(bootinfo: &'static BootInfo) -> ! {
     init();
     test_main();
     hlt_loop()
