@@ -1,6 +1,6 @@
-use crate::{gdt, vga_print, vga_println};
+use crate::{gdt, hlt_loop, vga_print, vga_println};
 use lazy_static::lazy_static;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 use pic8259::ChainedPics;
 use spin;
@@ -36,7 +36,7 @@ lazy_static! {
 
         idt[InterruptIndex::Timer as u8].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard as u8].set_handler_fn(keyboard_interrupt_handler);
-
+        idt.page_fault.set_handler_fn(pagefault_handler);
         idt
     };
 }
@@ -110,6 +110,19 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard as u8);
     }
+}
+
+extern "x86-interrupt" fn pagefault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+) {
+    use x86_64::registers::control::Cr2;
+
+    vga_println!("EXCEPTION: PAGE FAULT");
+    vga_println!("Accessed Address: {:?}", Cr2::read());
+    vga_println!("Error Code: {:?}", error_code);
+    vga_println!("{:#?}", stack_frame);
+    hlt_loop();
 }
 
 #[cfg(test)]
