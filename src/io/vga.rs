@@ -128,7 +128,7 @@ impl Writer {
                 self.column_position += 1;
             }
             // for non-printable byte, we print a `■` character
-            _ => self.write_byte(0xfe),
+            _ => self.write_byte(0x7e),
         }
     }
 
@@ -174,6 +174,11 @@ mod tests {
         for _ in 0..200 {
             vga_println!("many lines");
         }
+    }
+
+    #[test_case]
+    fn printing_non_printable_char() {
+        vga_println!("non-printable: \x07 \x1b \x7e \x7f");
     }
 
     #[test_case]
