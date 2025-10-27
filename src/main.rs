@@ -32,6 +32,12 @@ pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
     let phys_mem_offset = VirtAddr::new(bootinfo.physical_memory_offset);
     let _level_4_table = unsafe { get_active_level_4_table(phys_mem_offset) };
 
+    for (i, pt_entry) in _level_4_table.iter().enumerate() {
+        if !pt_entry.is_unused() { 
+            vga_println!("L4PT entry {}: {:#?}", i, pt_entry); 
+        }
+    }
+
     #[cfg(test)]
     test_main();
 
