@@ -13,6 +13,7 @@ pub mod testing;
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
+    interrupts::init_hw_interrupts();
 }
 
 #[inline(always)]
