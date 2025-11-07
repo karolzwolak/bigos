@@ -9,7 +9,7 @@ use bootloader::bootinfo::*;
 pub unsafe fn init(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
     unsafe {
         let l4table = get_active_level_4_table(phys_mem_offset);
-        return OffsetPageTable::new(l4table, phys_mem_offset)
+        OffsetPageTable::new(l4table, phys_mem_offset)
     }
     
 }
@@ -64,7 +64,7 @@ unsafe fn get_active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut Pa
     let virt = phys_mem_offset + phys.as_u64();
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 
-   return unsafe { &mut *page_table_ptr }
+    unsafe { &mut *page_table_ptr }
 }
 
 fn translate_addr_sub(addr: VirtAddr, phys_mem_offset: VirtAddr ) -> Option<PhysAddr> {
@@ -94,10 +94,10 @@ fn translate_addr_sub(addr: VirtAddr, phys_mem_offset: VirtAddr ) -> Option<Phys
             Err(FrameError::HugeFrame) => panic!("Huge pages (e.g 2MiB, 1GiB) are not supported"),
         };
     }
-    return Some(frame.start_address() + u64::from(addr.page_offset()))
+    Some(frame.start_address() + u64::from(addr.page_offset()))
 }
 
 // Limit the scope of unsafe code block
 pub unsafe fn translate_addr(addr: VirtAddr, phys_mem_offset: VirtAddr) -> Option<PhysAddr> {
-    return translate_addr_sub(addr, phys_mem_offset)
+    translate_addr_sub(addr, phys_mem_offset)
 }
