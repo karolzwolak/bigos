@@ -5,7 +5,12 @@ use x86_64::{
 };
 use bootloader::bootinfo::*;
 
-
+/// # Safety 
+/// This is unsafe because the caller must guarantee that memory at
+/// passed physical memory offset is already mapped to virtual memory.
+/// The caller must also guarantee that this function is only called once
+/// as the function returns a mutable reference and having multiple mutable references
+/// would violate Rust's aliasing rules and cause undefined behavior.
 pub unsafe fn init(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
     unsafe {
         let l4table = get_active_level_4_table(phys_mem_offset);
@@ -58,6 +63,12 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
     }
 }
 
+/// # Safety 
+/// This is unsafe because the caller must guarantee that memory at
+/// passed physical memory offset is already mapped to virtual memory.
+/// The caller must also guarantee that this function is only called once
+/// as the function returns a mutable reference and having multiple mutable references
+/// would violate Rust's aliasing rules and cause undefined behavior.
 unsafe fn get_active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut PageTable {
     let (level_4_table_frame, _flags) = Cr3::read();
     let phys = level_4_table_frame.start_address();
@@ -97,7 +108,9 @@ fn translate_addr_sub(addr: VirtAddr, phys_mem_offset: VirtAddr ) -> Option<Phys
     Some(frame.start_address() + u64::from(addr.page_offset()))
 }
 
-// Limit the scope of unsafe code block
+/// # Safety
+/// This is unsafe because the caller must guarantee that memory at
+/// passed physical memory offset is already mapped to virtual memory.
 pub unsafe fn translate_addr(addr: VirtAddr, phys_mem_offset: VirtAddr) -> Option<PhysAddr> {
     translate_addr_sub(addr, phys_mem_offset)
 }
