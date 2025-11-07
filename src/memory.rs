@@ -37,6 +37,9 @@ pub struct BootInfoFrameAllocator {
     next: usize,
 }
 impl BootInfoFrameAllocator {
+    /// # Safety
+    /// This method is unsafe because the caller must guarantee that the passed
+    /// memory map is valid. It also requires that all frames marked as `USABLE` in it are in fact unused.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
         BootInfoFrameAllocator {
             memory_map,
