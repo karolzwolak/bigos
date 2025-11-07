@@ -1,11 +1,14 @@
-use x86_64::{
-    PhysAddr, VirtAddr, 
-    registers::control::Cr3, 
-    structures::paging::{Page, PhysFrame, FrameAllocator, Mapper, Size4KiB, OffsetPageTable, PageTable, PageTableFlags}
-};
 use bootloader::bootinfo::*;
+use x86_64::{
+    PhysAddr, VirtAddr,
+    registers::control::Cr3,
+    structures::paging::{
+        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
+        Size4KiB,
+    },
+};
 
-/// # Safety 
+/// # Safety
 /// This is unsafe because the caller must guarantee that memory at
 /// passed physical memory offset is already mapped to virtual memory.
 /// The caller must also guarantee that this function is only called once
@@ -16,15 +19,16 @@ pub unsafe fn init(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
         let l4table = get_active_level_4_table(phys_mem_offset);
         OffsetPageTable::new(l4table, phys_mem_offset)
     }
-    
 }
 
-pub fn create_mapping(page: Page, mapper: &mut OffsetPageTable, frame_allocator: &mut impl FrameAllocator<Size4KiB>) {
+pub fn create_mapping(
+    page: Page,
+    mapper: &mut OffsetPageTable,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) {
     let frame = PhysFrame::containing_address(PhysAddr::new(0xb8000));
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-    let map_to_result = unsafe {
-        mapper.map_to(page, frame, flags, frame_allocator)
-    };
+    let map_to_result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
     map_to_result.expect("map_to failed").flush();
 }
 
@@ -63,7 +67,7 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
     }
 }
 
-/// # Safety 
+/// # Safety
 /// This is unsafe because the caller must guarantee that memory at
 /// passed physical memory offset is already mapped to virtual memory.
 /// The caller must also guarantee that this function is only called once
@@ -78,9 +82,9 @@ unsafe fn get_active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut Pa
     unsafe { &mut *page_table_ptr }
 }
 
-fn translate_addr_sub(addr: VirtAddr, phys_mem_offset: VirtAddr ) -> Option<PhysAddr> {
-    use x86_64::structures::paging::page_table::FrameError;
+fn translate_addr_sub(addr: VirtAddr, phys_mem_offset: VirtAddr) -> Option<PhysAddr> {
     use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::page_table::FrameError;
 
     let (level_4_table_frame, _flags) = Cr3::read();
 
@@ -96,7 +100,8 @@ fn translate_addr_sub(addr: VirtAddr, phys_mem_offset: VirtAddr ) -> Option<Phys
     for &index in &indices {
         let virt = phys_mem_offset + frame.start_address().as_u64();
         let table_ptr: *const PageTable = virt.as_ptr();
-        let table = unsafe { &*table_ptr }; 
+
+        let table = unsafe { &*table_ptr };
 
         let entry = &table[index];
         frame = match entry.frame() {

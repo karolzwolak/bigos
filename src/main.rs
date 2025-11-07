@@ -24,8 +24,8 @@ fn panic(info: &PanicInfo) -> ! {
 entry_point!(kernel_main);
 
 pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
-    use x86_64::{VirtAddr, structures::paging::{Page}};
     use rdos::memory;
+    use x86_64::{VirtAddr, structures::paging::Page};
     init();
 
     let phys_mem_offset = VirtAddr::new(bootinfo.physical_memory_offset);
@@ -37,8 +37,10 @@ pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
 
     // write the string `New!` to the screen through the new mapping
     let page_ptr: *mut u64 = page.start_address().as_mut_ptr();
-    
-    unsafe { page_ptr.offset(400).write_volatile(0xf021_f077_f065_f04e); };
+
+    unsafe {
+        page_ptr.offset(400).write_volatile(0xf021_f077_f065_f04e);
+    };
 
     #[cfg(test)]
     test_main();
