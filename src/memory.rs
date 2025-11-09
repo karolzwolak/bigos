@@ -34,9 +34,10 @@ pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
     next: usize,
 }
+
 impl BootInfoFrameAllocator {
     /// # Safety
-    /// 
+    ///
     /// - `memory_map` must be valid.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
         BootInfoFrameAllocator {
@@ -53,6 +54,7 @@ impl BootInfoFrameAllocator {
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
 }
+
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         let frame = self.usable_frames().nth(self.next);
@@ -62,6 +64,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
 }
 
 pub struct EmptyFrameAllocator;
+
 unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         None
@@ -69,8 +72,8 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
 }
 
 /// # Safety
-/// 
-/// - Memory at `phys_mem_offset` must be mapped to virtual memory. 
+///
+/// - Memory at `phys_mem_offset` must be mapped to virtual memory.
 /// - This function must only be called once to avoid multiple mutable references.
 unsafe fn get_active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut PageTable {
     let (level_4_table_frame, _flags) = Cr3::read();
@@ -80,4 +83,3 @@ unsafe fn get_active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut Pa
 
     unsafe { &mut *page_table_ptr }
 }
-

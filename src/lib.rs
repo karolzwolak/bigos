@@ -31,7 +31,9 @@ pub fn hlt_loop() -> ! {
 // Entry point for `cargo test`
 #[cfg(test)]
 entry_point!(test_kernel_main);
+
 #[cfg(test)]
+/// Entry point for the `cargo test`
 pub fn test_kernel_main(_bootinfo: &'static BootInfo) -> ! {
     init();
     test_main();

@@ -42,5 +42,4 @@ mod tests {
     fn main() {
         serial_println!("hello from main");
     }
-    
 }
