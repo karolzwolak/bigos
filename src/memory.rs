@@ -14,7 +14,7 @@ use x86_64::{
 /// - This function must only be called once to avoid multiple mutable references.
 pub unsafe fn init(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
     unsafe {
-        let l4table = get_active_level_4_table(phys_mem_offset);
+        let l4table = active_level_4_table(phys_mem_offset);
         OffsetPageTable::new(l4table, phys_mem_offset)
     }
 }
@@ -75,7 +75,7 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
 ///
 /// - Memory at `phys_mem_offset` must be mapped to virtual memory.
 /// - This function must only be called once to avoid multiple mutable references.
-unsafe fn get_active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut PageTable {
+unsafe fn active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut PageTable {
     let (level_4_table_frame, _flags) = Cr3::read();
     let phys = level_4_table_frame.start_address();
     let virt = phys_mem_offset + phys.as_u64();

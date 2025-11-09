@@ -6,14 +6,12 @@
 
 use bootloader::{BootInfo, entry_point};
 use core::{panic::PanicInfo, sync::atomic::AtomicPtr};
-use rdos::{hlt_loop, init, memory, serial_println, testing::QemuExitCode, vga_println};
+use rdos::{hlt_loop, init, memory, vga_println};
 use x86_64::{VirtAddr, structures::paging::Page};
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    serial_println!("[ok]");
-    rdos::testing::exit_qemu(QemuExitCode::Success);
-    hlt_loop()
+fn panic(info: &PanicInfo) -> ! {
+    rdos::testing::test_panic_handler(info)
 }
 
 static BOOT_INFO: AtomicPtr<BootInfo> = AtomicPtr::new(core::ptr::null_mut());
@@ -32,7 +30,7 @@ pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
         bootinfo as *const _ as *mut _,
         core::sync::atomic::Ordering::SeqCst,
     );
-
+    
     test_main();
 
     vga_println!("Hello, World!");
