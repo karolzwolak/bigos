@@ -1,5 +1,5 @@
 [package]
-name = "rdos"
+name = "bigos"
 version = "0.1.0"
 edition = "2024"
 
@@ -22,7 +22,7 @@ features = ["spin_no_std"]
 panic = "abort"
 
 [[bin]]
-name = "rdos"
+name = "bigos"
 test = true
 bench = false
 

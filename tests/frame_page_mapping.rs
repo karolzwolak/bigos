@@ -1,15 +1,15 @@
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
-#![test_runner(rdos::testing::test_runner)]
+#![test_runner(bigos::testing::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
-use bootloader::{BootInfo, entry_point};
-use core::panic::PanicInfo;
-use rdos::{
+use bigos::{
     hlt_loop, init,
     testing::{QemuExitCode, exit_qemu},
 };
+use bootloader::{BootInfo, entry_point};
+use core::panic::PanicInfo;
 use x86_64::{
     PhysAddr,
     structures::paging::{
@@ -19,13 +19,13 @@ use x86_64::{
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    rdos::testing::test_panic_handler(info)
+    bigos::testing::test_panic_handler(info)
 }
 
 entry_point!(kernel_main);
 
 pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
-    use rdos::memory;
+    use bigos::memory;
     use x86_64::{VirtAddr, structures::paging::Page};
     init();
 
@@ -52,7 +52,7 @@ fn create_mapping(
     mapper: &mut OffsetPageTable,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) {
-    let frame = PhysFrame::containing_address(PhysAddr::new(rdos::io::vga::BUFFER_ADDR as u64));
+    let frame = PhysFrame::containing_address(PhysAddr::new(bigos::io::vga::BUFFER_ADDR as u64));
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
     // this technically breaks the safety contract of `map_to` but it should be fine for this test
     // we might break rust aliasing rules because we are creating a new mutable reference to the VGA buffer

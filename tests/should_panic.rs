@@ -1,11 +1,11 @@
 #![no_std]
 #![no_main]
 
-use core::panic::PanicInfo;
-use rdos::{
+use bigos::{
     hlt_loop, serial_print, serial_println,
     testing::{QemuExitCode, exit_qemu},
 };
+use core::panic::PanicInfo;
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
