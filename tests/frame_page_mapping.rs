@@ -30,7 +30,7 @@ pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
     init();
 
     let phys_mem_offset = VirtAddr::new(bootinfo.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut mapper = unsafe { memory::init_offset_page_table(phys_mem_offset) };
     let mut frame_allocator = unsafe { memory::BootInfoFrameAllocator::init(&bootinfo.memory_map) };
 
     let page = Page::containing_address(VirtAddr::new(0xdeadbeef000));

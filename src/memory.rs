@@ -5,18 +5,24 @@ use x86_64::{
     structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
 };
 
+pub const PAGE_SIZE: usize = 4096;
+
+/// Initialize a new OffsetPageTable.
+///
 /// # Safety
 ///
 /// - Memory at `phys_mem_offset` must be mapped to virtual memory.
 /// - This function must only be called once to avoid multiple mutable references.
-pub unsafe fn init(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
+pub unsafe fn init_offset_page_table(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
     unsafe {
-        let l4table = active_level_4_table(phys_mem_offset);
+        let l4_table = active_level_4_table(phys_mem_offset);
 
-        OffsetPageTable::new(l4table, phys_mem_offset)
+        OffsetPageTable::new(l4_table, phys_mem_offset)
     }
 }
 
+/// Returns a mutable reference to the active level 4 table.
+///
 /// # Safety
 ///
 /// - Memory at `phys_mem_offset` must be mapped to virtual memory.
@@ -47,11 +53,12 @@ impl BootInfoFrameAllocator {
         }
     }
 
+    /// Returns an iterator over the usable frames specified in the memory map.
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         let regions = self.memory_map.iter();
         let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
         let addr_ranges = usable_regions.map(|r| r.range.start_addr()..r.range.end_addr());
-        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
+        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(PAGE_SIZE));
 
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
