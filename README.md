@@ -1,4 +1,4 @@
-bigos (Really dumb OS)
+bigos — barely implemented general operating system
 
 [bootimage]: https://crates.io/crates/bootimage
 
