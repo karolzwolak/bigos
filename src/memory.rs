@@ -30,6 +30,7 @@ unsafe fn active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut PageTa
     unsafe { &mut *page_table_ptr }
 }
 
+/// Provides usable frames from the bootloader's memory map.
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
     next: usize,
