@@ -9,11 +9,9 @@ use x86_64::{
 };
 
 /// # Safety
-/// This is unsafe because the caller must guarantee that memory at
-/// passed physical memory offset is already mapped to virtual memory.
-/// The caller must also guarantee that this function is only called once
-/// as the function returns a mutable reference and having multiple mutable references
-/// would violate Rust's aliasing rules and cause undefined behavior.
+///
+/// - Memory at `phys_mem_offset` must be mapped to virtual memory.
+/// - This function must only be called once to avoid multiple mutable references.
 pub unsafe fn init(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
     unsafe {
         let l4table = get_active_level_4_table(phys_mem_offset);
@@ -38,8 +36,8 @@ pub struct BootInfoFrameAllocator {
 }
 impl BootInfoFrameAllocator {
     /// # Safety
-    /// This method is unsafe because the caller must guarantee that the passed
-    /// memory map is valid. It also requires that all frames marked as `USABLE` in it are in fact unused.
+    /// 
+    /// - `memory_map` must be valid.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
         BootInfoFrameAllocator {
             memory_map,
@@ -71,11 +69,9 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
 }
 
 /// # Safety
-/// This is unsafe because the caller must guarantee that memory at
-/// passed physical memory offset is already mapped to virtual memory.
-/// The caller must also guarantee that this function is only called once
-/// as the function returns a mutable reference and having multiple mutable references
-/// would violate Rust's aliasing rules and cause undefined behavior.
+/// 
+/// - Memory at `phys_mem_offset` must be mapped to virtual memory. 
+/// - This function must only be called once to avoid multiple mutable references.
 unsafe fn get_active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut PageTable {
     let (level_4_table_frame, _flags) = Cr3::read();
     let phys = level_4_table_frame.start_address();
@@ -85,40 +81,3 @@ unsafe fn get_active_level_4_table(phys_mem_offset: VirtAddr) -> &'static mut Pa
     unsafe { &mut *page_table_ptr }
 }
 
-fn translate_addr_sub(addr: VirtAddr, phys_mem_offset: VirtAddr) -> Option<PhysAddr> {
-    use x86_64::registers::control::Cr3;
-    use x86_64::structures::paging::page_table::FrameError;
-
-    let (level_4_table_frame, _flags) = Cr3::read();
-
-    let indices = [
-        addr.p4_index(),
-        addr.p3_index(),
-        addr.p2_index(),
-        addr.p1_index(),
-    ];
-
-    let mut frame = level_4_table_frame;
-
-    for &index in &indices {
-        let virt = phys_mem_offset + frame.start_address().as_u64();
-        let table_ptr: *const PageTable = virt.as_ptr();
-
-        let table = unsafe { &*table_ptr };
-
-        let entry = &table[index];
-        frame = match entry.frame() {
-            Ok(frame) => frame,
-            Err(FrameError::FrameNotPresent) => return None,
-            Err(FrameError::HugeFrame) => panic!("Huge pages (e.g 2MiB, 1GiB) are not supported"),
-        };
-    }
-    Some(frame.start_address() + u64::from(addr.page_offset()))
-}
-
-/// # Safety
-/// This is unsafe because the caller must guarantee that memory at
-/// passed physical memory offset is already mapped to virtual memory.
-pub unsafe fn translate_addr(addr: VirtAddr, phys_mem_offset: VirtAddr) -> Option<PhysAddr> {
-    translate_addr_sub(addr, phys_mem_offset)
-}
