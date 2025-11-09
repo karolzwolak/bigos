@@ -1,16 +1,16 @@
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
-#![test_runner(rdos::testing::test_runner)]
+#![test_runner(bigos::testing::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
-use bootloader::{BootInfo, entry_point};
-use core::panic::PanicInfo;
-use rdos::{
+use bigos::{
     hlt_loop, init,
     memory::{self, BootInfoFrameAllocator},
     vga_println,
 };
+use bootloader::{BootInfo, entry_point};
+use core::panic::PanicInfo;
 use x86_64::VirtAddr;
 
 #[cfg(not(test))]
@@ -23,7 +23,7 @@ fn panic(info: &PanicInfo) -> ! {
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    rdos::testing::test_panic_handler(info)
+    bigos::testing::test_panic_handler(info)
 }
 
 entry_point!(kernel_main);
@@ -45,7 +45,7 @@ pub fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use rdos::*;
+    use bigos::*;
 
     #[test_case]
     fn main() {

@@ -1,4 +1,4 @@
-RDOS (Really dumb OS)
+bigos (Really dumb OS)
 
 [bootimage]: https://crates.io/crates/bootimage
 
@@ -36,4 +36,4 @@ If you want to skip hooks, use `git commit --no-verify` or `git push --no-verify
 2. Running qemu explicitly:
 
 - build the kernel: `cargo build`
-- run qemu: `qemu-system-x86_64 -drive format=raw,file=target/x86_64-rdos/debug/bootimage-rdos.bin`
+- run qemu: `qemu-system-x86_64 -drive format=raw,file=target/x86_64-bigos/debug/bootimage-bigos.bin`

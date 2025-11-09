@@ -2,10 +2,10 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+use bigos::testing::{QemuExitCode, exit_qemu};
+use bigos::{hlt_loop, serial_print, serial_println};
 use core::panic::PanicInfo;
 use lazy_static::lazy_static;
-use rdos::testing::{QemuExitCode, exit_qemu};
-use rdos::{hlt_loop, serial_print, serial_println};
 use x86_64::structures::idt::InterruptDescriptorTable;
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -15,7 +15,7 @@ lazy_static! {
         unsafe {
             idt.double_fault
                 .set_handler_fn(test_double_fault_handler)
-                .set_stack_index(rdos::gdt::DOUBLE_FAULT_IST_INDEX);
+                .set_stack_index(bigos::gdt::DOUBLE_FAULT_IST_INDEX);
         }
 
         idt
@@ -26,7 +26,7 @@ lazy_static! {
 pub extern "C" fn _start() -> ! {
     serial_print!("stack_overflow::stack_overflow...\t");
 
-    rdos::gdt::init();
+    bigos::gdt::init();
     init_test_idt();
 
     // trigger a stack overflow
@@ -37,7 +37,7 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    rdos::testing::test_panic_handler(info)
+    bigos::testing::test_panic_handler(info)
 }
 
 pub fn init_test_idt() {
