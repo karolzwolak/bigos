@@ -72,9 +72,9 @@ struct ScreenChar {
     color_code: ColorCode,
 }
 
-const BUFFER_HEIGHT: usize = 25;
-const BUFFER_WIDTH: usize = 80;
-const BUFFER_ADDR: usize = 0xb8000;
+pub const BUFFER_HEIGHT: usize = 25;
+pub const BUFFER_WIDTH: usize = 80;
+pub const BUFFER_ADDR: usize = 0xb8000;
 
 #[repr(transparent)]
 struct Buffer {

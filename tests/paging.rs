@@ -10,6 +10,12 @@ use rdos::{
     hlt_loop, init,
     testing::{QemuExitCode, exit_qemu},
 };
+use x86_64::{
+    PhysAddr,
+    structures::paging::{
+        FrameAllocator, Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame, Size4KiB,
+    },
+};
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -28,7 +34,7 @@ pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
     let mut frame_allocator = unsafe { memory::BootInfoFrameAllocator::init(&bootinfo.memory_map) };
 
     let page = Page::containing_address(VirtAddr::new(0xdeadbeef000));
-    memory::create_mapping(page, &mut mapper, &mut frame_allocator);
+    create_mapping(page, &mut mapper, &mut frame_allocator);
 
     // write the string `New!` to the screen through the new mapping
     let page_ptr: *mut u64 = page.start_address().as_mut_ptr();
@@ -39,4 +45,17 @@ pub fn kernel_main(bootinfo: &'static BootInfo) -> ! {
 
     exit_qemu(QemuExitCode::Success);
     hlt_loop()
+}
+
+fn create_mapping(
+    page: Page,
+    mapper: &mut OffsetPageTable,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) {
+    let frame = PhysFrame::containing_address(PhysAddr::new(rdos::io::vga::BUFFER_ADDR as u64));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    // this technically breaks the safety contract of `map_to` but it should be fine for this test
+    // we might break rust aliasing rules because we are creating a new mutable reference to the VGA buffer
+    let map_to_result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
+    map_to_result.expect("map_to failed").flush();
 }

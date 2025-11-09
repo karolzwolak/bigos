@@ -2,10 +2,7 @@ use bootloader::bootinfo::*;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
-    structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
-        Size4KiB,
-    },
+    structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
 };
 
 /// # Safety
@@ -17,17 +14,6 @@ pub unsafe fn init(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
         let l4table = active_level_4_table(phys_mem_offset);
         OffsetPageTable::new(l4table, phys_mem_offset)
     }
-}
-
-pub fn create_mapping(
-    page: Page,
-    mapper: &mut OffsetPageTable,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-) {
-    let frame = PhysFrame::containing_address(PhysAddr::new(0xb8000));
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-    let map_to_result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
-    map_to_result.expect("map_to failed").flush();
 }
 
 pub struct BootInfoFrameAllocator {
