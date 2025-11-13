@@ -5,13 +5,14 @@
 #![reexport_test_harness_main = "test_main"]
 
 use bigos::{
-    hlt_loop, init,
+    allocator, hlt_loop, init,
     memory::{self, BootInfoFrameAllocator},
     vga_println,
 };
 use bootloader::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 use x86_64::VirtAddr;
+extern crate alloc;
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -32,8 +33,11 @@ pub fn kernel_main(boot_info: &'static BootInfo) -> ! {
     init();
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let _mapper = unsafe { memory::init_offset_page_table(phys_mem_offset) };
-    let _frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    let mut _mapper = unsafe { memory::init_offset_page_table(phys_mem_offset) };
+    let mut _frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+
+    allocator::initialize_heap(&mut _mapper, &mut _frame_allocator)
+        .expect("Error: failed to initialize heap");
 
     #[cfg(test)]
     test_main();
