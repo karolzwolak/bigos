@@ -5,6 +5,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 extern crate alloc;
+use bigos::allocator::HEAP_SIZE;
 use bootloader::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 
@@ -49,4 +50,15 @@ fn large_vector() {
         vec.push(i);
     }
     assert_eq!(vec.iter().sum::<u64>(), (n - 1) * n / 2);
+}
+
+#[test_case]
+fn large_num_of_boxes() {
+    use alloc::boxed::Box;
+    let long = Box::new(1);
+    for i in 0..HEAP_SIZE - 1 {
+        let x = Box::new(i);
+        assert_eq!(*x, i);
+    }
+    assert_eq!(*long, 1);
 }

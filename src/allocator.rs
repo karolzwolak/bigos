@@ -1,5 +1,9 @@
 extern crate alloc;
-use linked_list_allocator::LockedHeap;
+use alloc::alloc::{GlobalAlloc, Layout};
+use core::{
+    mem::{align_of, size_of},
+    ptr::NonNull,
+};
 use x86_64::{
     VirtAddr,
     structures::paging::{
@@ -8,7 +12,7 @@ use x86_64::{
 };
 
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
 
 pub const HEAP_POINTER: usize = 0x222222220000;
 pub const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
@@ -38,9 +42,123 @@ pub fn initialize_heap(
     }
 
     unsafe {
-        // init() method already tries to write to our heap, so ensure this is done AFTER mapping heap's pages
-        ALLOCATOR.lock().init(HEAP_POINTER, HEAP_SIZE);
+        // init_fallback() already tries to write to our heap, so ensure this is done AFTER mapping heap's pages
+        ALLOCATOR.lock().init_fallback(HEAP_POINTER, HEAP_SIZE);
     }
 
     Ok(())
+}
+
+// Create a wrapper around spin::Mutex because it doesn't support templating
+pub struct Locked<T> {
+    inner: spin::Mutex<T>,
+}
+
+impl<T> Locked<T> {
+    pub const fn new(inner: T) -> Self {
+        Self {
+            inner: spin::Mutex::new(inner),
+        }
+    }
+
+    pub fn lock(&self) -> spin::MutexGuard<'_, T> {
+        self.inner.lock()
+    }
+}
+
+struct AllocatorListNode {
+    next: Option<&'static mut AllocatorListNode>,
+}
+
+// These fixed block sizes:
+// 1. ensure alignment (kinda)
+// 2. reduce allocated memory waste to 50% in worst case and ~25% in average
+const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+
+pub struct FixedSizeBlockAllocator {
+    lists: [Option<&'static mut AllocatorListNode>; BLOCK_SIZES.len()],
+    // We will use a linked list allocator as fallback for large allocations
+    // These are rare so the linked list will stay small (presumably)
+    // Also, it merges free memory blocks automatically
+    fallback_allocator: linked_list_allocator::Heap,
+}
+
+impl FixedSizeBlockAllocator {
+    pub const fn new() -> Self {
+        // We initialize the
+        const EMPTY: Option<&'static mut AllocatorListNode> = None;
+        Self {
+            lists: [EMPTY; BLOCK_SIZES.len()],
+            fallback_allocator: linked_list_allocator::Heap::empty(),
+        }
+    }
+    // SAFETY: Caller must ensure that the given heap bounds are valid and unused
+    pub unsafe fn init_fallback(&mut self, heap_start: usize, heap_size: usize) {
+        unsafe {
+            self.fallback_allocator.init(heap_start, heap_size);
+        }
+    }
+
+    fn fallback_alloc(&mut self, layout: Layout) -> *mut u8 {
+        match self.fallback_allocator.allocate_first_fit(layout) {
+            Ok(ptr) => ptr.as_ptr(),
+            Err(_) => core::ptr::null_mut(),
+        }
+    }
+}
+
+fn list_index(layout: &Layout) -> Option<usize> {
+    let required_block_size = layout.size().max(layout.align());
+    BLOCK_SIZES.iter().position(|&s| s >= required_block_size)
+}
+
+unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let mut allocator = self.lock();
+        match list_index(&layout) {
+            Some(index) => {
+                match allocator.lists[index].take() {
+                    Some(node) => {
+                        allocator.lists[index] = node.next.take();
+                        node as *mut AllocatorListNode as *mut u8
+                    }
+                    None => {
+                        // no block exists in list => allocate new block
+                        let block_size = BLOCK_SIZES[index];
+                        // only works if all block sizes are a power of 2
+                        let block_align = block_size;
+                        let layout =
+                            core::alloc::Layout::from_size_align(block_size, block_align).unwrap();
+                        allocator.fallback_alloc(layout)
+                    }
+                }
+            }
+            None => allocator.fallback_alloc(layout),
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: alloc::alloc::Layout) {
+        let mut allocator = self.lock();
+        match list_index(&layout) {
+            Some(index) => {
+                let new_node = AllocatorListNode {
+                    next: allocator.lists[index].take(),
+                };
+                // Make sure the block has size and alignment required for storing node
+                assert!(size_of::<AllocatorListNode>() <= BLOCK_SIZES[index]);
+                assert!(align_of::<AllocatorListNode>() <= BLOCK_SIZES[index]);
+                let new_node_ptr = ptr as *mut AllocatorListNode;
+                unsafe {
+                    new_node_ptr.write(new_node);
+                    allocator.lists[index] = Some(&mut *new_node_ptr);
+                }
+            }
+            None => {
+                let ptr = NonNull::new(ptr).unwrap();
+                unsafe {
+                    allocator.fallback_allocator.deallocate(ptr, layout);
+                }
+            }
+        }
+    }
 }
