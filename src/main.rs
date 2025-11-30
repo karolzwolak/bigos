@@ -33,11 +33,11 @@ pub fn kernel_main(boot_info: &'static BootInfo) -> ! {
     init();
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut _mapper = unsafe { memory::init_offset_page_table(phys_mem_offset) };
-    let mut _frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    let mut mapper = unsafe { memory::init_offset_page_table(phys_mem_offset) };
+    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
 
-    allocator::initialize_heap(&mut _mapper, &mut _frame_allocator)
-        .expect("Error: failed to initialize heap");
+    allocator::initialize_heap(&mut mapper, &mut frame_allocator)
+        .expect("failed to initialize heap");
 
     #[cfg(test)]
     test_main();
