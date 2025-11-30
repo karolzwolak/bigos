@@ -62,3 +62,12 @@ fn large_num_of_boxes() {
     }
     assert_eq!(*long, 1);
 }
+
+#[test_case]
+fn no_leak() {
+    let max_size = HEAP_SIZE_BYTES;
+    let alloc_size = max_size / 2;
+    for _ in 0..1000 {
+        let _ = Vec::<u8>::with_capacity(alloc_size);
+    }
+}
