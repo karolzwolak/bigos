@@ -83,16 +83,25 @@ pub struct FixedSizeBlockAllocator {
     fallback_allocator: linked_list_allocator::Heap,
 }
 
+impl Default for FixedSizeBlockAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FixedSizeBlockAllocator {
     pub const fn new() -> Self {
-        // We initialize the
+        // We can't initialize with None because the compiler requires our type to implement Copy (it doesn't)
         const EMPTY: Option<&'static mut AllocatorListNode> = None;
         Self {
             lists: [EMPTY; BLOCK_SIZES.len()],
             fallback_allocator: linked_list_allocator::Heap::empty(),
         }
     }
-    // SAFETY: Caller must ensure that the given heap bounds are valid and unused
+
+    /// # Safety
+    /// 
+    /// Caller must ensure that the given heap bounds are valid and unused
     pub unsafe fn init_fallback(&mut self, heap_start: usize, heap_size: usize) {
         unsafe {
             self.fallback_allocator.init(heap_start, heap_size);
