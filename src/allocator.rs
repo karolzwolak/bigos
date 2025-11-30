@@ -39,7 +39,7 @@ pub fn initialize_heap(
     }
 
     unsafe {
-        // Init_fallback() already tries to write to our heap, so ensure this is done AFTER mapping heap's pages
+        // Init_fallback() already tries to write to our heap, so ensure this is done AFTER mapping heap's pages.
         ALLOCATOR
             .lock()
             .init_fallback_alloc(HEAP_POINTER, HEAP_SIZE_BYTES);
@@ -48,7 +48,7 @@ pub fn initialize_heap(
     Ok(())
 }
 
-/// Wrapper around spin::Mutex to implement GlobalAlloc.
+/// Wrapper around spin::Mutex to implement GlobalAlloc on a foreign type.
 pub struct Locked<T> {
     inner: spin::Mutex<T>,
 }
@@ -87,7 +87,7 @@ impl Default for FixedSizeBlockAllocator {
 
 impl FixedSizeBlockAllocator {
     pub const fn new() -> Self {
-        // needed because static mut ref doesn't implement Clone
+        // Needed because static mut ref doesn't implement Clone.
         const EMPTY: Option<&'static mut AllocatorListNode> = None;
         Self {
             lists: [EMPTY; BLOCK_SIZES.len()],
@@ -127,7 +127,7 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
                         allocator.lists[index] = node.next.take();
                         node as *mut AllocatorListNode as *mut u8
                     }
-                    // allocate a new block
+                    // Allocate a new block.
                     None => {
                         let block_size = BLOCK_SIZES[index];
                         let block_align = block_size;
