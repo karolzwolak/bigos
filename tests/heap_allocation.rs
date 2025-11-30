@@ -5,6 +5,8 @@
 #![reexport_test_harness_main = "test_main"]
 
 extern crate alloc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use bigos::{allocator::HEAP_SIZE_BYTES, hlt_loop};
 use bootloader::{BootInfo, entry_point};
 use core::panic::PanicInfo;
@@ -34,7 +36,6 @@ fn main(_bootinfo: &'static BootInfo) -> ! {
 
 #[test_case]
 fn simple_allocation() {
-    use alloc::boxed::Box;
     let heap_value = Box::new(42);
     let heap_value_2 = Box::new(1000);
     assert_eq!(*heap_value, 42);
@@ -43,7 +44,6 @@ fn simple_allocation() {
 
 #[test_case]
 fn large_vector() {
-    use alloc::vec::Vec;
     let n = 1000;
     let mut vec = Vec::new();
     for i in 0..n {
