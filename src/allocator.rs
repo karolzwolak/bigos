@@ -42,14 +42,16 @@ pub fn initialize_heap(
     }
 
     unsafe {
-        // init_fallback() already tries to write to our heap, so ensure this is done AFTER mapping heap's pages
-        ALLOCATOR.lock().init_fallback(HEAP_POINTER, HEAP_SIZE);
+        // Init_fallback() already tries to write to our heap, so ensure this is done AFTER mapping heap's pages
+        ALLOCATOR
+            .lock()
+            .init_fallback_alloc(HEAP_POINTER, HEAP_SIZE);
     }
 
     Ok(())
 }
 
-// Create a wrapper around spin::Mutex because it doesn't support templating
+/// Wrapper around spin::Mutex to implement GlobalAlloc.
 pub struct Locked<T> {
     inner: spin::Mutex<T>,
 }
@@ -70,16 +72,13 @@ struct AllocatorListNode {
     next: Option<&'static mut AllocatorListNode>,
 }
 
-// These fixed block sizes:
-// 1. ensure alignment (kinda)
-// 2. reduce allocated memory waste to 50% in worst case and ~25% in average
+/// Block sizes used by the fixed-size block allocator.
+/// Also used as alignment for each block so they need to be powers of two.
 const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 pub struct FixedSizeBlockAllocator {
     lists: [Option<&'static mut AllocatorListNode>; BLOCK_SIZES.len()],
-    // We will use a linked list allocator as fallback for large allocations
-    // These are rare so the linked list will stay small (presumably)
-    // Also, it merges free memory blocks automatically
+    /// Fallback allocator for large allocations.
     fallback_allocator: linked_list_allocator::Heap,
 }
 
@@ -91,7 +90,7 @@ impl Default for FixedSizeBlockAllocator {
 
 impl FixedSizeBlockAllocator {
     pub const fn new() -> Self {
-        // We can't initialize with None because the compiler requires our type to implement Copy (it doesn't)
+        // needed because static mut ref doesn't implement Clone
         const EMPTY: Option<&'static mut AllocatorListNode> = None;
         Self {
             lists: [EMPTY; BLOCK_SIZES.len()],
@@ -102,7 +101,7 @@ impl FixedSizeBlockAllocator {
     /// # Safety
     ///
     /// Caller must ensure that the given heap bounds are valid and unused
-    pub unsafe fn init_fallback(&mut self, heap_start: usize, heap_size: usize) {
+    pub unsafe fn init_fallback_alloc(&mut self, heap_start: usize, heap_size: usize) {
         unsafe {
             self.fallback_allocator.init(heap_start, heap_size);
         }
