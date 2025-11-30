@@ -120,25 +120,24 @@ fn list_index(layout: &Layout) -> Option<usize> {
 unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut allocator = self.lock();
-        match list_index(&layout) {
-            Some(index) => {
-                match allocator.lists[index].take() {
-                    Some(node) => {
-                        allocator.lists[index] = node.next.take();
-                        node as *mut AllocatorListNode as *mut u8
-                    }
-                    // Allocate a new block.
-                    None => {
-                        let block_size = BLOCK_SIZES[index];
-                        let block_align = block_size;
-                        debug_assert!(block_align.is_power_of_two());
-                        let layout =
-                            core::alloc::Layout::from_size_align(block_size, block_align).unwrap();
-                        allocator.fallback_alloc(layout)
-                    }
+        if let Some(index) = list_index(&layout) {
+            match allocator.lists[index].take() {
+                Some(node) => {
+                    allocator.lists[index] = node.next.take();
+                    node as *mut AllocatorListNode as *mut u8
+                }
+                // Allocate a new block.
+                None => {
+                    let block_size = BLOCK_SIZES[index];
+                    let block_align = block_size;
+                    debug_assert!(block_align.is_power_of_two());
+                    let layout =
+                        core::alloc::Layout::from_size_align(block_size, block_align).unwrap();
+                    allocator.fallback_alloc(layout)
                 }
             }
-            None => allocator.fallback_alloc(layout),
+        } else {
+            allocator.fallback_alloc(layout)
         }
     }
 
