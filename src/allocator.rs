@@ -21,15 +21,12 @@ pub fn initialize_heap(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_alloc: &mut impl FrameAllocator<Size4KiB>,
 ) -> Result<(), MapToError<Size4KiB>> {
-    // We borrow the mapper and frame allocator initialized in kernel_main to map the whole heap
-    // read: all pages that cover the heap region
-    let page_range = {
-        let heap_ptr = VirtAddr::new(HEAP_POINTER as u64);
-        let heap_end = heap_ptr + HEAP_SIZE as u64 - 1;
-        let heap_first_page: Page<Size4KiB> = Page::containing_address(heap_ptr);
-        let heap_last_page: Page<Size4KiB> = Page::containing_address(heap_end);
-        Page::range_inclusive(heap_first_page, heap_last_page)
-    };
+    let heap_ptr = VirtAddr::new(HEAP_POINTER as u64);
+    let heap_end = heap_ptr + HEAP_SIZE as u64 - 1;
+    let heap_first_page = Page::containing_address(heap_ptr);
+    let heap_last_page = Page::containing_address(heap_end);
+
+    let page_range = Page::range_inclusive(heap_first_page, heap_last_page);
 
     for page in page_range {
         let frame = frame_alloc
@@ -130,11 +127,11 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
                         allocator.lists[index] = node.next.take();
                         node as *mut AllocatorListNode as *mut u8
                     }
+                    // allocate a new block
                     None => {
-                        // no block exists in list => allocate new block
                         let block_size = BLOCK_SIZES[index];
-                        // only works if all block sizes are a power of 2
                         let block_align = block_size;
+                        debug_assert!(block_align.is_power_of_two());
                         let layout =
                             core::alloc::Layout::from_size_align(block_size, block_align).unwrap();
                         allocator.fallback_alloc(layout)
