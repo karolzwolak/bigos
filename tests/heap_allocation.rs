@@ -5,7 +5,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 extern crate alloc;
-use bigos::allocator::HEAP_SIZE;
+use bigos::{allocator::HEAP_SIZE, hlt_loop};
 use bootloader::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 
@@ -29,7 +29,7 @@ fn main(_bootinfo: &'static BootInfo) -> ! {
         .expect("Error: failed to initialize heap");
 
     test_main();
-    loop {}
+    hlt_loop();
 }
 
 #[test_case]

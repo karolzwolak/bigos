@@ -100,7 +100,7 @@ impl FixedSizeBlockAllocator {
     }
 
     /// # Safety
-    /// 
+    ///
     /// Caller must ensure that the given heap bounds are valid and unused
     pub unsafe fn init_fallback(&mut self, heap_start: usize, heap_size: usize) {
         unsafe {
