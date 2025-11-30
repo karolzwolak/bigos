@@ -8,6 +8,7 @@
 #[cfg(test)]
 use bootloader::{BootInfo, entry_point};
 
+pub mod allocator;
 pub mod gdt;
 pub mod interrupts;
 pub mod io;
