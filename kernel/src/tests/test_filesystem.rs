@@ -44,13 +44,15 @@ extern "C" fn kmain() -> ! {
         .expect("no memory map")
         .entries();
     kernel::testing::init_with_heap(hhdm_offset, memory_map);
+
+    let image = create_fat32_image();
+    init_filesystem(&*image).expect("filesystem init failed");
+
     kernel::testing::run_all_tests()
 }
 
 #[test_case]
 fn test_init_and_list() {
-    let image = create_fat32_image();
-    init_filesystem(&*image).expect("filesystem init failed");
     let entries = get_sirius()
         .list_directory("/")
         .expect("list_directory failed");
