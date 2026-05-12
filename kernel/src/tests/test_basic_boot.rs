@@ -10,6 +10,7 @@ use kernel::{
 };
 use limine::BaseRevision;
 use limine::request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker};
+use x86_64::instructions::interrupts;
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -42,10 +43,22 @@ extern "C" fn kmain() -> ! {
         .entries();
 
     kernel::testing::init_with_heap(hhdm_offset, memory_map);
-    test_runner(&[&test_serial_print as &dyn Testable]);
+    test_runner(&[
+        &test_serial_print as &dyn Testable,
+        &test_true_assertion,
+        &test_breakpoint_exception,
+    ]);
 }
 
 fn test_serial_print() {
     serial_print!("test_serial_print output");
     serial_println!();
+}
+
+fn test_true_assertion() {
+    assert_eq!(1, 1);
+}
+
+fn test_breakpoint_exception() {
+    interrupts::int3();
 }
