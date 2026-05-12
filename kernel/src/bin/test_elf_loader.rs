@@ -30,7 +30,13 @@ static _START: RequestsStartMarker = RequestsStartMarker::new();
 #[unsafe(link_section = ".requests_end_marker")]
 static _END: RequestsEndMarker = RequestsEndMarker::new();
 
+// During static analysis (clippy) the user binary may not be built yet.
+// Clippy passes `--cfg clippy` to rustc, so we fall back to empty bytes which
+// is enough to satisfy the type system; the real binary is required at runtime.
+#[cfg(not(clippy))]
 const FIRST_ELF: &[u8] = include_bytes!("../../../target/user/programs/first/first");
+#[cfg(clippy)]
+const FIRST_ELF: &[u8] = &[];
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
