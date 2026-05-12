@@ -4,18 +4,18 @@ pre-commit:
     - run: "! git diff --quiet"
   commands:
     fmt:
-      run: cargo fmt
+      run: cargo xtask fmt
       stage_fixed: true
     fix-lints:
-      run: cargo clippy --fix --allow-dirty --allow-staged -- -D warnings
+      run: cargo xtask clippy --fix --allow-dirty --allow-staged
       stage_fixed: true
 
 pre-push:
   parallel: true
   commands:
     test:
-      run: cargo test
+      run: cargo xtask test
     check-fmt:
-      run: cargo fmt --check
+      run: cargo xtask fmt --check
     check-clippy:
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo xtask clippy

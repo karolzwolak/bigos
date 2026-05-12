@@ -1,20 +1,30 @@
-bigos — barely implemented general operating system
+# BigOS
 
-[bootimage]: https://crates.io/crates/bootimage
+BigOS — barely implemented general operating system
 
-# Required tools
+## Development / running
 
-You have to install the following tools yourself:
+### Prerequisites
 
-- qemu
+- QEMU
+
 - llvm tools
-- [`bootimage`][bootimage] tool: `cargo install bootimage`
 
-If you are on Debian system, install the required packages with:
+- rustc 1.96.0-nightly
 
-```sh
-sudo apt-get install -y qemu-system-x86 llvm-14-tools
-```
+### Instructions
+
+Install the required packages for your distro:
+
+| Distro          | Command                                              |
+| --------------- | ---------------------------------------------------- |
+| Debian / Ubuntu | `sudo apt install qemu-system-x86 llvm ovmf`         |
+| Arch Linux      | `sudo pacman -S qemu-system-x86 llvm edk2-ovmf`      |
+| Fedora / RHEL   | `sudo dnf install qemu-system-x86 llvm edk2-ovmf`    |
+| openSUSE        | `sudo zypper install qemu-x86 llvm qemu-ovmf-x86_64` |
+
+This project uses `cargo xtask` (or shorter `cargo x`) for development tasks.
+Run `cargo xtask --help` to see the available commands.
 
 ## Optional tools
 
@@ -26,14 +36,3 @@ To install the hooks:
 - run `lefthook install` in the project root
 
 If you want to skip hooks, use `git commit --no-verify` or `git push --no-verify`
-
-# Running
-
-1. Using [`bootimage runner`][bootimage]:
-
-- build and run the kernel: `cargo run`
-
-2. Running qemu explicitly:
-
-- build the kernel: `cargo build`
-- run qemu: `qemu-system-x86_64 -drive format=raw,file=target/x86_64-bigos/debug/bootimage-bigos.bin`
