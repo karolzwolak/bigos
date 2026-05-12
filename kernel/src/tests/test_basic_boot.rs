@@ -53,11 +53,6 @@ fn test_serial_print() {
 }
 
 #[test_case]
-fn test_true_assertion() {
-    assert_eq!(1, 1);
-}
-
-#[test_case]
 fn test_breakpoint_exception() {
     interrupts::int3();
 }
