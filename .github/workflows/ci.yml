@@ -22,16 +22,20 @@ jobs:
       - name: Setup rust cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-upgrade --no-install-recommends -y llvm-14-tools qemu-system-x86
-
-      - name: Install bootimage
-        run: cargo install bootimage
+          sudo apt-get install --no-upgrade --no-install-recommends -y \
+            clang lld llvm xorriso ovmf qemu-system-x86
 
       - name: Run tests
-        run: cargo test
+        run: cargo xtask test
 
   lint:
     runs-on: ubuntu-latest
@@ -42,8 +46,11 @@ jobs:
       - name: Setup rust toolchain
         run: rustup show
 
+      - name: Setup rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Run Clippy linter
-        run: cargo clippy --tests -- -D warnings
+        run: cargo xtask clippy
 
   format:
     runs-on: ubuntu-latest
@@ -55,4 +62,4 @@ jobs:
         run: rustup show
 
       - name: Check formatting
-        run: cargo fmt -- --check
+        run: cargo xtask fmt --check
