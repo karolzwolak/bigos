@@ -285,8 +285,22 @@ fn run_test(iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
     }
 }
 
-fn run_tests(root: &Path) {
-    let bins = discover_test_bins(root);
+fn run_tests(root: &Path, filters: &[String]) {
+    let all_bins = discover_test_bins(root);
+    let bins: Vec<String> = if filters.is_empty() {
+        all_bins
+    } else {
+        all_bins
+            .into_iter()
+            .filter(|name| filters.iter().any(|f| name.contains(f.as_str())))
+            .collect()
+    };
+
+    if bins.is_empty() {
+        eprintln!("No tests matched the given filter(s).");
+        std::process::exit(1);
+    }
+
     ensure_limine(root);
     build_user(root);
     println!("{BOLD}Building test kernels…{RESET}");
@@ -296,7 +310,7 @@ fn run_tests(root: &Path) {
 
     println!();
     let mut passed_names: Vec<&str> = Vec::new();
-    let mut failed_names: Vec<&str> = Vec::new();
+    let mut failed_names: Vec<(&str, Option<i32>)> = Vec::new();
 
     for name in &bins {
         print!("  {BOLD}{name}{RESET} ... ");
@@ -309,22 +323,19 @@ fn run_tests(root: &Path) {
             println!("{GREEN}ok{RESET}");
             passed_names.push(name);
         } else {
-            println!(
-                "{RED}FAILED{RESET} (exit code: {})",
-                result
-                    .exit_code
-                    .map_or("none (timeout)".to_string(), |c| c.to_string())
-            );
-            if result.serial.is_empty() {
-                println!("  {YELLOW}(no serial output — kernel may not have started){RESET}");
-            } else {
+            let code_str = result
+                .exit_code
+                .map_or("none (timeout)".to_string(), |c| c.to_string());
+            println!("{RED}FAILED{RESET} (exit code: {code_str})");
+            let serial = result.serial.trim();
+            if !serial.is_empty() {
                 println!("  {YELLOW}---- serial output ----{RESET}");
-                for line in result.serial.lines() {
+                for line in serial.lines() {
                     println!("  {line}");
                 }
                 println!("  {YELLOW}-----------------------{RESET}");
             }
-            failed_names.push(name);
+            failed_names.push((name, result.exit_code));
         }
     }
 
@@ -339,8 +350,9 @@ fn run_tests(root: &Path) {
         for name in &passed_names {
             println!("  {GREEN}ok{RESET}    {name}");
         }
-        for name in &failed_names {
-            println!("  {RED}FAILED{RESET} {name}");
+        for (name, exit_code) in &failed_names {
+            let code_str = exit_code.map_or("none (timeout)".to_string(), |c| c.to_string());
+            println!("  {RED}FAILED{RESET} {name} (exit code: {code_str})");
         }
         println!();
         println!(
@@ -825,7 +837,7 @@ Tasks:
   run-hdd      Build HDD image and launch in QEMU
   run-fs       Build ISO + FAT32 test disk and launch in QEMU
   run-bios     Build ISO and launch in QEMU (BIOS mode, no OVMF)
-  test         Build and run all integration tests in QEMU
+  test [filter…]  Build and run integration tests in QEMU (optional substring filters)
   fat32-image  Create test FAT32 disk image
   clean        Remove all build artefacts
   fmt          Format all code (workspace + xtask)  [extra args forwarded to cargo fmt]
@@ -854,7 +866,7 @@ fn main() {
         Some("run-hdd") => run_hdd(&root),
         Some("run-fs") => run_fs(&root),
         Some("run-bios") => run_bios(&root),
-        Some("test") => run_tests(&root),
+        Some("test") => run_tests(&root, &extra),
         Some("fat32-image") => fat32_image(&root),
         Some("clean") => clean(&root),
         Some("fmt") => fmt(&root, &extra),
