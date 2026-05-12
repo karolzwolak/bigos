@@ -6,7 +6,7 @@ extern crate kernel;
 
 use core::panic::PanicInfo;
 use kernel::{
-    gdt, serial_print, serial_println,
+    gdt, serial_print,
     testing::{QemuExitCode, exit_qemu, test_panic_handler},
 };
 use lazy_static::lazy_static;
@@ -63,6 +63,6 @@ extern "x86-interrupt" fn test_double_fault_handler(
     _frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-    serial_println!("[ok]");
+    // TODO: investigate why printing someting here sometimes causes a triple fault instead of a clean exit
     exit_qemu(QemuExitCode::Success)
 }
