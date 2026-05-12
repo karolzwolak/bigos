@@ -136,9 +136,9 @@ const RESET: &str = "\x1b[0m";
 const TEST_SUCCESS_EXIT: i32 = 33;
 // QEMU exit code for QemuExitCode::Failed  (0x11): (0x11 << 1) | 1 = 35
 const TEST_FAILED_EXIT: i32 = 35;
-// With -no-reboot, a CPU triple fault (reset) makes QEMU exit with code 0.
-// Nothing else in our setup produces 0, so we treat it as a triple fault.
-const TRIPLE_FAULT_EXIT: i32 = 0;
+// With -no-reboot, an unexpected reset makes QEMU exit with code 0.
+// Nothing in our normal test flow produces 0, so we label it accordingly.
+const UNEXPECTED_EXIT: i32 = 0;
 
 /// Discover test binaries by scanning `kernel/src/bin/` for `test_*.rs` files.
 /// No [[bin]] entries needed — Cargo auto-discovers everything in src/bin/.
@@ -330,7 +330,7 @@ fn run_tests(root: &Path, filters: &[String]) {
         } else {
             let code_str = match result.exit_code {
                 None => "none (timeout)".to_string(),
-                Some(TRIPLE_FAULT_EXIT) => format!("{} (triple fault / unexpected reset)", TRIPLE_FAULT_EXIT),
+                Some(UNEXPECTED_EXIT) => format!("{} (unexpected exit)", UNEXPECTED_EXIT),
                 Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
                 Some(c) => c.to_string(),
             };
@@ -361,7 +361,7 @@ fn run_tests(root: &Path, filters: &[String]) {
         for (name, exit_code) in &failed_names {
             let code_str = match exit_code {
                 None => "none (timeout)".to_string(),
-                Some(TRIPLE_FAULT_EXIT) => format!("{} (triple fault / unexpected reset)", TRIPLE_FAULT_EXIT),
+                Some(UNEXPECTED_EXIT) => format!("{} (unexpected exit)", UNEXPECTED_EXIT),
                 Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
                 Some(c) => c.to_string(),
             };
