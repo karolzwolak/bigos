@@ -134,6 +134,11 @@ const RESET: &str = "\x1b[0m";
 
 // QEMU exit code for QemuExitCode::Success (0x10): (0x10 << 1) | 1 = 33
 const TEST_SUCCESS_EXIT: i32 = 33;
+// QEMU exit code for QemuExitCode::Failed  (0x11): (0x11 << 1) | 1 = 35
+const TEST_FAILED_EXIT: i32 = 35;
+// With -no-reboot, a CPU triple fault (reset) makes QEMU exit with code 0.
+// Nothing else in our setup produces 0, so we treat it as a triple fault.
+const TRIPLE_FAULT_EXIT: i32 = 0;
 
 /// Discover test binaries by scanning `kernel/src/bin/` for `test_*.rs` files.
 /// No [[bin]] entries needed — Cargo auto-discovers everything in src/bin/.
@@ -323,9 +328,12 @@ fn run_tests(root: &Path, filters: &[String]) {
             println!("{GREEN}ok{RESET}");
             passed_names.push(name);
         } else {
-            let code_str = result
-                .exit_code
-                .map_or("none (timeout)".to_string(), |c| c.to_string());
+            let code_str = match result.exit_code {
+                None => "none (timeout)".to_string(),
+                Some(TRIPLE_FAULT_EXIT) => format!("{} (triple fault / unexpected reset)", TRIPLE_FAULT_EXIT),
+                Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
+                Some(c) => c.to_string(),
+            };
             println!("{RED}FAILED{RESET} (exit code: {code_str})");
             let serial = result.serial.trim();
             if !serial.is_empty() {
@@ -351,7 +359,12 @@ fn run_tests(root: &Path, filters: &[String]) {
             println!("  {GREEN}ok{RESET}    {name}");
         }
         for (name, exit_code) in &failed_names {
-            let code_str = exit_code.map_or("none (timeout)".to_string(), |c| c.to_string());
+            let code_str = match exit_code {
+                None => "none (timeout)".to_string(),
+                Some(TRIPLE_FAULT_EXIT) => format!("{} (triple fault / unexpected reset)", TRIPLE_FAULT_EXIT),
+                Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
+                Some(c) => c.to_string(),
+            };
             println!("  {RED}FAILED{RESET} {name} (exit code: {code_str})");
         }
         println!();
