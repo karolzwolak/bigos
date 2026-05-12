@@ -2,6 +2,8 @@ use crate::{hlt_loop, serial_print, serial_println};
 use core::panic::PanicInfo;
 use x86_64::instructions::port::Port;
 
+pub use kernel_macros::test_case;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {
@@ -40,6 +42,24 @@ pub fn test_runner(tests: &[&dyn Testable]) -> ! {
     serial_println!("Running {} test(s)", tests.len());
     for test in tests {
         test.run();
+    }
+    exit_qemu(QemuExitCode::Success)
+}
+
+pub struct KernelTest {
+    pub name: &'static str,
+    pub run: fn(),
+}
+
+#[linkme::distributed_slice]
+pub static KERNEL_TESTS: [KernelTest];
+
+pub fn run_all_tests() -> ! {
+    serial_println!("Running {} test(s)", KERNEL_TESTS.len());
+    for t in KERNEL_TESTS.iter() {
+        serial_print!("{}...\t", t.name);
+        (t.run)();
+        serial_println!("[ok]");
     }
     exit_qemu(QemuExitCode::Success)
 }

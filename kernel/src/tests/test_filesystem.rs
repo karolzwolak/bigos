@@ -7,7 +7,7 @@ extern crate kernel;
 use core::panic::PanicInfo;
 use kernel::{
     filesystem::{fat32::test_data::create_fat32_image, init_filesystem, sirius::get_sirius},
-    testing::{Testable, test_panic_handler, test_runner},
+    testing::{test_case, test_panic_handler},
 };
 use limine::{
     BaseRevision,
@@ -44,13 +44,10 @@ extern "C" fn kmain() -> ! {
         .expect("no memory map")
         .entries();
     kernel::testing::init_with_heap(hhdm_offset, memory_map);
-    test_runner(&[
-        &test_init_and_list as &dyn Testable,
-        &test_read_file,
-        &test_create_and_delete,
-    ]);
+    kernel::testing::run_all_tests()
 }
 
+#[test_case]
 fn test_init_and_list() {
     let image = create_fat32_image();
     init_filesystem(&*image).expect("filesystem init failed");
@@ -66,6 +63,7 @@ fn test_init_and_list() {
     );
 }
 
+#[test_case]
 fn test_read_file() {
     let mut buf = [0u8; 64];
     let read = get_sirius()
@@ -76,6 +74,7 @@ fn test_read_file() {
     assert!(text.contains("BigOS"), "unexpected content: {}", text);
 }
 
+#[test_case]
 fn test_create_and_delete() {
     {
         let mut sirius = get_sirius();

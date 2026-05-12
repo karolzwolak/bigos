@@ -7,7 +7,7 @@ extern crate kernel;
 use core::panic::PanicInfo;
 use kernel::{
     process::elf_loader::{ElfLoadError, ElfLoadInfo},
-    testing::{Testable, test_panic_handler, test_runner},
+    testing::{test_case, test_panic_handler},
 };
 use limine::{
     BaseRevision,
@@ -52,13 +52,10 @@ extern "C" fn kmain() -> ! {
         .expect("no memory map")
         .entries();
     kernel::testing::init_with_heap(hhdm_offset, memory_map);
-    test_runner(&[
-        &parse_valid_elf as &dyn Testable,
-        &reject_invalid_magic,
-        &reject_empty,
-    ]);
+    kernel::testing::run_all_tests()
 }
 
+#[test_case]
 fn parse_valid_elf() {
     let info = ElfLoadInfo::from_elf_data(FIRST_ELF).expect("valid ELF should parse");
     assert!(info.entry_point > 0, "entry point should be non-zero");
@@ -72,6 +69,7 @@ fn parse_valid_elf() {
     );
 }
 
+#[test_case]
 fn reject_invalid_magic() {
     let bad = [0u8; 64];
     assert!(matches!(
@@ -80,6 +78,7 @@ fn reject_invalid_magic() {
     ));
 }
 
+#[test_case]
 fn reject_empty() {
     assert!(matches!(
         ElfLoadInfo::from_elf_data(&[]),

@@ -6,7 +6,7 @@ extern crate kernel;
 
 use alloc::{boxed::Box, vec::Vec};
 use core::panic::PanicInfo;
-use kernel::testing::{Testable, test_panic_handler, test_runner};
+use kernel::testing::{test_case, test_panic_handler};
 use limine::{
     BaseRevision,
     request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker},
@@ -42,14 +42,10 @@ extern "C" fn kmain() -> ! {
         .expect("no memory map")
         .entries();
     kernel::testing::init_with_heap(hhdm_offset, memory_map);
-    test_runner(&[
-        &simple_allocation as &dyn Testable,
-        &large_vector,
-        &large_num_of_boxes,
-        &no_leak,
-    ]);
+    kernel::testing::run_all_tests()
 }
 
+#[test_case]
 fn simple_allocation() {
     let a = Box::new(42u64);
     let b = Box::new(1000u64);
@@ -57,6 +53,7 @@ fn simple_allocation() {
     assert_eq!(*b, 1000);
 }
 
+#[test_case]
 fn large_vector() {
     let n: u64 = 1000;
     let mut v = Vec::new();
@@ -66,6 +63,7 @@ fn large_vector() {
     assert_eq!(v.iter().sum::<u64>(), (n - 1) * n / 2);
 }
 
+#[test_case]
 fn large_num_of_boxes() {
     // Verifies the allocator reclaims freed blocks and doesn't corrupt live allocations.
     // Capped well below HEAP_SIZE_BYTES to keep runtime reasonable.
@@ -78,6 +76,7 @@ fn large_num_of_boxes() {
     assert_eq!(*anchor, 1);
 }
 
+#[test_case]
 fn no_leak() {
     // Allocate half the heap repeatedly; verifies the allocator reclaims released memory.
     let alloc_size = kernel::memory::allocator::HEAP_SIZE_BYTES / 2;

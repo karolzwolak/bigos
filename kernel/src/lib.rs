@@ -19,6 +19,7 @@ pub mod util;
 pub use alloc::string::String;
 
 extern crate lazy_static;
+extern crate linkme;
 
 pub fn init_globals() {
     gdt::init();
