@@ -5,7 +5,7 @@ mod boot;
 
 use kernel::graphics::compositor::Compositor;
 use kernel::{
-    graphics::framebuffer::FrameBufferTarget, programs::theophe::Theophe, serial_println,
+    programs::theophe::Theophe, serial_println,
 };
 use x86_64::instructions::hlt;
 extern crate alloc;
@@ -44,10 +44,10 @@ fn main() -> ! {
 
     let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
     let fb = &mut *framebuffer_target;
-    
+
     let fb_width = fb.width as f32;
     let fb_height = fb.height as f32;
-    
+
     demo::draw_shapes(fb);
 
     //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
@@ -73,7 +73,7 @@ fn main() -> ! {
 
     compositor.focus_window(0);
     compositor.compose(&mut framebuffer_target);
-    
+
     loop {
         hlt();
     }

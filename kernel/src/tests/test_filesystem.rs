@@ -6,14 +6,14 @@ extern crate kernel;
 
 use core::panic::PanicInfo;
 use kernel::{
-    LIMINE_BASE_REVISION, filesystem::{fat32::test_data::create_fat32_image, init_filesystem, sirius::get_sirius},
+    LIMINE_BASE_REVISION,
+    filesystem::{fat32::test_data::create_fat32_image, init_filesystem, sirius::get_sirius},
     testing::{test_case, test_panic_handler},
 };
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
     request::{HhdmRequest, MemmapRequest},
 };
-use x86_64::instructions::interrupts;
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]

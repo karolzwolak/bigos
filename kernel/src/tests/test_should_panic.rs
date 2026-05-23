@@ -8,9 +8,7 @@ use kernel::{
     LIMINE_BASE_REVISION, serial_print, serial_println,
     testing::{QemuExitCode, exit_qemu},
 };
-use limine::{
-    BaseRevision, RequestsEndMarker, RequestsStartMarker,
-};
+use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]

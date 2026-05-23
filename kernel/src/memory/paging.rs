@@ -1,12 +1,12 @@
 use crate::serial_println;
 use acpi::{Handler, PhysicalMapping};
-use limine::memmap::{Entry, MEMMAP_ACPI_NVS, MEMMAP_ACPI_RECLAIMABLE, MEMMAP_USABLE};
+use limine::memmap::{Entry, MEMMAP_USABLE};
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
     structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
-        Size4KiB, mapper::MapToError,
+        FrameAllocator, OffsetPageTable, PageTable, PhysFrame,
+        Size4KiB,
     },
 };
 

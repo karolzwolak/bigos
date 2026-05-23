@@ -10,9 +10,7 @@ use kernel::{
     testing::{QemuExitCode, exit_qemu, test_panic_handler},
 };
 use lazy_static::lazy_static;
-use limine::{
-    BaseRevision, RequestsEndMarker, RequestsStartMarker,
-};
+use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 #[used]

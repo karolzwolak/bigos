@@ -1,20 +1,17 @@
 use crate::main;
 use kernel::memory::paging::MemoryMapFrameAllocator;
 use kernel::{
-    LIMINE_BASE_REVISION, init_globals, interrupts, memory, memory::allocator, serial_println,
-    util::cpuinfo::init_cpu_info, graphics,
+    LIMINE_BASE_REVISION, graphics, init_globals, interrupts, memory, memory::allocator,
+    serial_println, util::cpuinfo::init_cpu_info,
 };
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
-    framebuffer::Framebuffer,
     paging::PagingMode,
     request::{
         EfiMemmapRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest,
         PagingModeRequest, RsdpRequest,
     },
 };
-use spin::Mutex;
-use spin::Once;
 
 const LIMINE_MP_FLAG_NO_X2APIC: u64 = 0;
 
@@ -66,16 +63,6 @@ static MP_REQUEST: MpRequest = MpRequest::new(LIMINE_MP_FLAG_NO_X2APIC);
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
-pub struct BootInfo {
-    pub hhdm_offset: u64,
-}
-
-pub static BOOT_INFO: Once<BootInfo> = Once::new();
-
-pub fn boot_info() -> &'static BootInfo {
-    unsafe { BOOT_INFO.get().unwrap_unchecked() }
-}
-
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
@@ -99,9 +86,7 @@ unsafe extern "C" fn kmain() -> ! {
         .expect("Failed to get paging mode response");
     let _paging_mode = paging_mode_response.mode;
 
-    let hhdm_response = HHDM_REQUEST
-        .response()
-        .expect("Failed to get HHDM respone");
+    let hhdm_response = HHDM_REQUEST.response().expect("Failed to get HHDM respone");
     let hhdm_offset = hhdm_response.offset;
 
     let rsdp_addr_respone = RSDP_REUEST
@@ -117,15 +102,8 @@ unsafe extern "C" fn kmain() -> ! {
     let framebuffer_response = FRAMEBUFFER_REQUEST
         .response()
         .expect("Failed to get framebuffer response");
-    let framebuffer = framebuffer_response.framebuffers().get(0).unwrap().clone();
+    let framebuffer = framebuffer_response.framebuffers().first().unwrap();
     graphics::framebuffer::init_framebuffer(framebuffer);
-
-    let boot_info = BootInfo {
-        hhdm_offset,
-    };
-
-    serial_println!("Boot Info: hhdm_offset: {}", boot_info.hhdm_offset);
-    BOOT_INFO.call_once(|| boot_info);
 
     init_globals();
 

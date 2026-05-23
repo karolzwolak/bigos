@@ -6,12 +6,14 @@ extern crate kernel;
 
 use alloc::{boxed::Box, vec::Vec};
 use core::panic::PanicInfo;
-use kernel::{LIMINE_BASE_REVISION, testing::{test_case, test_panic_handler}};
+use kernel::{
+    LIMINE_BASE_REVISION,
+    testing::{test_case, test_panic_handler},
+};
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
     request::{HhdmRequest, MemmapRequest},
 };
-use x86_64::instructions::interrupts;
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]

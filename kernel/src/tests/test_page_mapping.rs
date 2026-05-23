@@ -5,7 +5,10 @@ extern crate kernel;
 
 use core::panic::PanicInfo;
 use kernel::{
-    LIMINE_BASE_REVISION, init_globals, memory::paging::{MemoryMapFrameAllocator, init_offset_page_table}, serial_print, serial_println, testing::{QemuExitCode, exit_qemu, test_panic_handler}
+    LIMINE_BASE_REVISION, init_globals,
+    memory::paging::{MemoryMapFrameAllocator, init_offset_page_table},
+    serial_print, serial_println,
+    testing::{QemuExitCode, exit_qemu, test_panic_handler},
 };
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
@@ -15,7 +18,6 @@ use x86_64::{
     VirtAddr,
     structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB},
 };
-use x86_64::instructions::interrupts;
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
