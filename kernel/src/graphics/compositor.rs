@@ -113,13 +113,13 @@ impl Compositor {
 
     //TODO:compositor should own the framebuffer
     //TODO: alpha blending
-    pub fn compose(&self, framebuffer: &mut FrameBufferTarget<'_>) {
+    pub fn compose(&self, framebuffer: &mut FrameBufferTarget) {
         let windows = self.windows.read();
 
         let mut visible_windows: Vec<&Window> = windows.iter().filter(|w| w.is_visible).collect();
         visible_windows.sort_by_key(|w| w.z_index);
 
-        let framebuffer_ptr = framebuffer.framebuffer.addr();
+        let framebuffer_ptr = framebuffer.address();
         let framebuffer_pitch = framebuffer.pitch;
         let framebuffer_width = framebuffer.width;
         let framebuffer_height = framebuffer.height;

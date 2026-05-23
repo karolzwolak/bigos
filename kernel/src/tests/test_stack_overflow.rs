@@ -6,22 +6,21 @@ extern crate kernel;
 
 use core::panic::PanicInfo;
 use kernel::{
-    gdt, serial_print,
+    LIMINE_BASE_REVISION, gdt, serial_print,
     testing::{QemuExitCode, exit_qemu, test_panic_handler},
 };
 use lazy_static::lazy_static;
 use limine::{
-    BaseRevision,
-    request::{RequestsEndMarker, RequestsStartMarker},
+    BaseRevision, RequestsEndMarker, RequestsStartMarker,
 };
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 #[used]
-#[unsafe(link_section = ".requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::new();
-#[used]
 #[unsafe(link_section = ".requests_start_marker")]
 static _START: RequestsStartMarker = RequestsStartMarker::new();
+#[used]
+#[unsafe(link_section = ".requests")]
+static BASE_REVISION: BaseRevision = BaseRevision::with_revision(LIMINE_BASE_REVISION);
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
 static _END: RequestsEndMarker = RequestsEndMarker::new();

@@ -65,7 +65,7 @@ pub fn run_all_tests() -> ! {
 }
 
 /// Initialises GDT, IDT, paging, and heap — sufficient for most integration tests.
-pub fn init_with_heap(hhdm_offset: u64, memory_map: &'static [&'static limine::memory_map::Entry]) {
+pub fn init_with_heap(hhdm_offset: u64, memory_map: &'static [&'static limine::memmap::Entry]) {
     crate::init_globals();
     let mut mapper = unsafe { crate::memory::paging::init_offset_page_table(hhdm_offset) };
     let mut frame_allocator =

@@ -1,56 +1,106 @@
+use core::ptr::NonNull;
+
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Size;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
-use limine::framebuffer::Framebuffer;
-use spin::MutexGuard;
+use spin::{Mutex, MutexGuard};
 
-pub struct FrameBufferTarget<'a> {
-    pub framebuffer: MutexGuard<'a, Framebuffer<'static>>,
+pub struct FrameBufferTarget {
+    address: NonNull<()>,
     pub width: u64,
     pub height: u64,
     pub pitch: u64,
+    pub bpp: u16,
+    pub memory_model: u8,
+    pub red_mask_size: u8,
+    pub red_mask_shift: u8,
+    pub green_mask_size: u8,
+    pub green_mask_shift: u8,
+    pub blue_mask_size: u8,
+    pub blue_mask_shift: u8,
+    edid_size: u64,
+    edid: Option<NonNull<()>>,
 }
 
-impl<'a> FrameBufferTarget<'a> {
-    pub fn new(framebuffer: MutexGuard<'a, Framebuffer<'static>>) -> Self {
-        let width = framebuffer.width();
-        let height = framebuffer.height();
-        let pitch = framebuffer.pitch();
+unsafe impl Send for FrameBufferTarget {}
+unsafe impl Sync for FrameBufferTarget {}
+
+impl FrameBufferTarget {
+    pub const fn new(
+        address: *mut (),
+        width: u64,
+        height: u64,
+        pitch: u64,
+        bpp: u16,
+        memory_model: u8,
+        red_mask_size: u8,
+        red_mask_shift: u8,
+        green_mask_size: u8,
+        green_mask_shift: u8,
+        blue_mask_size: u8,
+        blue_mask_shift: u8,
+        edid: *const (),
+        edid_size: u64,
+    ) -> Self {
         Self {
-            framebuffer,
+            address: NonNull::new(address).expect("Framebuffer address cannot be null"),
             width,
             height,
             pitch,
+            bpp,
+            memory_model,
+            red_mask_size,
+            red_mask_shift,
+            green_mask_size,
+            green_mask_shift,
+            blue_mask_size,
+            blue_mask_shift,
+            edid: NonNull::new(edid as *mut ()),
+            edid_size,
         }
     }
 
-    fn write_pixel(&mut self, x: u64, y: u64, color: Rgb888) {
+    pub fn from_limine_framebuffer(fb: &limine::framebuffer::Framebuffer) -> Self {
+        Self::new(
+            fb.address(),
+            fb.width,
+            fb.height,
+            fb.pitch,
+            fb.bpp,
+            fb.memory_model,
+            fb.red_mask_size,
+            fb.red_mask_shift,
+            fb.green_mask_size,
+            fb.green_mask_shift,
+            fb.blue_mask_size,
+            fb.blue_mask_shift,
+            fb.edid().as_ptr() as *const (),
+            fb.edid().len() as u64,
+        )
+    }
+
+    pub fn address(&self) -> *mut u8 {
+        self.address.as_ptr().cast::<u8>()
+    }
+
+    pub fn size(&self) -> usize {
+        (self.height * self.pitch) as usize
+    }
+
+    pub fn write_pixel(&mut self, x: u64, y: u64, color: Rgb888) {
         if x >= self.width || y >= self.height {
             return;
         }
 
-        let px_offset = y * self.pitch + x * 4;
-        let px_ptr = unsafe {
-            self.framebuffer
-                .addr()
-                .add(px_offset as usize)
-                .cast::<u32>()
-        };
+        let px_offset = y * self.pitch + x * FRAMEBUFFER_BYTES_PER_PIXEL as u64;
+        let px_ptr = unsafe { self.address().add(px_offset as usize).cast::<u32>() };
 
         let color: u32 =
             ((color.r() as u32) << 16) | ((color.g() as u32) << 8) | (color.b() as u32);
 
         unsafe { px_ptr.write(color) };
-    }
-
-    pub fn width(&self) -> u64 {
-        self.width
-    }
-
-    pub fn height(&self) -> u64 {
-        self.height
     }
 
     /// # Safety
@@ -63,14 +113,8 @@ impl<'a> FrameBufferTarget<'a> {
         }
 
         let copy_width = width.min(self.width - dst_x);
-
         let dst_offset = dst_y * self.pitch + dst_x * FRAMEBUFFER_BYTES_PER_PIXEL as u64;
-        let dst_ptr = unsafe {
-            self.framebuffer
-                .addr()
-                .add(dst_offset as usize)
-                .cast::<u32>()
-        };
+        let dst_ptr = unsafe { self.address().add(dst_offset as usize).cast::<u32>() };
 
         unsafe { core::ptr::copy_nonoverlapping(src, dst_ptr, copy_width as usize) };
     }
@@ -85,10 +129,10 @@ impl<'a> FrameBufferTarget<'a> {
             ((color.r() as u32) << 16) | ((color.g() as u32) << 8) | (color.b() as u32);
 
         unsafe {
-            let fb_addr = self.framebuffer.addr();
+            let fb_addr = self.address();
 
             for row in 0..height {
-                let row_offset = (y + row) * self.pitch + x * 4;
+                let row_offset = (y + row) * self.pitch + x * FRAMEBUFFER_BYTES_PER_PIXEL as u64;
                 let row_ptr = fb_addr.add(row_offset as usize).cast::<u32>();
 
                 for col in 0..width {
@@ -99,7 +143,7 @@ impl<'a> FrameBufferTarget<'a> {
     }
 }
 
-impl<'a> DrawTarget for FrameBufferTarget<'a> {
+impl DrawTarget for FrameBufferTarget {
     type Color = Rgb888;
     type Error = core::convert::Infallible;
 
@@ -114,8 +158,22 @@ impl<'a> DrawTarget for FrameBufferTarget<'a> {
     }
 }
 
-impl<'a> OriginDimensions for FrameBufferTarget<'a> {
+impl OriginDimensions for FrameBufferTarget {
     fn size(&self) -> Size {
         Size::new(self.width as u32, self.height as u32)
     }
+}
+
+static FRAMEBUFFER_TARGET: spin::Once<Mutex<FrameBufferTarget>> = spin::Once::new();
+
+pub fn init_framebuffer(fb: &limine::framebuffer::Framebuffer) {
+    let target = FrameBufferTarget::from_limine_framebuffer(fb);
+    FRAMEBUFFER_TARGET.call_once(|| Mutex::new(target));
+}
+
+pub fn get_framebuffer() -> MutexGuard<'static, FrameBufferTarget> {
+    FRAMEBUFFER_TARGET
+        .get()
+        .expect("Framebuffer not initialized")
+        .lock()
 }

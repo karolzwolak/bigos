@@ -3,6 +3,8 @@
 #![feature(abi_x86_interrupt)]
 #![feature(portable_simd)]
 
+pub const LIMINE_BASE_REVISION: u64 = 5;
+
 pub mod memory;
 extern crate alloc;
 pub mod data_structures;

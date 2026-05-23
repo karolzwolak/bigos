@@ -5,20 +5,19 @@ extern crate kernel;
 
 use core::panic::PanicInfo;
 use kernel::{
-    serial_print, serial_println,
+    LIMINE_BASE_REVISION, serial_print, serial_println,
     testing::{QemuExitCode, exit_qemu},
 };
 use limine::{
-    BaseRevision,
-    request::{RequestsEndMarker, RequestsStartMarker},
+    BaseRevision, RequestsEndMarker, RequestsStartMarker,
 };
 
 #[used]
-#[unsafe(link_section = ".requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::new();
-#[used]
 #[unsafe(link_section = ".requests_start_marker")]
 static _START: RequestsStartMarker = RequestsStartMarker::new();
+#[used]
+#[unsafe(link_section = ".requests")]
+static BASE_REVISION: BaseRevision = BaseRevision::with_revision(LIMINE_BASE_REVISION);
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
 static _END: RequestsEndMarker = RequestsEndMarker::new();

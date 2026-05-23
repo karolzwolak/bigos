@@ -1,20 +1,26 @@
 use crate::main;
 use kernel::memory::paging::MemoryMapFrameAllocator;
 use kernel::{
-    init_globals, interrupts, memory, memory::allocator, serial_println,
-    util::cpuinfo::init_cpu_info,
+    LIMINE_BASE_REVISION, init_globals, interrupts, memory, memory::allocator, serial_println,
+    util::cpuinfo::init_cpu_info, graphics,
 };
 use limine::{
-    BaseRevision,
+    BaseRevision, RequestsEndMarker, RequestsStartMarker,
     framebuffer::Framebuffer,
-    paging::Mode,
+    paging::PagingMode,
     request::{
-        EfiMemoryMapRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, PagingModeRequest,
-        RequestsEndMarker, RequestsStartMarker, RsdpRequest,
+        EfiMemmapRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest,
+        PagingModeRequest, RsdpRequest,
     },
 };
 use spin::Mutex;
 use spin::Once;
+
+const LIMINE_MP_FLAG_NO_X2APIC: u64 = 0;
+
+#[used]
+#[unsafe(link_section = ".requests_start_marker")]
+static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -22,7 +28,7 @@ use spin::Once;
 #[used]
 // The .requests section allows limine to find the requests faster and more safely.
 #[unsafe(link_section = ".requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::new();
+static BASE_REVISION: BaseRevision = BaseRevision::with_revision(LIMINE_BASE_REVISION);
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -38,28 +44,30 @@ static RSDP_REUEST: RsdpRequest = RsdpRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-static EFI_MEMORY_MAP_REQUEST: EfiMemoryMapRequest = EfiMemoryMapRequest::new();
+static EFI_MEMMAP_REQUEST: EfiMemmapRequest = EfiMemmapRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-static PAGING_MODE_REQUEST: PagingModeRequest =
-    PagingModeRequest::new().with_mode(Mode::FOUR_LEVEL);
+static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new(
+    PagingMode::X86_64_4LVL,
+    PagingMode::X86_64_4LVL,
+    PagingMode::X86_64_4LVL,
+);
 
-/// Define the stand and end markers for Limine requests.
 #[used]
-#[unsafe(link_section = ".requests_start_marker")]
-static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
+#[unsafe(link_section = ".requests")]
+static MP_REQUEST: MpRequest = MpRequest::new(LIMINE_MP_FLAG_NO_X2APIC);
+
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 pub struct BootInfo {
     pub hhdm_offset: u64,
-    pub framebuffer: Mutex<Framebuffer<'static>>,
 }
 
 pub static BOOT_INFO: Once<BootInfo> = Once::new();
@@ -78,45 +86,42 @@ unsafe extern "C" fn kmain() -> ! {
 
     // memory::paging::init_acpi_memory_map(rsdp_phys_addr);
 
-    let _efi_memory_map_response = EFI_MEMORY_MAP_REQUEST
-        .get_response()
+    let _efi_memory_map_response = EFI_MEMMAP_REQUEST
+        .response()
         .expect("Failed to get UEFI memory map response");
 
-    let memory_map_response = MEMORY_MAP_REQUEST
-        .get_response()
+    let memory_map_response = MEMMAP_REQUEST
+        .response()
         .expect("Failed to get memory map response");
 
     let paging_mode_response = PAGING_MODE_REQUEST
-        .get_response()
+        .response()
         .expect("Failed to get paging mode response");
-    let _paging_mode = paging_mode_response.mode();
+    let _paging_mode = paging_mode_response.mode;
 
     let hhdm_response = HHDM_REQUEST
-        .get_response()
+        .response()
         .expect("Failed to get HHDM respone");
-    let hhdm_offset = hhdm_response.offset();
+    let hhdm_offset = hhdm_response.offset;
 
     let rsdp_addr_respone = RSDP_REUEST
-        .get_response()
+        .response()
         .expect("Failed to get RSDP address response");
-    let rsdp_phys_addr: usize = rsdp_addr_respone.address();
-    let rsdp_virt_addr = rsdp_phys_addr + hhdm_offset as usize;
+    let rsdp_virt_addr: usize = rsdp_addr_respone.address as usize;
+    let rsdp_phys_addr = rsdp_virt_addr - hhdm_offset as usize;
 
-    serial_println!("RSDP physical address: {:#x}", rsdp_phys_addr);
     serial_println!("HHDM offset: {:#x}", hhdm_offset);
+    serial_println!("RSDP physical address: {:#x}", rsdp_phys_addr);
     serial_println!("RSDP virtual address: {:#x}", rsdp_virt_addr);
 
     let framebuffer_response = FRAMEBUFFER_REQUEST
-        .get_response()
+        .response()
         .expect("Failed to get framebuffer response");
-    let framebuffer = framebuffer_response
-        .framebuffers()
-        .next()
-        .expect("No framebuffer found");
+    let framebuffer = framebuffer_response.framebuffers().get(0).unwrap().clone();
+    graphics::framebuffer::init_framebuffer(framebuffer);
 
     let boot_info = BootInfo {
         hhdm_offset,
-        framebuffer: Mutex::new(framebuffer),
     };
 
     serial_println!("Boot Info: hhdm_offset: {}", boot_info.hhdm_offset);
@@ -130,14 +135,6 @@ unsafe extern "C" fn kmain() -> ! {
     serial_println!("Creating frame_allocator");
     let mut frame_allocator =
         unsafe { MemoryMapFrameAllocator::init(memory_map_response.entries()) };
-
-    memory::paging::map_acpi_regions(
-        &mut mapper,
-        &mut frame_allocator,
-        rsdp_phys_addr,
-        hhdm_offset,
-    )
-    .expect("Failed to map ACPI regions");
 
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");

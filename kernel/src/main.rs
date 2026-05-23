@@ -42,21 +42,22 @@ fn main() -> ! {
 
     kernel::process::syscall::init_syscall_stack();
 
-    let mut framebuffer_target = FrameBufferTarget::new(boot::boot_info().framebuffer.lock());
-
-    demo::draw_shapes(&mut framebuffer_target);
-
-    let fb_width = framebuffer_target.width as f32;
-    let fb_height = framebuffer_target.height as f32;
+    let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
+    let fb = &mut *framebuffer_target;
+    
+    let fb_width = fb.width as f32;
+    let fb_height = fb.height as f32;
+    
+    demo::draw_shapes(fb);
 
     //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
     serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
     let compositor = Compositor::new();
     let (_window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
 
-    let (window3_id, window3_buffer) = compositor.create_window(400, 300, 700, 200);
-    compositor.set_z_index(window3_id, 5);
-    serial_println!("Created window with ID: {}", window3_id);
+    let (window2_id, window3_buffer) = compositor.create_window(400, 300, 700, 200);
+    compositor.set_z_index(window2_id, 5);
+    serial_println!("Created window with ID: {}", window2_id);
 
     demo::render_shaders(&window3_buffer);
 
@@ -72,7 +73,7 @@ fn main() -> ! {
 
     compositor.focus_window(0);
     compositor.compose(&mut framebuffer_target);
-
+    
     loop {
         hlt();
     }
