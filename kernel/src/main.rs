@@ -4,9 +4,7 @@
 mod boot;
 
 use kernel::graphics::compositor::Compositor;
-use kernel::{
-    programs::theophe::Theophe, serial_println,
-};
+use kernel::{programs::theophe::Theophe, serial_println};
 use x86_64::instructions::hlt;
 extern crate alloc;
 use kernel::graphics::demo;

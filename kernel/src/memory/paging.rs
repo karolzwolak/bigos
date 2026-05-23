@@ -4,10 +4,7 @@ use limine::memmap::{Entry, MEMMAP_USABLE};
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
-    structures::paging::{
-        FrameAllocator, OffsetPageTable, PageTable, PhysFrame,
-        Size4KiB,
-    },
+    structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
 };
 
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
