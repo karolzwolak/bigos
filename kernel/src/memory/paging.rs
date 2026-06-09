@@ -1,13 +1,10 @@
 use crate::serial_println;
 use acpi::{Handler, PhysicalMapping};
-use limine::memory_map::{Entry, EntryType};
+use limine::memmap::{Entry, MEMMAP_USABLE};
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
-    structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
-        Size4KiB, mapper::MapToError,
-    },
+    structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
 };
 
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
@@ -55,94 +52,6 @@ pub const fn align_down(x: u64, align: u64) -> u64 {
     x & !(align - 1)
 }
 
-pub fn map_acpi_regions(
-    mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut MemoryMapFrameAllocator,
-    rsdp_phys_addr: usize,
-    hhdm_offset: u64,
-) -> Result<(), MapToError<Size4KiB>> {
-    serial_println!("Mapping ACPI regions");
-
-    // map the RSDP page
-    let rsdp_start = align_down(rsdp_phys_addr as u64, PAGE_SIZE as u64);
-    let rsdp_end = rsdp_start + PAGE_SIZE as u64;
-    map_region(
-        mapper,
-        frame_allocator,
-        rsdp_start,
-        rsdp_end,
-        hhdm_offset,
-        true,
-    )?;
-
-    // map all ACPI regions
-    for entry in frame_allocator.memory_map {
-        if entry.entry_type == EntryType::ACPI_RECLAIMABLE
-            || entry.entry_type == EntryType::ACPI_NVS
-        {
-            let start = align_down(entry.base, PAGE_SIZE as u64);
-            let end = align_up(entry.base + entry.length, PAGE_SIZE as u64);
-
-            map_region(mapper, frame_allocator, start, end, hhdm_offset, true)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn map_region(
-    mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    phys_start: u64,
-    phys_end: u64,
-    hhdm_offset: u64,
-    cached_pages: bool,
-) -> Result<(), MapToError<Size4KiB>> {
-    debug_assert!(phys_end > phys_start);
-
-    let mut phys = phys_start;
-    let flags = if cached_pages {
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE
-    } else {
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE
-    };
-
-    while phys < phys_end {
-        let frame = PhysFrame::containing_address(PhysAddr::new(phys));
-        let virt = VirtAddr::new(phys + hhdm_offset);
-        let page = Page::containing_address(virt);
-
-        unsafe {
-            match mapper.map_to(page, frame, flags, frame_allocator) {
-                Ok(mapper_flush) => {
-                    mapper_flush.flush();
-                }
-                Err(e) => match e {
-                    MapToError::PageAlreadyMapped(_) => {
-                        serial_println!(
-                            "Error: Mapping page phys {:#x} -> virt {:#x} --> already mapped!",
-                            phys,
-                            virt.as_u64()
-                        );
-                    }
-                    _ => {
-                        serial_println!(
-                            "Error: Mapping page phys {:#x} -> virt {:#x} - failed!",
-                            phys,
-                            virt.as_u64()
-                        );
-                        return Err(e);
-                    }
-                },
-            }
-        }
-
-        phys += PAGE_SIZE as u64;
-    }
-
-    Ok(())
-}
-
 impl MemoryMapFrameAllocator {
     /// # Safety
     ///
@@ -165,7 +74,7 @@ impl MemoryMapFrameAllocator {
 
     fn _usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.entry_type == EntryType::USABLE);
+        let usable_regions = regions.filter(|r| r.type_ == MEMMAP_USABLE);
         let addr_ranges = usable_regions.map(|r| r.base..r.base + r.length);
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(PAGE_SIZE));
 
@@ -178,7 +87,7 @@ unsafe impl FrameAllocator<Size4KiB> for MemoryMapFrameAllocator {
         loop {
             let region = self.memory_map.get(self.curr_region_index)?;
 
-            if region.entry_type != EntryType::USABLE {
+            if region.type_ != MEMMAP_USABLE {
                 self.curr_region_index += 1;
                 self.frame_offset_in_region = 0;
                 continue;

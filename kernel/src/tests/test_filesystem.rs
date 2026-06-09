@@ -6,26 +6,27 @@ extern crate kernel;
 
 use core::panic::PanicInfo;
 use kernel::{
+    LIMINE_BASE_REVISION,
     filesystem::{fat32::test_data::create_fat32_image, init_filesystem, sirius::get_sirius},
     testing::{test_case, test_panic_handler},
 };
 use limine::{
-    BaseRevision,
-    request::{HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker},
+    BaseRevision, RequestsEndMarker, RequestsStartMarker,
+    request::{HhdmRequest, MemmapRequest},
 };
 
 #[used]
+#[unsafe(link_section = ".requests_start_marker")]
+static _START: RequestsStartMarker = RequestsStartMarker::new();
+#[used]
 #[unsafe(link_section = ".requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::new();
+static BASE_REVISION: BaseRevision = BaseRevision::with_revision(LIMINE_BASE_REVISION);
 #[used]
 #[unsafe(link_section = ".requests")]
 static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
-static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
-#[used]
-#[unsafe(link_section = ".requests_start_marker")]
-static _START: RequestsStartMarker = RequestsStartMarker::new();
+static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
 static _END: RequestsEndMarker = RequestsEndMarker::new();
@@ -38,9 +39,9 @@ fn panic(info: &PanicInfo) -> ! {
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
-    let hhdm_offset = HHDM_REQUEST.get_response().expect("no HHDM").offset();
+    let hhdm_offset = HHDM_REQUEST.response().expect("no HHDM").offset;
     let memory_map = MEMORY_MAP_REQUEST
-        .get_response()
+        .response()
         .expect("no memory map")
         .entries();
     kernel::testing::init_with_heap(hhdm_offset, memory_map);
