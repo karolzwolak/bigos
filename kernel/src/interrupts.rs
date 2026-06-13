@@ -613,22 +613,22 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         let is_press =
             key_event.state == PcKeyState::Down || key_event.state == PcKeyState::SingleShot;
-        if let Some(decoded_key) = keyboard.process_keyevent(key_event) {
-            if is_press {
-                let value = match decoded_key {
-                    DecodedKey::Unicode(c) => Some(c as u32),
-                    DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
-                    _ => None,
-                };
-                if let Some(v) = value {
-                    let _ = EVENT_BUFFER.push(InputEvent::new_key(v, KeyState::Pressed));
-                }
+        if let Some(decoded_key) = keyboard.process_keyevent(key_event)
+            && is_press
+        {
+            let value = match decoded_key {
+                DecodedKey::Unicode(c) => Some(c as u32),
+                DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
+                _ => None,
+            };
+            if let Some(v) = value {
+                let _ = EVENT_BUFFER.push(InputEvent::new_key(v, KeyState::Pressed));
+            }
 
-                if KEYBOARD_DEBUG_PRINT {
-                    match decoded_key {
-                        DecodedKey::Unicode(c) => serial_print!("{}", c),
-                        DecodedKey::RawKey(k) => serial_print!("{:?}", k),
-                    }
+            if KEYBOARD_DEBUG_PRINT {
+                match decoded_key {
+                    DecodedKey::Unicode(c) => serial_print!("{}", c),
+                    DecodedKey::RawKey(k) => serial_print!("{:?}", k),
                 }
             }
         }

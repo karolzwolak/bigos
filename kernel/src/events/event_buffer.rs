@@ -35,6 +35,13 @@ pub enum EventType {
     MouseEvent = 2,
 }
 
+pub type EventBufferResult<T> = Result<T, EventBufferError>;
+
+#[derive(Debug, Clone, Copy)]
+pub enum EventBufferError {
+    Full,
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct InputEvent {
@@ -89,22 +96,24 @@ impl EventBuffer {
     }
 
     /// We assume only one event source can push at one time
-    pub fn push(&self, event: InputEvent) -> Result<(), ()> {
+    pub fn push(&self, event: InputEvent) -> EventBufferResult<()> {
         let event_count = self.event_count.load(Ordering::Acquire);
         if event_count >= MAX_EVENT_COUNT as u32 {
             serial_println!("Event buffer is full, dropping event: {:?}", event);
-            return Err(());
+            return Err(EventBufferError::Full);
         }
 
         let idx = self.write_idx.load(Ordering::Acquire);
-        let event_ptr: *mut InputEvent = core::ptr::addr_of!(self.events[idx as usize]) as *mut InputEvent;
+        let event_ptr: *mut InputEvent =
+            core::ptr::addr_of!(self.events[idx as usize]) as *mut InputEvent;
         unsafe {
             core::ptr::write_volatile(event_ptr, event);
         }
 
         core::sync::atomic::fence(Ordering::Release);
 
-        self.write_idx.store((idx + 1) % MAX_EVENT_COUNT as u32, Ordering::Release);
+        self.write_idx
+            .store((idx + 1) % MAX_EVENT_COUNT as u32, Ordering::Release);
         self.event_count.fetch_add(1, Ordering::Release);
 
         Ok(())
@@ -120,7 +129,8 @@ impl EventBuffer {
 
         core::sync::atomic::fence(Ordering::Acquire);
 
-        self.read_idx.store((idx + 1) % MAX_EVENT_COUNT as u32, Ordering::Release);
+        self.read_idx
+            .store((idx + 1) % MAX_EVENT_COUNT as u32, Ordering::Release);
         self.event_count.fetch_sub(1, Ordering::Release);
 
         Some(event)

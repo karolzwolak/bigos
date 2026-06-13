@@ -4,7 +4,7 @@ use crate::{
 };
 
 use alloc::format;
-use core::{cmp::min};
+use core::cmp::min;
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
@@ -215,34 +215,50 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
 
         match cmd {
             "ls" => {
-                let (long, path) = if args.starts_with("-l") {
-                    (true, args[2..].trim())
+                let (long, path) = if let Some(stripped) = args.strip_prefix("-l") {
+                    (true, stripped.trim())
                 } else {
                     (false, args)
                 };
                 let path = if path.is_empty() { "/" } else { path };
                 match crate::filesystem::get_sirius().list_directory(path) {
                     Ok(entries) => {
-                        self.write_line(&format!(
-                            "{:<10} {:<8} {}",
-                            "attr", "size", "name"
-                        ));
-                        self.write_line(&format!(
-                            "{:-<10} {:-<8} {:-<20}",
-                            "", "", ""
-                        ));
+                        self.write_line(&format!("{:<10} {:<8} {}", "attr", "size", "name"));
+                        self.write_line(&format!("{:-<10} {:-<8} {:-<20}", "", "", ""));
                         for entry in &entries {
                             if long {
-                                let type_char = if entry.file_type == crate::filesystem::sirius::FileType::Directory { 'd' } else { '-' };
+                                let type_char = if entry.file_type
+                                    == crate::filesystem::sirius::FileType::Directory
+                                {
+                                    'd'
+                                } else {
+                                    '-'
+                                };
                                 let attrs = entry.attributes;
-                                let r = if attrs.contains(crate::filesystem::sirius::FileAttributes::READ) { 'r' } else { '-' };
-                                let w = if attrs.contains(crate::filesystem::sirius::FileAttributes::WRITE) { 'w' } else { '-' };
-                                let x = if attrs.contains(crate::filesystem::sirius::FileAttributes::EXECUTE) { 'x' } else { '-' };
+                                let r = if attrs
+                                    .contains(crate::filesystem::sirius::FileAttributes::READ)
+                                {
+                                    'r'
+                                } else {
+                                    '-'
+                                };
+                                let w = if attrs
+                                    .contains(crate::filesystem::sirius::FileAttributes::WRITE)
+                                {
+                                    'w'
+                                } else {
+                                    '-'
+                                };
+                                let x = if attrs
+                                    .contains(crate::filesystem::sirius::FileAttributes::EXECUTE)
+                                {
+                                    'x'
+                                } else {
+                                    '-'
+                                };
                                 self.write_line(&format!(
                                     "{}{}{}{:<6} {:>8} {}",
-                                    type_char, r, w, x,
-                                    entry.size,
-                                    entry.name
+                                    type_char, r, w, x, entry.size, entry.name
                                 ));
                             } else {
                                 self.write_line(entry.name.as_str());
@@ -271,7 +287,11 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                     let uv = args == "start -uv";
                     crate::DEMO_UV_MODE.store(uv, core::sync::atomic::Ordering::Relaxed);
                     crate::DEMO_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
-                    self.write_line(if uv { "demo started (uv mode)" } else { "demo started" });
+                    self.write_line(if uv {
+                        "demo started (uv mode)"
+                    } else {
+                        "demo started"
+                    });
                 }
                 "stop" => {
                     crate::DEMO_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
@@ -448,20 +468,21 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             serial_println!("Theophe: redraw_all");
         }
 
+        let mut buf = [0u8; 2 + MAX_CHARS_PER_LINE];
         for i in 0..=self.curr_line_idx {
-            let is_input_line = i == self.curr_line_idx;
-            let text = if !is_input_line {
-                alloc::format!("{}", self.lines[i].as_str())
+            let text: &str = if i == self.curr_line_idx {
+                let line = self.lines[i].as_str().as_bytes();
+                buf[0] = b'>';
+                buf[1] = b' ';
+                buf[2..2 + line.len()].copy_from_slice(line);
+                unsafe { core::str::from_utf8_unchecked(&buf[..2 + line.len()]) }
             } else {
-                alloc::format!("> {}", self.lines[i].as_str())
+                self.lines[i].as_str()
             };
-            let _ = Text::with_text_style(
-                &text,
-                self.get_pos(i),
-                CHARACTER_STYLE,
-                TEXT_STYLE,
-            )
-            .draw(&mut self.draw_target);
+            if !text.is_empty() {
+                let _ = Text::with_text_style(text, self.get_pos(i), CHARACTER_STYLE, TEXT_STYLE)
+                    .draw(&mut self.draw_target);
+            }
         }
     }
 

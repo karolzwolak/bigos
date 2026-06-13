@@ -138,7 +138,7 @@ impl Compositor {
             if window.is_visible {
                 window.buffer.try_swap();
                 window.buffer.draw_border();
-                
+
                 if DEBUG_INFO {
                     serial_println!(
                         "Compositing window ID {} at position ({}, {}) with size {}x{}",

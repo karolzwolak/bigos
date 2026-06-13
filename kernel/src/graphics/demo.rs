@@ -220,3 +220,9 @@ impl DynamicRenderer {
         window_buffer.present();
     }
 }
+
+impl Default for DynamicRenderer {
+    fn default() -> Self {
+        DynamicRenderer::new()
+    }
+}
