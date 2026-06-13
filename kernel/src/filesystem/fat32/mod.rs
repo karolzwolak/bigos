@@ -27,7 +27,13 @@ const fn is_directory(fat_attributes: u8) -> bool {
 }
 
 fn is_valid_filename(name: &str) -> bool {
-    name.len() <= MAX_FULL_NAME_LENGTH && !name.is_empty() && !name.starts_with('.')
+    if name.is_empty() || name.starts_with('.') {
+        return false;
+    }
+    match name.rfind('.') {
+        Some(dot) => dot <= MAX_NAME_LENGTH && (name.len() - dot - 1) <= MAX_EXT_LENGTH,
+        None => name.len() <= MAX_NAME_LENGTH,
+    }
 }
 
 const ZERO_BUFFER: [u8; 4096] = [0u8; 4096]; // TODO: dont allocate each call, but also dont fill space with this --> write in some other way than copying from buffer

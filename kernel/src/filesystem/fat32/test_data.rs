@@ -142,7 +142,7 @@ pub fn create_fat32_image() -> Box<[u8; IMAGE_SIZE]> {
 
     let nam2 = b"SOMEFILE";
     let ext2 = b"BIN";
-    let bin_data = b"binarydatathatsprettyshortforbinarydatabutitsamockone";
+    let bin_data = b"This file contains some binary data!\nAnd may be displayed as plain ASCII text...\nIt also is a bit longer than hello.txt";
     let entry2_offset = 64;
 
     root_dir[entry_offset..entry_offset + 8].copy_from_slice(name);

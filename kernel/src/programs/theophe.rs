@@ -225,14 +225,28 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                     Err(_) => self.write_line(&format!("ls: no such directory: {}", path)),
                 }
             }
+            "cat" => {
+                if args.is_empty() {
+                    self.write_line("usage: cat <path>");
+                } else {
+                    let mut buf = [0u8; 2048];
+                    match crate::filesystem::get_sirius().read_file(args, 0, &mut buf) {
+                        Ok(n) => {
+                            let s = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+                            self.write_line(s);
+                        }
+                        Err(_) => self.write_line(&format!("cat: file not found: {}", args)),
+                    }
+                }
+            }
             "help" => {
-                self.write_str("Available commands: \n - ls <dir>\n - clear");
+                self.write_str("Available commands: \n - ls <dir>\n - cat <path>\n - clear");
             }
             "clear" => {
                 self.clear();
             }
             _ => {
-                self.write_str("unknown: ");
+                self.write_str("unknown cmd: ");
                 self.write_line(cmd);
             }
         }
@@ -248,9 +262,6 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         let line = &mut self.lines[self.curr_line_idx];
         if line.length > 0 {
             line.length -= 1;
-        } else if self.curr_line_idx > 0 {
-            line.clear();
-            self.curr_line_idx -= 1;
         }
     }
 

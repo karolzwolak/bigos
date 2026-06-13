@@ -583,10 +583,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     use x86_64::instructions::port::Port;
 
     lazy_static! {
-        static ref KEYBOARD: Mutex<Keyboard<layouts::Uk105Key, ScancodeSet1>> =
+        static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
             Mutex::new(Keyboard::new(
                 ScancodeSet1::new(),
-                layouts::Uk105Key,
+                layouts::Us104Key,
                 HandleControl::Ignore
             ));
     }
@@ -596,8 +596,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let scancode: u8 = unsafe { keyboard_port.read() };
 
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-        if key_event.state == PcKeyState::Down || key_event.state == PcKeyState::SingleShot {
-            if let Some(decoded_key) = keyboard.process_keyevent(key_event) {
+        let is_press = key_event.state == PcKeyState::Down || key_event.state == PcKeyState::SingleShot;
+        if let Some(decoded_key) = keyboard.process_keyevent(key_event) {
+            if is_press {
                 let value = match decoded_key {
                     DecodedKey::Unicode(c) => Some(c as u32),
                     DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
