@@ -8,6 +8,7 @@ pub const LIMINE_BASE_REVISION: u64 = 5;
 pub mod memory;
 extern crate alloc;
 pub mod data_structures;
+pub mod events;
 pub mod filesystem;
 pub mod gdt;
 pub mod graphics;
@@ -17,7 +18,6 @@ pub mod process;
 pub mod programs;
 pub mod testing;
 pub mod util;
-pub mod events;
 
 pub use alloc::string::String;
 
@@ -29,8 +29,10 @@ pub fn init_globals() {
     interrupts::init_idt();
 }
 
-#[inline(always)]
-/// Do nothing loop that tells the CPU to halt until the next interrupt
+use core::sync::atomic::AtomicBool;
+pub static DEMO_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static DEMO_UV_MODE: AtomicBool = AtomicBool::new(false);
+
 pub fn hlt_loop() -> ! {
     loop {
         x86_64::instructions::hlt();

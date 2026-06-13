@@ -1,11 +1,17 @@
-use crate::graphics::{
-    color::Rgba8888UNORM,
-    framebuffer::FrameBufferTarget,
-    pipeline::{BlendState, PipelineState, RasterizerState, RenderMode, Vertex2D, VertexLayout},
-    renderer::RenderContext,
-    resources::Texture,
-    shaders::{PassThroughVS, TextureSamplePS},
-    window::WindowBuffer,
+use crate::{
+    graphics::{
+        color::Rgba8888UNORM,
+        framebuffer::FrameBufferTarget,
+        pipeline::{
+            BlendState, PipelineState, RasterizerState, RenderMode, Vertex2D, VertexLayout,
+        },
+        renderer::RenderContext,
+        resources::Texture,
+        shaders::{PassThroughVS, TextureSamplePS, UVDebugPS},
+        texture::LOGO_TEXTURE_BYTES,
+        window::WindowBuffer,
+    },
+    serial_println,
 };
 use alloc::vec::Vec;
 use alloc::{boxed::Box, sync::Arc};
@@ -121,4 +127,120 @@ pub fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
     );
 
     window_buffer.present();
+}
+
+pub struct DynamicRenderer {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    uv_mode: bool,
+    ctx: RenderContext,
+    pipeline_logo: PipelineState,
+    pipeline_uv: PipelineState,
+}
+
+impl DynamicRenderer {
+    pub fn new() -> Self {
+        const LOGO_WIDTH: u32 = 80;
+        const LOGO_HEIGHT: u32 = 42;
+
+        let mut ctx = RenderContext::new();
+
+        let (chunks, remainder) = LOGO_TEXTURE_BYTES.as_chunks::<4>();
+        debug_assert!(remainder.is_empty(), "Data length is not a multiple of 4");
+        let texture_data: Vec<u32> = chunks
+            .iter()
+            .map(|chunk| u32::from_be_bytes(*chunk))
+            .collect();
+        let texture_slot =
+            ctx.bind_texture(Texture::from_data(LOGO_WIDTH, LOGO_HEIGHT, texture_data));
+
+        let pipeline_logo = PipelineState {
+            vs: Box::new(PassThroughVS),
+            ps: Box::new(TextureSamplePS { texture_slot }),
+            vertex_layout: VertexLayout::new_2d(),
+            rasterizer_state: RasterizerState::default(),
+            blend_state: BlendState::default(),
+            render_mode: RenderMode::XY,
+        };
+
+        let pipeline_uv = PipelineState {
+            vs: Box::new(PassThroughVS),
+            ps: Box::new(UVDebugPS),
+            vertex_layout: VertexLayout::new_2d(),
+            rasterizer_state: RasterizerState::default(),
+            blend_state: BlendState::default(),
+            render_mode: RenderMode::XY,
+        };
+
+        Self {
+            x: 0.0,
+            y: 0.0,
+            vx: 0.25,
+            vy: 0.25,
+            uv_mode: false,
+            ctx,
+            pipeline_logo,
+            pipeline_uv,
+        }
+    }
+
+    pub fn setup(&mut self, uv_mode: bool) {
+        self.uv_mode = uv_mode;
+    }
+
+    pub fn update(&mut self, window_buffer: &Arc<WindowBuffer>, dt_ms: f32) {
+        const LOGO_WIDTH: u32 = 80;
+        const LOGO_HEIGHT: u32 = 42;
+
+        let max_x = window_buffer.width as f32 - LOGO_WIDTH as f32;
+        let max_y = window_buffer.height as f32 - LOGO_HEIGHT as f32;
+
+        self.x += self.vx * dt_ms;
+        self.y += self.vy * dt_ms;
+
+        if self.x <= 0.0 {
+            self.x = 0.0;
+            self.vx = self.vx.abs();
+        }
+        if self.x >= max_x {
+            self.x = max_x;
+            self.vx = -self.vx.abs();
+        }
+        if self.y <= 0.0 {
+            self.y = 0.0;
+            self.vy = self.vy.abs();
+        }
+        if self.y >= max_y {
+            self.y = max_y;
+            self.vy = -self.vy.abs();
+        }
+
+        let mut back_buffer = window_buffer.back_buffer_mut();
+        let mut render_target = self.ctx.begin_frame(&mut back_buffer);
+        render_target.clear(Rgba8888UNORM::WHITE);
+
+        if self.uv_mode {
+            self.ctx.draw_rect_2d(
+                self.x,
+                self.y,
+                LOGO_WIDTH as f32,
+                LOGO_HEIGHT as f32,
+                &mut render_target,
+                &self.pipeline_uv,
+            );
+        } else {
+            self.ctx.draw_rect_2d(
+                self.x,
+                self.y,
+                LOGO_WIDTH as f32,
+                LOGO_HEIGHT as f32,
+                &mut render_target,
+                &self.pipeline_logo,
+            );
+        }
+
+        window_buffer.present();
+    }
 }

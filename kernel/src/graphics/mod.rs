@@ -7,5 +7,6 @@ pub mod renderer;
 pub mod resources;
 pub mod shaders;
 pub mod window;
+pub mod texture;
 
 pub const FRAMEBUFFER_BYTES_PER_PIXEL: u32 = 4;

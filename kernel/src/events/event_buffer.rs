@@ -1,7 +1,6 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{memory::paging::PAGE_SIZE, serial_println};
-use spin::Mutex;
 
 pub static EVENT_BUFFER: EventBuffer = EventBuffer::new();
 

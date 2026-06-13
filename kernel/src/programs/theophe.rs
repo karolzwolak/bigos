@@ -4,7 +4,7 @@ use crate::{
 };
 
 use alloc::format;
-use core::{cmp::min, fmt::Write};
+use core::{cmp::min};
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
@@ -239,16 +239,28 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                     }
                 }
             }
+            "demo" => match args {
+                "start" | "start -uv" => {
+                    let uv = args == "start -uv";
+                    crate::DEMO_UV_MODE.store(uv, core::sync::atomic::Ordering::Relaxed);
+                    crate::DEMO_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
+                    self.write_line(if uv { "demo started (uv mode)" } else { "demo started" });
+                }
+                "stop" => {
+                    crate::DEMO_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+                    self.write_line("demo stopped");
+                }
+                _ => self.write_line("usage: demo start [-uv] | stop"),
+            },
             "help" => {
-                self.write_str("Available commands: \n - ls <dir>\n - cat <path>\n - clear");
+                self.write_str(
+                    "Available commands: \n - ls <dir>\n - cat <path>\n - clear\n - demo start|stop",
+                );
             }
             "clear" => {
                 self.clear();
             }
-            _ => {
-                self.write_str("unknown cmd: ");
-                self.write_line(cmd);
-            }
+            _ => {}
         }
     }
 
