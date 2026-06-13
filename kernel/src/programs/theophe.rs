@@ -1,6 +1,10 @@
-use crate::{events::event_buffer::{EVENT_BUFFER, AsciiChar, Keys}, serial_println};
+use crate::{
+    events::event_buffer::{AsciiChar, EVENT_BUFFER, Keys},
+    serial_println,
+};
 
 use core::{cmp::min, fmt::Write};
+use alloc::format;
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
@@ -177,7 +181,9 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                             AsciiChar::BACKSPACE => self.backspace(),
                             AsciiChar::NEWLINE | AsciiChar::CARRIAGE_RETURN => {
                                 self.last_command = self.lines[self.curr_line_idx];
+                                let cmd = self.last_command;
                                 self.newline();
+                                self.execute_command(&cmd);
                             }
                             c if !c.is_control() => {
                                 self.write_bytes(&[c as u8]);
@@ -192,6 +198,43 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         }
         if dirty {
             self.render();
+        }
+    }
+
+    fn execute_command(&mut self, line: &Line) {
+        let s = line.as_str().trim();
+        if s.is_empty() {
+            return;
+        }
+
+        let (cmd, args) = match s.find(' ') {
+            Some(i) => s.split_at(i),
+            None => (s, ""),
+        };
+        let args = args.trim_matches(' ');
+
+        match cmd {
+            "ls" => {
+                let path = if args.is_empty() { "/" } else { args };
+                match crate::filesystem::get_sirius().list_directory(path) {
+                    Ok(entries) => {
+                        for entry in &entries {
+                            self.write_line(entry.name.as_str());
+                        }
+                    }
+                    Err(_) => self.write_line(&format!("ls: no such directory: {}", path)),
+                }
+            }
+            "help" => {
+                self.write_str("Available commands: \n - ls <dir>\n - clear");
+            }
+            "clear" => {
+                self.clear();
+            }
+            _ => {
+                self.write_str("unknown: ");
+                self.write_line(cmd);
+            }
         }
     }
 

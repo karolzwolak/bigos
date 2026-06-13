@@ -46,8 +46,6 @@ fn main() -> ! {
     let fb_width = fb.width as f32;
     let fb_height = fb.height as f32;
 
-    demo::draw_shapes(fb);
-
     //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
     serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
     let compositor = Compositor::new();
@@ -61,11 +59,13 @@ fn main() -> ! {
 
     let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
     theophe.write_line("");
-    theophe.write_line("  hi");
+    theophe.write_line("  Welcome to bigOS!");
     theophe.write_line("==========================================================");
     let cpu_info = kernel::util::cpuinfo::get_cpu_info();
     let cpu_info_str = cpu_info.to_pretty_string();
     theophe.write_str(&cpu_info_str);
+
+    demo::init_demo_filesystem();
 
     theophe.render();
 

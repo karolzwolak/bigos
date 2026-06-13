@@ -13,6 +13,12 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
 use embedded_graphics::{geometry::Point, pixelcolor::Rgb888, primitives::Primitive};
 
+pub fn init_demo_filesystem() {
+    use crate::filesystem::{fat32::test_data::create_fat32_image, init_filesystem};
+    let image = create_fat32_image();
+    init_filesystem(&*image).expect("filesystem init failed");
+}
+
 pub fn draw_shapes(framebuffer_target: &mut FrameBufferTarget) {
     Rectangle::new(Point::new(0, 0), Size::new(100, 100))
         .into_styled(PrimitiveStyle::with_fill(Rgb888::RED))
