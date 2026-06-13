@@ -840,7 +840,7 @@ impl FilesystemDriver for Fat32Driver {
         {
             let mut disk_mgr = get_disk_mgr();
             entries = self.read_directory_entries(dir_cluster, &mut disk_mgr)?;
-            entries.retain(|e| e.is_valid());
+            entries.retain(|e| e.is_valid() && !e.is_volume_id());
         }
         let mut nodes = Vec::with_capacity(entries.len());
 

@@ -1,4 +1,4 @@
-use crate::filesystem::fat32::direntry::FatFileAttributes;
+use crate::filesystem::fat32::direntry::{DirectoryEntry, FatFileAttributes};
 use crate::serial_println;
 extern crate alloc;
 use crate::filesystem::fat32::{END_OF_CHAIN, ROOT_CLUSTER};
@@ -118,6 +118,18 @@ pub fn create_fat32_image() -> Box<[u8; IMAGE_SIZE]> {
     // Entry 2: Root directory cluster (end of chain)
     fat[8..12].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
 
+    // Entry 3: hello.txt (end of chain)
+    fat[12..16].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+
+    // Entry 4: lore.txt (end of chain)
+    fat[16..20].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+
+    // Entry 5: nested_dir directory (end of chain)
+    fat[20..24].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+
+    // Entry 6: file inside nested_dir (end of chain)
+    fat[24..28].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+
     // Copy FAT tables
     let fat1_offset = fat1_start * BYTES_PER_SECTOR;
     let fat2_offset = fat2_start * BYTES_PER_SECTOR;
@@ -151,17 +163,27 @@ Sed id dui fringilla, tincidunt neque scelerisque, pharetra dolor. Sed ultrices 
 
     root_dir[entry_offset..entry_offset + 8].copy_from_slice(name);
     root_dir[entry_offset + 8..entry_offset + 11].copy_from_slice(ext);
-    root_dir[entry_offset + 11] = 0x20; // Archive attribute
+    root_dir[entry_offset + 11] = FatFileAttributes::Archive as u8;
     root_dir[entry_offset + 26..entry_offset + 28].copy_from_slice(&3u16.to_le_bytes()); // First cluster low (cluster 3)
     root_dir[entry_offset + 28..entry_offset + 32]
         .copy_from_slice(&(hello_msg.len() as u32).to_le_bytes());
 
     root_dir[entry2_offset..entry2_offset + 8].copy_from_slice(nam2);
     root_dir[entry2_offset + 8..entry2_offset + 11].copy_from_slice(ext2);
-    root_dir[entry2_offset + 11] = 0x20; // Archive attribute
+    root_dir[entry2_offset + 11] = FatFileAttributes::Archive as u8;
     root_dir[entry2_offset + 26..entry2_offset + 28].copy_from_slice(&4u16.to_le_bytes()); // First cluster low (cluster 4)
     root_dir[entry2_offset + 28..entry2_offset + 32]
         .copy_from_slice(&(bin_data.len() as u32).to_le_bytes());
+
+    // nested_dir directory entry
+    let nested_dir_name: &[u8; 8] = b"NESTDIR ";
+    let nested_dir_ext = b"   ";
+    let nested_dir_offset = 96;
+
+    root_dir[nested_dir_offset..nested_dir_offset + 8].copy_from_slice(nested_dir_name);
+    root_dir[nested_dir_offset + 8..nested_dir_offset + 11].copy_from_slice(nested_dir_ext);
+    root_dir[nested_dir_offset + 11] = FatFileAttributes::Directory as u8;
+    root_dir[nested_dir_offset + 26..nested_dir_offset + 28].copy_from_slice(&5u16.to_le_bytes()); // First cluster low (cluster 5)
 
     // Copy root directory
     image[root_offset..root_offset + root_dir.len()].copy_from_slice(&root_dir);
@@ -175,16 +197,63 @@ Sed id dui fringilla, tincidunt neque scelerisque, pharetra dolor. Sed ultrices 
     let file2_cluster_sector = data_start + ((file2_cluster - 2) * SECTORS_PER_CLUSTER);
     let file2_offset = file2_cluster_sector * BYTES_PER_SECTOR;
 
+    let nested_dir_cluster: usize = 5;
+    let nested_dir_cluster_sector = data_start + ((nested_dir_cluster - 2) * SECTORS_PER_CLUSTER);
+    let nested_dir_offset = nested_dir_cluster_sector * BYTES_PER_SECTOR;
+
+    let mut nested_dir_dir = [0u8; FAT_SIZE_BYTES];
+    // "." entry
+    let dot_name = b".       ";
+    nested_dir_dir[0..8].copy_from_slice(dot_name);
+    nested_dir_dir[8..11].copy_from_slice(b"   ");
+    nested_dir_dir[11] = FatFileAttributes::Directory as u8;
+    nested_dir_dir[26..28].copy_from_slice(&5u16.to_le_bytes()); // Points to itself (cluster 5)
+    // ".." entry
+    let dotdot_name = b"..      ";
+    nested_dir_dir[32..40].copy_from_slice(dotdot_name);
+    nested_dir_dir[40..43].copy_from_slice(b"   ");
+    nested_dir_dir[43] = FatFileAttributes::Directory as u8;
+    nested_dir_dir[58..60].copy_from_slice(&2u16.to_le_bytes()); // Points to root (cluster 2)
+    // nestfile.txt entry inside nested_dir
+    let nestfile_name = b"NESTFILE";
+    let nestfile_ext = b"TXT";
+    let nestfile_msg = b"Mauris erat urna, tempus vel porta ut, dapibus et tortor. Pellentesque id sem vitae erat pharetra blandit et ut lorem. Cras condimentum, nulla nec tempor mattis, dui ipsum posuere tellus, ac maximus orci arcu nec leo. Curabitur a consectetur augue blandit.";
+    let nestfile_entry_offset = 64;
+
+    nested_dir_dir[nestfile_entry_offset..nestfile_entry_offset + 8].copy_from_slice(nestfile_name);
+    nested_dir_dir[nestfile_entry_offset + 8..nestfile_entry_offset + 11]
+        .copy_from_slice(nestfile_ext);
+    nested_dir_dir[nestfile_entry_offset + 11] = FatFileAttributes::Archive as u8;
+    nested_dir_dir[nestfile_entry_offset + 26..nestfile_entry_offset + 28]
+        .copy_from_slice(&6u16.to_le_bytes()); // First cluster low (cluster 6)
+    nested_dir_dir[nestfile_entry_offset + 28..nestfile_entry_offset + 32]
+        .copy_from_slice(&(nestfile_msg.len() as u32).to_le_bytes());
+
+    // Create nestfile.txt data at cluster 6
+    let nestfile_cluster: usize = 6;
+    let nestfile_cluster_sector = data_start + ((nestfile_cluster - 2) * SECTORS_PER_CLUSTER);
+    let nestfile_data_offset = nestfile_cluster_sector * BYTES_PER_SECTOR;
+
     image[file2_offset..file2_offset + bin_data.len()].copy_from_slice(bin_data);
     image[file_offset..file_offset + hello_msg.len()].copy_from_slice(hello_msg);
+    image[nested_dir_offset..nested_dir_offset + nested_dir_dir.len()]
+        .copy_from_slice(&nested_dir_dir);
+    image[nestfile_data_offset..nestfile_data_offset + nestfile_msg.len()]
+        .copy_from_slice(nestfile_msg);
 
     // Update FAT to mark cluster 3 as EOC
     let fat_entry_offset = file_cluster * 4; // Each FAT entry is 4 bytes
     let fat1_entry_offset = fat1_offset + fat_entry_offset;
     let fat2_entry_offset = fat2_offset + fat_entry_offset;
 
-    image[fat1_entry_offset..fat1_entry_offset + 4].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
-    image[fat2_entry_offset..fat2_entry_offset + 4].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat1_offset + 12..fat1_offset + 16].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat2_offset + 12..fat2_offset + 16].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat1_offset + 16..fat1_offset + 20].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat2_offset + 16..fat2_offset + 20].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat1_offset + 20..fat1_offset + 24].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat2_offset + 20..fat2_offset + 24].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat1_offset + 24..fat1_offset + 28].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+    image[fat2_offset + 24..fat2_offset + 28].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
     let cluster4_entry_offset = 4 * 4;
     image[fat1_offset + cluster4_entry_offset..fat1_offset + cluster4_entry_offset + 4]
         .copy_from_slice(&END_OF_CHAIN.to_le_bytes());

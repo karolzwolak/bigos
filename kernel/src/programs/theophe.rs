@@ -215,11 +215,38 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
 
         match cmd {
             "ls" => {
-                let path = if args.is_empty() { "/" } else { args };
+                let (long, path) = if args.starts_with("-l") {
+                    (true, args[2..].trim())
+                } else {
+                    (false, args)
+                };
+                let path = if path.is_empty() { "/" } else { path };
                 match crate::filesystem::get_sirius().list_directory(path) {
                     Ok(entries) => {
+                        self.write_line(&format!(
+                            "{:<10} {:<8} {}",
+                            "attr", "size", "name"
+                        ));
+                        self.write_line(&format!(
+                            "{:-<10} {:-<8} {:-<20}",
+                            "", "", ""
+                        ));
                         for entry in &entries {
-                            self.write_line(entry.name.as_str());
+                            if long {
+                                let type_char = if entry.file_type == crate::filesystem::sirius::FileType::Directory { 'd' } else { '-' };
+                                let attrs = entry.attributes;
+                                let r = if attrs.contains(crate::filesystem::sirius::FileAttributes::READ) { 'r' } else { '-' };
+                                let w = if attrs.contains(crate::filesystem::sirius::FileAttributes::WRITE) { 'w' } else { '-' };
+                                let x = if attrs.contains(crate::filesystem::sirius::FileAttributes::EXECUTE) { 'x' } else { '-' };
+                                self.write_line(&format!(
+                                    "{}{}{}{:<6} {:>8} {}",
+                                    type_char, r, w, x,
+                                    entry.size,
+                                    entry.name
+                                ));
+                            } else {
+                                self.write_line(entry.name.as_str());
+                            }
                         }
                     }
                     Err(_) => self.write_line(&format!("ls: no such directory: {}", path)),
@@ -254,11 +281,8 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             },
             "help" => {
                 self.write_str(
-                    "Available commands: \n - ls <dir>\n - cat <path>\n - clear\n - demo start|stop",
+                    "Available commands: \n - ls [-l] [dir]\n - cat <path>\n - demo start [-uv] | stop\n",
                 );
-            }
-            "clear" => {
-                self.clear();
             }
             _ => {}
         }
