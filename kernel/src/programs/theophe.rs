@@ -313,7 +313,7 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             },
             "help" => {
                 self.write_str(
-                    "Available commands: \n - ls [-l] [dir]\n - cat <path>\n - mkfile <path>\n - mkdir <path>\n - demo start [-uv] | stop\n",
+                    "Available commands: \n - ls [-l] [dir]\n - cat <path>\n - mkdir <path>\n - demo start [-uv] | stop\n",
                 );
             }
             _ => {}
