@@ -6,6 +6,7 @@ use crate::process::{
 };
 use crate::util::msr::{msr_read, msr_write};
 use crate::{
+    events::event_buffer::{EVENT_BUFFER, InputEvent, KeyState, Keys},
     gdt, hlt_loop,
     memory::paging::{IdendtityAcpiHandler, MemoryMapFrameAllocator},
     serial_print, serial_println,
@@ -25,6 +26,7 @@ use acpi::{
 };
 use core::arch::asm;
 use lazy_static::lazy_static;
+use pc_keyboard::KeyCode;
 use spin::Mutex;
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -574,7 +576,9 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
+    use pc_keyboard::{
+        DecodedKey, HandleControl, KeyState as PcKeyState, Keyboard, ScancodeSet1, layouts,
+    };
     use spin::Mutex;
     use x86_64::instructions::port::Port;
 
@@ -591,16 +595,24 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // SAFETY: This port is only read from in this interrupt handler.
     let scancode: u8 = unsafe { keyboard_port.read() };
 
-    if let Ok(Some(event)) = keyboard.add_byte(scancode)
-        && let Some(decoded_key) = keyboard.process_keyevent(event)
-        && KEYBOARD_DEBUG_PRINT
-    {
-        match decoded_key {
-            DecodedKey::Unicode(character) => {
-                serial_print!("{}", character)
-            }
-            DecodedKey::RawKey(key) => {
-                serial_print!("{:?}", key)
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        if key_event.state == PcKeyState::Down || key_event.state == PcKeyState::SingleShot {
+            if let Some(decoded_key) = keyboard.process_keyevent(key_event) {
+                let value = match decoded_key {
+                    DecodedKey::Unicode(c) => Some(c as u32),
+                    DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
+                    _ => None,
+                };
+                if let Some(v) = value {
+                    let _ = EVENT_BUFFER.push(InputEvent::new_key(v, KeyState::Pressed));
+                }
+
+                if KEYBOARD_DEBUG_PRINT {
+                    match decoded_key {
+                        DecodedKey::Unicode(c) => serial_print!("{}", c),
+                        DecodedKey::RawKey(k) => serial_print!("{:?}", k),
+                    }
+                }
             }
         }
     }

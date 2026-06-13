@@ -1,6 +1,6 @@
-use crate::serial_println;
+use crate::{events::event_buffer::{EVENT_BUFFER, AsciiChar, Keys}, serial_println};
 
-use core::cmp::min;
+use core::{cmp::min, fmt::Write};
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
@@ -141,6 +141,7 @@ pub struct Theophe<D: DrawTarget<Color = Rgb888>> {
     curr_line_idx: usize,
     max_chars_per_line: usize,
     lines: [Line; MAX_LINES],
+    last_command: Line,
 }
 
 impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
@@ -154,11 +155,60 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             curr_line_idx: 0,
             max_chars_per_line,
             lines: [Line::new(); MAX_LINES],
+            last_command: Line::new(),
         }
     }
 
     pub fn render(&mut self) {
         self.redraw_all();
+    }
+
+    pub fn update(&mut self) {
+        let mut dirty = false;
+        loop {
+            let event = EVENT_BUFFER.read();
+            match event {
+                Some(event) => {
+                    let v = event.value;
+                    if v == Keys::ArrowUp as u32 {
+                        self.recall_last_command();
+                    } else if let Some(c) = char::from_u32(v) {
+                        match c {
+                            AsciiChar::BACKSPACE => self.backspace(),
+                            AsciiChar::NEWLINE | AsciiChar::CARRIAGE_RETURN => {
+                                self.last_command = self.lines[self.curr_line_idx];
+                                self.newline();
+                            }
+                            c if !c.is_control() => {
+                                self.write_bytes(&[c as u8]);
+                            }
+                            _ => {}
+                        }
+                    }
+                    dirty = true;
+                }
+                None => break,
+            }
+        }
+        if dirty {
+            self.render();
+        }
+    }
+
+    fn recall_last_command(&mut self) {
+        if !self.last_command.is_empty() {
+            self.lines[self.curr_line_idx] = self.last_command;
+        }
+    }
+
+    fn backspace(&mut self) {
+        let line = &mut self.lines[self.curr_line_idx];
+        if line.length > 0 {
+            line.length -= 1;
+        } else if self.curr_line_idx > 0 {
+            line.clear();
+            self.curr_line_idx -= 1;
+        }
     }
 
     fn get_last_line(&mut self) -> &mut Line {
@@ -236,21 +286,12 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         }
     }
 
-    fn write_bytes(&mut self, text: &str) {
-        let bytes = text.as_bytes();
+    fn write_bytes(&mut self, bytes: &[u8]) {
         let bytes_len = bytes.len();
         let mut bytes_start = 0;
 
         for i in 0..bytes_len {
             if bytes[i] == b'\n' {
-                if DEBUG_PRINT {
-                    serial_println!(
-                        "\\n detected: Writing: '{}'; bytes_length: {}, curr_line_idx: {}",
-                        text,
-                        bytes_len,
-                        self.curr_line_idx
-                    );
-                }
                 if i > bytes_start {
                     self._write_bytes(&bytes[bytes_start..i]);
                 }
@@ -260,25 +301,17 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         }
 
         if bytes_start < bytes_len {
-            if DEBUG_PRINT {
-                serial_println!(
-                    "Writing: '{}'; bytes_length: {}, curr_line_idx: {}",
-                    text,
-                    bytes_len,
-                    self.curr_line_idx
-                );
-            }
             self._write_bytes(&bytes[bytes_start..]);
         }
     }
 
     pub fn write_line(&mut self, text: &str) {
-        self.write_bytes(text);
+        self.write_bytes(text.as_bytes());
         self.newline();
     }
 
     pub fn write_str(&mut self, text: &str) {
-        self.write_bytes(text);
+        self.write_bytes(text.as_bytes());
     }
 
     fn newline(&mut self) {

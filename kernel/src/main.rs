@@ -70,9 +70,9 @@ fn main() -> ! {
     theophe.render();
 
     compositor.focus_window(0);
-    compositor.compose(&mut framebuffer_target);
 
     loop {
-        hlt();
+        theophe.update();
+        compositor.compose(&mut framebuffer_target);
     }
 }

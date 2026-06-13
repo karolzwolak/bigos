@@ -17,6 +17,7 @@ pub mod process;
 pub mod programs;
 pub mod testing;
 pub mod util;
+pub mod events;
 
 pub use alloc::string::String;
 
