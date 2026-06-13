@@ -16,7 +16,7 @@ const DEBUG_PRINT: bool = false;
 
 const CHARACTER_WIDTH: usize = 8; // FONT_8X13 width
 const CHARACTER_HEIGHT: usize = 13;
-const MARGIN_LEFT: i32 = 0;
+const MARGIN_LEFT: i32 = 8;
 const MARGIN_TOP: i32 = 0;
 const MAX_LINES: usize = 30;
 const LINE_SPACING: i32 = 15;
@@ -425,15 +425,19 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         }
 
         for i in 0..=self.curr_line_idx {
-            if !self.lines[i].is_empty() {
-                let _ = Text::with_text_style(
-                    self.lines[i].as_str(),
-                    self.get_pos(i),
-                    CHARACTER_STYLE,
-                    TEXT_STYLE,
-                )
-                .draw(&mut self.draw_target);
-            }
+            let is_input_line = i == self.curr_line_idx;
+            let text = if !is_input_line {
+                alloc::format!("{}", self.lines[i].as_str())
+            } else {
+                alloc::format!("> {}", self.lines[i].as_str())
+            };
+            let _ = Text::with_text_style(
+                &text,
+                self.get_pos(i),
+                CHARACTER_STYLE,
+                TEXT_STYLE,
+            )
+            .draw(&mut self.draw_target);
         }
     }
 

@@ -51,6 +51,12 @@ impl Rgba8888UNORM {
         b: 64,
         a: 255,
     };
+    pub const PURPLE: Self = Self {
+        r: 160,
+        g: 0,
+        b: 160,
+        a: 255,
+    };
 
     pub fn from_rgb_emb(rgb: Rgb888) -> Self {
         Self {
@@ -96,7 +102,7 @@ impl Rgba8888UNORM {
         }
     }
 
-    pub fn to_u32_xrgb(&self) -> u32 {
+    pub const fn to_u32_xrgb(&self) -> u32 {
         ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
     }
 

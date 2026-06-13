@@ -134,9 +134,10 @@ impl Compositor {
 
         // TODO: clear the framebufer
 
-        for window in visible_windows {
+        for window in &visible_windows {
             if window.is_visible {
                 window.buffer.try_swap();
+                window.buffer.draw_border();
                 
                 if DEBUG_INFO {
                     serial_println!(

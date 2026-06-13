@@ -180,6 +180,23 @@ impl WindowBuffer {
         unsafe { (*self.front_buffer.get()).as_ptr() }
     }
 
+    pub fn draw_border(&self) {
+        const BORDER_COLOR: u32 = Rgba8888UNORM::PURPLE.to_u32_xrgb();
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let ptr = unsafe { (*self.front_buffer.get()).as_ptr() };
+        unsafe {
+            for x in 0..w {
+                *ptr.add(x) = BORDER_COLOR;
+                *ptr.add((h - 1) * w + x) = BORDER_COLOR;
+            }
+            for y in 0..h {
+                *ptr.add(y * w) = BORDER_COLOR;
+                *ptr.add(y * w + w - 1) = BORDER_COLOR;
+            }
+        }
+    }
+
     pub fn get_bounding_rect(&self) -> Rect {
         Rect::new(self.x as u32, self.y as u32, self.width, self.height)
     }

@@ -54,32 +54,10 @@ pub fn draw_shapes(framebuffer_target: &mut FrameBufferTarget) {
 pub fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
     let mut ctx = RenderContext::new();
     const SIZE: u32 = 120;
-    let texture_data = (0..(SIZE * SIZE))
-        .map(|i| {
-            let y = i;
-            if y % 2 == 0 {
-                Rgba8888UNORM::from_rgb(255, 0, 0).to_u32_rgba()
-            } else {
-                Rgba8888UNORM::from_rgb(0, 255, 0).to_u32_rgba()
-            }
-        })
-        .collect::<Vec<u32>>();
-
-    let texture = Texture::from_data(SIZE, SIZE, texture_data);
-    let texture_slot = ctx.bind_texture(texture);
-
-    let texture_data = (0..(SIZE * SIZE))
-        .map(|i| {
-            let _y = i;
-            Rgba8888UNORM::from_rgb(0, 255, 255).to_u32_rgba()
-        })
-        .collect::<Vec<u32>>();
-    let texture = Texture::from_data(SIZE, SIZE, texture_data);
-    let texture_slot2 = ctx.bind_texture(texture);
 
     let pipeline = PipelineState {
         vs: Box::new(PassThroughVS),
-        ps: Box::new(TextureSamplePS { texture_slot }),
+        ps: Box::new(UVDebugPS),
         vertex_layout: VertexLayout::new_2d(),
         rasterizer_state: RasterizerState::default(),
         blend_state: BlendState::default(),
@@ -101,9 +79,7 @@ pub fn render_shaders(window_buffer: &Arc<WindowBuffer>) {
 
     let pipeline2 = PipelineState {
         vs: Box::new(PassThroughVS),
-        ps: Box::new(TextureSamplePS {
-            texture_slot: texture_slot2,
-        }),
+        ps: Box::new(UVDebugPS),
         vertex_layout: VertexLayout::new_2d(),
         rasterizer_state: RasterizerState::default(),
         blend_state: BlendState::default(),
