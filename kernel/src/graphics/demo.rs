@@ -1,17 +1,12 @@
-use crate::{
-    graphics::{
-        color::Rgba8888UNORM,
-        framebuffer::FrameBufferTarget,
-        pipeline::{
-            BlendState, PipelineState, RasterizerState, RenderMode, Vertex2D, VertexLayout,
-        },
-        renderer::RenderContext,
-        resources::Texture,
-        shaders::{PassThroughVS, TextureSamplePS, UVDebugPS},
-        texture::LOGO_TEXTURE_BYTES,
-        window::WindowBuffer,
-    },
-    serial_println,
+use crate::graphics::{
+    color::Rgba8888UNORM,
+    framebuffer::FrameBufferTarget,
+    pipeline::{BlendState, PipelineState, RasterizerState, RenderMode, Vertex2D, VertexLayout},
+    renderer::RenderContext,
+    resources::Texture,
+    shaders::{PassThroughVS, TextureSamplePS, UVDebugPS},
+    texture::LOGO_TEXTURE_BYTES,
+    window::WindowBuffer,
 };
 use alloc::vec::Vec;
 use alloc::{boxed::Box, sync::Arc};

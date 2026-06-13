@@ -1,4 +1,4 @@
-use crate::filesystem::fat32::direntry::{DirectoryEntry, FatFileAttributes};
+use crate::filesystem::fat32::direntry::FatFileAttributes;
 use crate::serial_println;
 extern crate alloc;
 use crate::filesystem::fat32::{END_OF_CHAIN, ROOT_CLUSTER};
@@ -242,8 +242,6 @@ Sed id dui fringilla, tincidunt neque scelerisque, pharetra dolor. Sed ultrices 
         .copy_from_slice(nestfile_msg);
 
     // Update FAT to mark cluster 3 as EOC
-    let fat_entry_offset = file_cluster * 4; // Each FAT entry is 4 bytes
-
     image[fat1_offset + 12..fat1_offset + 16].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
     image[fat2_offset + 12..fat2_offset + 16].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
     image[fat1_offset + 16..fat1_offset + 20].copy_from_slice(&END_OF_CHAIN.to_le_bytes());

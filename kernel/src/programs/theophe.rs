@@ -282,6 +282,18 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
                     }
                 }
             }
+            "mkdir" => {
+                if args.is_empty() {
+                    self.write_line("usage: mkdir <path>");
+                } else {
+                    match crate::filesystem::get_sirius().create_directory(args) {
+                        Ok(_) => self.write_line(&format!("Directory created: {}", args)),
+                        Err(_) => {
+                            self.write_line(&format!("mkdir: failed to create directory: {}", args))
+                        }
+                    }
+                }
+            }
             "demo" => match args {
                 "start" | "start -uv" => {
                     let uv = args == "start -uv";
@@ -301,7 +313,7 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             },
             "help" => {
                 self.write_str(
-                    "Available commands: \n - ls [-l] [dir]\n - cat <path>\n - demo start [-uv] | stop\n",
+                    "Available commands: \n - ls [-l] [dir]\n - cat <path>\n - mkfile <path>\n - mkdir <path>\n - demo start [-uv] | stop\n",
                 );
             }
             _ => {}

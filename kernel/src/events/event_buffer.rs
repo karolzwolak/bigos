@@ -136,3 +136,9 @@ impl EventBuffer {
         Some(event)
     }
 }
+
+impl Default for EventBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
