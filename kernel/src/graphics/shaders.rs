@@ -14,6 +14,17 @@ impl PixelShader for FlatColorPS {
     }
 }
 
+pub struct UVDebugPS;
+
+impl PixelShader for UVDebugPS {
+    fn run(&self, input: &mut PSIn) {
+        let u = input.attributes[0];
+        let v = input.attributes[1];
+        let color = Rgba8888UNORM::from_rgbf32(u, v, 0f32);
+        input.render_target[0] = color.to_u32_xrgb();
+    }
+}
+
 pub struct TextureSamplePS {
     pub texture_slot: usize,
 }
@@ -23,18 +34,8 @@ impl PixelShader for TextureSamplePS {
         if let Some(texture) = input.textures.get(self.texture_slot) {
             let u = input.attributes[0];
             let v = input.attributes[1];
-            let _color = texture.sample_nearest(u, v);
+            let color = texture.sample_nearest(u, v);
 
-            let color = Rgba8888UNORM::from_rgbf32(u, v, 0f32);
-            // serial_println!(
-            //     "PS - color: {} {} {} to uv: {}, {}",
-            //     color.r,
-            //     color.g,
-            //     color.b,
-            //     u,
-            //     v
-            // );
-            //let color = Rgba8888UNORM::GREEN;
             input.render_target[0] = color.to_u32_xrgb();
         }
     }

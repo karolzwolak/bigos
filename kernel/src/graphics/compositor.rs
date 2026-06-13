@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::{Mutex, RwLock};
 
 const NORMALIZE_Z_INDEX_THRESHOLD: u8 = 250;
+const DEBUG_INFO: bool = false;
 
 pub struct Compositor {
     next_window_id: AtomicU32,
@@ -124,25 +125,30 @@ impl Compositor {
         let framebuffer_width = framebuffer.width;
         let framebuffer_height = framebuffer.height;
 
-        serial_println!(
-            "Composing frame with {} visible windows",
-            visible_windows.len()
-        );
+        if DEBUG_INFO {
+            serial_println!(
+                "Composing frame with {} visible windows",
+                visible_windows.len()
+            );
+        }
 
         // TODO: clear the framebufer
 
-        for window in visible_windows {
+        for window in &visible_windows {
             if window.is_visible {
                 window.buffer.try_swap();
+                window.buffer.draw_border();
 
-                serial_println!(
-                    "Compositing window ID {} at position ({}, {}) with size {}x{}",
-                    window.id,
-                    window.x,
-                    window.y,
-                    window.buffer.width,
-                    window.buffer.height
-                );
+                if DEBUG_INFO {
+                    serial_println!(
+                        "Compositing window ID {} at position ({}, {}) with size {}x{}",
+                        window.id,
+                        window.x,
+                        window.y,
+                        window.buffer.width,
+                        window.buffer.height
+                    );
+                }
 
                 let start_x = window.x.max(0) as u32;
                 let start_y = window.y.max(0) as u32;
@@ -164,14 +170,16 @@ impl Compositor {
 
                 let src_ptr = window.buffer.front_buffer_ptr();
 
-                serial_println!(
-                    "Copying window ID {} to framebuffer region ({}, {}) - ({}, {})",
-                    window.id,
-                    start_x,
-                    start_y,
-                    end_x,
-                    end_y
-                );
+                if DEBUG_INFO {
+                    serial_println!(
+                        "Copying window ID {} to framebuffer region ({}, {}) - ({}, {})",
+                        window.id,
+                        start_x,
+                        start_y,
+                        end_x,
+                        end_y
+                    );
+                }
 
                 for y in 0..copy_height {
                     let src_offset = ((src_y + y) * window.buffer.width + src_x) as usize;

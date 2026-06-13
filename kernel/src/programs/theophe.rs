@@ -1,5 +1,9 @@
-use crate::serial_println;
+use crate::{
+    events::event_buffer::{AsciiChar, EVENT_BUFFER, Keys},
+    serial_println,
+};
 
+use alloc::format;
 use core::cmp::min;
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
@@ -12,9 +16,9 @@ const DEBUG_PRINT: bool = false;
 
 const CHARACTER_WIDTH: usize = 8; // FONT_8X13 width
 const CHARACTER_HEIGHT: usize = 13;
-const MARGIN_LEFT: i32 = 0;
+const MARGIN_LEFT: i32 = 8;
 const MARGIN_TOP: i32 = 0;
-const MAX_LINES: usize = 20;
+const MAX_LINES: usize = 30;
 const LINE_SPACING: i32 = 15;
 const MAX_CHARS_PER_LINE: usize = 80;
 
@@ -141,6 +145,7 @@ pub struct Theophe<D: DrawTarget<Color = Rgb888>> {
     curr_line_idx: usize,
     max_chars_per_line: usize,
     lines: [Line; MAX_LINES],
+    last_command: Line,
 }
 
 impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
@@ -154,11 +159,178 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             curr_line_idx: 0,
             max_chars_per_line,
             lines: [Line::new(); MAX_LINES],
+            last_command: Line::new(),
         }
     }
 
     pub fn render(&mut self) {
         self.redraw_all();
+    }
+
+    pub fn update(&mut self) {
+        let mut dirty = false;
+        loop {
+            let event = EVENT_BUFFER.read();
+            match event {
+                Some(event) => {
+                    let v = event.value;
+                    if v == Keys::ArrowUp as u32 {
+                        self.recall_last_command();
+                    } else if let Some(c) = char::from_u32(v) {
+                        match c {
+                            AsciiChar::BACKSPACE => self.backspace(),
+                            AsciiChar::NEWLINE | AsciiChar::CARRIAGE_RETURN => {
+                                self.last_command = self.lines[self.curr_line_idx];
+                                let cmd = self.last_command;
+                                self.newline();
+                                self.execute_command(&cmd);
+                            }
+                            c if !c.is_control() => {
+                                self.write_bytes(&[c as u8]);
+                            }
+                            _ => {}
+                        }
+                    }
+                    dirty = true;
+                }
+                None => break,
+            }
+        }
+        if dirty {
+            self.render();
+        }
+    }
+
+    fn execute_command(&mut self, line: &Line) {
+        let s = line.as_str().trim();
+        if s.is_empty() {
+            return;
+        }
+
+        let (cmd, args) = match s.find(' ') {
+            Some(i) => s.split_at(i),
+            None => (s, ""),
+        };
+        let args = args.trim_matches(' ');
+
+        match cmd {
+            "ls" => {
+                let (long, path) = if let Some(stripped) = args.strip_prefix("-l") {
+                    (true, stripped.trim())
+                } else {
+                    (false, args)
+                };
+                let path = if path.is_empty() { "/" } else { path };
+                match crate::filesystem::get_sirius().list_directory(path) {
+                    Ok(entries) => {
+                        self.write_line(&format!("{:<10} {:<8} {}", "attr", "size", "name"));
+                        self.write_line(&format!("{:-<10} {:-<8} {:-<20}", "", "", ""));
+                        for entry in &entries {
+                            if long {
+                                let type_char = if entry.file_type
+                                    == crate::filesystem::sirius::FileType::Directory
+                                {
+                                    'd'
+                                } else {
+                                    '-'
+                                };
+                                let attrs = entry.attributes;
+                                let r = if attrs
+                                    .contains(crate::filesystem::sirius::FileAttributes::READ)
+                                {
+                                    'r'
+                                } else {
+                                    '-'
+                                };
+                                let w = if attrs
+                                    .contains(crate::filesystem::sirius::FileAttributes::WRITE)
+                                {
+                                    'w'
+                                } else {
+                                    '-'
+                                };
+                                let x = if attrs
+                                    .contains(crate::filesystem::sirius::FileAttributes::EXECUTE)
+                                {
+                                    'x'
+                                } else {
+                                    '-'
+                                };
+                                self.write_line(&format!(
+                                    "{}{}{}{:<6} {:>8} {}",
+                                    type_char, r, w, x, entry.size, entry.name
+                                ));
+                            } else {
+                                self.write_line(entry.name.as_str());
+                            }
+                        }
+                    }
+                    Err(_) => self.write_line(&format!("ls: no such directory: {}", path)),
+                }
+            }
+            "cat" => {
+                if args.is_empty() {
+                    self.write_line("usage: cat <path>");
+                } else {
+                    let mut buf = [0u8; 2048];
+                    match crate::filesystem::get_sirius().read_file(args, 0, &mut buf) {
+                        Ok(n) => {
+                            let s = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+                            self.write_line(s);
+                        }
+                        Err(_) => self.write_line(&format!("cat: file not found: {}", args)),
+                    }
+                }
+            }
+            "mkdir" => {
+                if args.is_empty() {
+                    self.write_line("usage: mkdir <path>");
+                } else {
+                    match crate::filesystem::get_sirius().create_directory(args) {
+                        Ok(_) => self.write_line(&format!("Directory created: {}", args)),
+                        Err(_) => {
+                            self.write_line(&format!("mkdir: failed to create directory: {}", args))
+                        }
+                    }
+                }
+            }
+            "demo" => match args {
+                "start" | "start -uv" => {
+                    let uv = args == "start -uv";
+                    crate::DEMO_UV_MODE.store(uv, core::sync::atomic::Ordering::Relaxed);
+                    crate::DEMO_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
+                    self.write_line(if uv {
+                        "demo started (uv mode)"
+                    } else {
+                        "demo started"
+                    });
+                }
+                "stop" => {
+                    crate::DEMO_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+                    self.write_line("demo stopped");
+                }
+                _ => self.write_line("usage: demo start [-uv] | stop"),
+            },
+            "help" => {
+                self.write_str(
+                    "Available commands: \n - ls [-l] [dir]\n - cat <path>\n - mkdir <path>\n - demo start [-uv] | stop\n",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn recall_last_command(&mut self) {
+        if !self.last_command.is_empty() {
+            self.lines[self.curr_line_idx] = self.last_command;
+        }
+    }
+
+    fn backspace(&mut self) {
+        let line = &mut self.lines[self.curr_line_idx];
+        if line.length > 0 {
+            line.length -= 1;
+        }
     }
 
     fn get_last_line(&mut self) -> &mut Line {
@@ -236,21 +408,12 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         }
     }
 
-    fn write_bytes(&mut self, text: &str) {
-        let bytes = text.as_bytes();
+    fn write_bytes(&mut self, bytes: &[u8]) {
         let bytes_len = bytes.len();
         let mut bytes_start = 0;
 
         for i in 0..bytes_len {
             if bytes[i] == b'\n' {
-                if DEBUG_PRINT {
-                    serial_println!(
-                        "\\n detected: Writing: '{}'; bytes_length: {}, curr_line_idx: {}",
-                        text,
-                        bytes_len,
-                        self.curr_line_idx
-                    );
-                }
                 if i > bytes_start {
                     self._write_bytes(&bytes[bytes_start..i]);
                 }
@@ -260,25 +423,17 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         }
 
         if bytes_start < bytes_len {
-            if DEBUG_PRINT {
-                serial_println!(
-                    "Writing: '{}'; bytes_length: {}, curr_line_idx: {}",
-                    text,
-                    bytes_len,
-                    self.curr_line_idx
-                );
-            }
             self._write_bytes(&bytes[bytes_start..]);
         }
     }
 
     pub fn write_line(&mut self, text: &str) {
-        self.write_bytes(text);
+        self.write_bytes(text.as_bytes());
         self.newline();
     }
 
     pub fn write_str(&mut self, text: &str) {
-        self.write_bytes(text);
+        self.write_bytes(text.as_bytes());
     }
 
     fn newline(&mut self) {
@@ -325,15 +480,20 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
             serial_println!("Theophe: redraw_all");
         }
 
+        let mut buf = [0u8; 2 + MAX_CHARS_PER_LINE];
         for i in 0..=self.curr_line_idx {
-            if !self.lines[i].is_empty() {
-                let _ = Text::with_text_style(
-                    self.lines[i].as_str(),
-                    self.get_pos(i),
-                    CHARACTER_STYLE,
-                    TEXT_STYLE,
-                )
-                .draw(&mut self.draw_target);
+            let text: &str = if i == self.curr_line_idx {
+                let line = self.lines[i].as_str().as_bytes();
+                buf[0] = b'>';
+                buf[1] = b' ';
+                buf[2..2 + line.len()].copy_from_slice(line);
+                unsafe { core::str::from_utf8_unchecked(&buf[..2 + line.len()]) }
+            } else {
+                self.lines[i].as_str()
+            };
+            if !text.is_empty() {
+                let _ = Text::with_text_style(text, self.get_pos(i), CHARACTER_STYLE, TEXT_STYLE)
+                    .draw(&mut self.draw_target);
             }
         }
     }

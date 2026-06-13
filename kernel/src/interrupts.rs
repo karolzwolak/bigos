@@ -6,6 +6,7 @@ use crate::process::{
 };
 use crate::util::msr::{msr_read, msr_write};
 use crate::{
+    events::event_buffer::{EVENT_BUFFER, InputEvent, KeyState, Keys},
     gdt, hlt_loop,
     memory::paging::{IdendtityAcpiHandler, MemoryMapFrameAllocator},
     serial_print, serial_println,
@@ -24,7 +25,9 @@ use acpi::{
     },
 };
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
+use pc_keyboard::KeyCode;
 use spin::Mutex;
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -37,12 +40,25 @@ use x86_64::{
 
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
-const TIMER_ENABLED: bool = false;
+const TIMER_ENABLED: bool = true;
 
-pub const TSC_MOCK_FREQUENCY: u64 = 2400000000u64;
-pub const TIMER_TICK_INTERVAL_MS: u64 = 100;
-pub const TIMER_TICK_FREQ_DIVIDER: u64 = TIMER_TICK_INTERVAL_MS * 1000;
+const TSC_MOCK_FREQUENCY: u64 = 2400000000u64;
+const TIMER_TICK_INTERVAL_MS: u64 = 1;
+const TIMER_TICK_FREQ_HZ: u64 = 2000 / TIMER_TICK_INTERVAL_MS;
+const TSC_CYCLES_PER_TICK: u64 = TSC_MOCK_FREQUENCY / TIMER_TICK_FREQ_HZ;
 const MSR_IA32_TSC_DEADLINE: u32 = 0x6E0;
+
+static SYSTEM_TICKS: AtomicU64 = AtomicU64::new(0);
+const TICK_DURATION_NS: u64 = 1_000_000_000 / TIMER_TICK_FREQ_HZ;
+const TICK_DURATION_US: u64 = 1_000_000 / TIMER_TICK_FREQ_HZ;
+
+pub fn system_uptime_ns() -> u64 {
+    SYSTEM_TICKS.load(core::sync::atomic::Ordering::Relaxed) * TICK_DURATION_NS
+}
+
+pub fn system_uptime_us() -> u64 {
+    SYSTEM_TICKS.load(core::sync::atomic::Ordering::Relaxed) * TICK_DURATION_US
+}
 
 pub struct LapicPtr {
     address: *mut u32,
@@ -191,7 +207,7 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32) {
         let apic_bus_freq = (test_count as u64 * tsc_freq) / tsc_cycles;
 
         // configure periodic mode
-        let tick_freq = TIMER_TICK_FREQ_DIVIDER;
+        let tick_freq = TIMER_TICK_FREQ_HZ;
         let divider = 16;
         let apic_timer_freq = apic_bus_freq / divider;
         let ticks_needed = (apic_timer_freq / tick_freq) as u32;
@@ -253,8 +269,7 @@ pub unsafe fn init_timer(local_apic_ptr: *mut u32) {
 
         let tsc_freq = TSC_MOCK_FREQUENCY;
         serial_println!("TSC Frequency: {}", tsc_freq);
-        let ticks_per_ms = tsc_freq / TIMER_TICK_FREQ_DIVIDER;
-        let tsc_deadline = tsc_read() + ticks_per_ms;
+        let tsc_deadline = tsc_read() + TSC_CYCLES_PER_TICK;
 
         // write the deadline to the MSR to arm it
         msr_write(MSR_IA32_TSC_DEADLINE, tsc_deadline);
@@ -564,9 +579,11 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         serial_println!("*");
     };
 
+    SYSTEM_TICKS.fetch_add(1, Ordering::Relaxed);
+
     unsafe {
         // re-arm the timer for the next tick
-        let next_deadline = tsc_read() + (TSC_MOCK_FREQUENCY / TIMER_TICK_FREQ_DIVIDER);
+        let next_deadline = tsc_read() + TSC_CYCLES_PER_TICK;
         msr_write(MSR_IA32_TSC_DEADLINE, next_deadline);
 
         interrupt_over();
@@ -574,15 +591,17 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
+    use pc_keyboard::{
+        DecodedKey, HandleControl, KeyState as PcKeyState, Keyboard, ScancodeSet1, layouts,
+    };
     use spin::Mutex;
     use x86_64::instructions::port::Port;
 
     lazy_static! {
-        static ref KEYBOARD: Mutex<Keyboard<layouts::Uk105Key, ScancodeSet1>> =
+        static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
             Mutex::new(Keyboard::new(
                 ScancodeSet1::new(),
-                layouts::Uk105Key,
+                layouts::Us104Key,
                 HandleControl::Ignore
             ));
     }
@@ -591,16 +610,26 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // SAFETY: This port is only read from in this interrupt handler.
     let scancode: u8 = unsafe { keyboard_port.read() };
 
-    if let Ok(Some(event)) = keyboard.add_byte(scancode)
-        && let Some(decoded_key) = keyboard.process_keyevent(event)
-        && KEYBOARD_DEBUG_PRINT
-    {
-        match decoded_key {
-            DecodedKey::Unicode(character) => {
-                serial_print!("{}", character)
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        let is_press =
+            key_event.state == PcKeyState::Down || key_event.state == PcKeyState::SingleShot;
+        if let Some(decoded_key) = keyboard.process_keyevent(key_event)
+            && is_press
+        {
+            let value = match decoded_key {
+                DecodedKey::Unicode(c) => Some(c as u32),
+                DecodedKey::RawKey(KeyCode::ArrowUp) => Some(Keys::ArrowUp as u32),
+                _ => None,
+            };
+            if let Some(v) = value {
+                let _ = EVENT_BUFFER.push(InputEvent::new_key(v, KeyState::Pressed));
             }
-            DecodedKey::RawKey(key) => {
-                serial_print!("{:?}", key)
+
+            if KEYBOARD_DEBUG_PRINT {
+                match decoded_key {
+                    DecodedKey::Unicode(c) => serial_print!("{}", c),
+                    DecodedKey::RawKey(k) => serial_print!("{:?}", k),
+                }
             }
         }
     }
