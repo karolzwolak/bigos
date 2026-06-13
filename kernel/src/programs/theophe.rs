@@ -3,8 +3,8 @@ use crate::{
     serial_println,
 };
 
-use core::{cmp::min, fmt::Write};
 use alloc::format;
+use core::{cmp::min, fmt::Write};
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
@@ -18,7 +18,7 @@ const CHARACTER_WIDTH: usize = 8; // FONT_8X13 width
 const CHARACTER_HEIGHT: usize = 13;
 const MARGIN_LEFT: i32 = 0;
 const MARGIN_TOP: i32 = 0;
-const MAX_LINES: usize = 20;
+const MAX_LINES: usize = 30;
 const LINE_SPACING: i32 = 15;
 const MAX_CHARS_PER_LINE: usize = 80;
 

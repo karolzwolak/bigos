@@ -49,7 +49,7 @@ fn main() -> ! {
     //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
     serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
     let compositor = Compositor::new();
-    let (_window_id, window_buffer) = compositor.create_window(600, 400, 50, 50);
+    let (_window_id, window_buffer) = compositor.create_window(600, 600, 50, 50);
 
     let (window2_id, window3_buffer) = compositor.create_window(400, 300, 700, 200);
     compositor.set_z_index(window2_id, 5);

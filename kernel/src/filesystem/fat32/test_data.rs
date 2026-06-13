@@ -140,9 +140,13 @@ pub fn create_fat32_image() -> Box<[u8; IMAGE_SIZE]> {
     let hello_msg = b"Hello from BigOS!";
     let entry_offset = 32;
 
-    let nam2 = b"SOMEFILE";
-    let ext2 = b"BIN";
-    let bin_data = b"This file contains some binary data!\nAnd may be displayed as plain ASCII text...\nIt also is a bit longer than hello.txt";
+    let nam2 = b"LORE    ";
+    let ext2 = b"TXT";
+    let bin_data = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum eget lobortis risus. Duis molestie enim at ullamcorper gravida. Praesent vel mollis arcu, ornare tincidunt enim. Vivamus luctus convallis urna ac consectetur. Orci varius natoque penatibus et magnis dis parturient montes, nascetur ridiculus mus. Donec pharetra lectus velit, ac tristique lacus placerat id. Vestibulum lobortis imperdiet ultrices.\n
+Donec finibus justo quis cursus iaculis. Donec ut risus non tortor malesuada fringilla. Nullam lectus nunc, vestibulum non efficitur sit amet, mollis et purus. Aenean ultrices enim id nisl ultricies, at euismod tortor lobortis. Cras ut suscipit diam. In hac habitasse platea dictumst. Phasellus non tincidunt mi.\n
+Duis ac dui eros. Aenean quis felis metus. Donec euismod ipsum quis sagittis vulputate. Proin et lectus tincidunt, malesuada leo a, tempus nisl. In dolor ipsum, gravida vitae pellentesque quis, egestas id ligula. Cras tristique et est gravida blandit. Pellentesque vitae justo vel sapien tristique vestibulum nec in lorem.\n
+Curabitur id erat eu massa imperdiet rutrum. Praesent blandit leo nec dapibus semper. Donec id vulputate mi. Pellentesque rutrum aliquam justo, quis rutrum dui molestie hendrerit. Mauris bibendum leo id felis porttitor tincidunt. Sed porttitor aliquam sem ut facilisis. Cras ultricies ipsum eu ultrices placerat. Fusce non malesuada lectus.\n
+Sed id dui fringilla, tincidunt neque scelerisque, pharetra dolor. Sed ultrices venenatis tellus. Nulla dui quam, fermentum quis dignissim sed, commodo a dui. Quisque eu fringilla velit, non finibus tortor morbi.";
     let entry2_offset = 64;
 
     root_dir[entry_offset..entry_offset + 8].copy_from_slice(name);
