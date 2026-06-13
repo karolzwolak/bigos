@@ -33,6 +33,8 @@ use core::sync::atomic::AtomicBool;
 pub static DEMO_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static DEMO_UV_MODE: AtomicBool = AtomicBool::new(false);
 
+#[inline(always)]
+/// Do nothing loop that tells the CPU to halt until the next interrupt
 pub fn hlt_loop() -> ! {
     loop {
         x86_64::instructions::hlt();
