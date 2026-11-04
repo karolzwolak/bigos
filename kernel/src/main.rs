@@ -17,7 +17,7 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 fn main() -> ! {
-    serial_println_core!("Welcome to MofuOS!");
+    serial_println_core!("Welcome to BigOS!");
 
     {
         let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
