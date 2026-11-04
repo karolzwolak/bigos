@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
@@ -8,8 +7,8 @@ use core::sync::atomic::Ordering;
 use kernel::process::elf_loader::{ElfLoadInfo, MEMSTRESS_ELF};
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::scheduler;
-use kernel::{AP_CORES_READY, MAX_CORES, boot_common, bsp_init, serial_println_core};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use kernel::{AP_CORES_READY, MAX_CORES, boot_common, bsp_init, serial_println_core};
 use x86_64::instructions::hlt;
 
 #[panic_handler]
@@ -18,7 +17,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kmain() -> ! {
+extern "C" fn kmain() -> ! {
     unsafe { boot_common::bsp_early_init() };
     test_main();
 }
@@ -101,7 +100,7 @@ fn test_main() -> ! {
         };
 
         match state_opt {
-            Some((kernel::process::process::ProcessState::Terminated, code)) => {
+            Some((kernel::process::ProcessState::Terminated, code)) => {
                 terminated = true;
                 exit_code = code;
                 serial_println_core!(
@@ -134,11 +133,11 @@ fn test_main() -> ! {
         success = false;
     }
 
-    if let Some(code) = exit_code {
-        if code != 0 {
-            serial_println_core!("FAIL: memstress exit_code {} != 0", code);
-            success = false;
-        }
+    if let Some(code) = exit_code
+        && code != 0
+    {
+        serial_println_core!("FAIL: memstress exit_code {} != 0", code);
+        success = false;
     }
 
     // Give scheduler + terminate path a tick to reclaim

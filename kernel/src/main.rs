@@ -5,28 +5,10 @@ mod boot;
 
 use kernel::bsp_init::{init_shared_state_on_bsp, wait_for_ap_cores_blocking};
 use kernel::graphics::compositor::{get_compositor, init_compositor};
+use kernel::testing::{QemuExitCode, exit_qemu};
 use kernel::{interrupts, serial_println_core};
 use x86_64::instructions::hlt;
 extern crate alloc;
-
-#[repr(u32)]
-pub enum QemuExitCode {
-    Success = 0x10,
-    Failed = 0x11,
-}
-
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
-    use x86_64::instructions::{nop, port::Port};
-
-    unsafe {
-        let mut port = Port::new(0xF4);
-        port.write(exit_code as u32);
-    }
-
-    loop {
-        nop();
-    }
-}
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
@@ -70,12 +52,10 @@ fn main() -> ! {
             compositor.process_input_events();
             compositor.compose(fb);
             let time_end = interrupts::system_uptime_ns();
-            let dt: u64 = time_end - time_start;
+            let _dt: u64 = time_end - time_start;
             // time_elapsed += dt;
             //serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
             hlt();
         }
     }
-
-    exit_qemu(QemuExitCode::Success);
 }

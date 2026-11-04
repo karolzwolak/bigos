@@ -31,18 +31,18 @@ impl<T> Vec<T> {
         Self {
             size: 0,
             capacity,
-            data: data,
+            data,
         }
     }
 
     pub fn get(&self, index: usize) -> &T {
         assert!(index < self.size, "Index out of bounds");
-        unsafe { Some(&*self.data.as_ptr().add(index)).unwrap() }
+        unsafe { &*self.data.as_ptr().add(index) }
     }
 
     pub fn get_mut(&mut self, index: usize) -> &mut T {
         assert!(index < self.size, "Index out of bounds");
-        unsafe { Some(&mut *self.data.as_ptr().add(index)).unwrap() }
+        unsafe { &mut *self.data.as_ptr().add(index) }
     }
 
     pub fn resize(&mut self, new_capacity: usize) {
@@ -55,7 +55,7 @@ impl<T> Vec<T> {
             self.capacity = 1;
         }
         while self.capacity < new_capacity {
-            self.capacity = self.capacity * 2;
+            self.capacity *= 2;
         }
 
         let new_layout = Layout::array::<T>(new_capacity).expect("Layout creation failed");
@@ -149,6 +149,12 @@ impl<T> Vec<T> {
         } else {
             unsafe { slice::from_raw_parts_mut(self.data.as_ptr(), self.size) }
         }
+    }
+}
+
+impl<T> Default for Vec<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

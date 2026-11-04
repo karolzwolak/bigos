@@ -69,6 +69,12 @@ impl KeyBitset {
     }
 }
 
+impl Default for KeyBitset {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct KeyboardState {
     // keys currently held
@@ -125,5 +131,11 @@ impl KeyboardState {
     pub fn clear_transient(&mut self) {
         self.key_pressed.clear_all();
         self.key_released.clear_all();
+    }
+}
+
+impl Default for KeyboardState {
+    fn default() -> Self {
+        Self::new()
     }
 }

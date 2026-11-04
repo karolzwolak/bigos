@@ -1,16 +1,15 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
 use core::sync::atomic::Ordering;
 use kernel::process::elf_loader::{ElfLoadInfo, SPINNER_ELF};
-use kernel::process::process::{PID, ProcessState};
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::get_shared_program_data_buffer_mut;
-use kernel::{AP_CORE_COUNT, boot_common, bsp_init, serial_println_core};
+use kernel::process::{PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use kernel::{AP_CORE_COUNT, boot_common, bsp_init, serial_println_core};
 use x86_64::instructions::hlt;
 
 // one more spinner than AP cores, so some core has to take turns between two of them
@@ -28,7 +27,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kmain() -> ! {
+extern "C" fn kmain() -> ! {
     unsafe { boot_common::bsp_early_init() };
     test_main();
 }

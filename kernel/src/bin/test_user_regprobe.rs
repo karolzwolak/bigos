@@ -1,14 +1,13 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
 use kernel::process::elf_loader::{ElfLoadInfo, REGPROBE_ELF};
-use kernel::process::process::{PID, ProcessState};
 use kernel::process::process_manager::PROCESS_MANAGER;
-use kernel::{AP_CORE_COUNT, boot_common, bsp_init, serial_println_core};
+use kernel::process::{PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use kernel::{AP_CORE_COUNT, boot_common, bsp_init, serial_println_core};
 use x86_64::instructions::hlt;
 
 // more processes than AP cores forces some of them to share a core
@@ -23,7 +22,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kmain() -> ! {
+extern "C" fn kmain() -> ! {
     unsafe { boot_common::bsp_early_init() };
     test_main();
 }

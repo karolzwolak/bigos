@@ -1,18 +1,16 @@
 use crate::events::event_buffer::EventBuffer;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb, xrgb_to_rgba};
-use crate::memory::memory::{PAGE_SIZE, align_down, align_up};
+use crate::memory::paging::PAGE_SIZE;
 use crate::process::PID;
-use crate::process::process::PROCESS_EVENT_BUFFER_BASE;
-use alloc::boxed::Box;
+use crate::process::PROCESS_EVENT_BUFFER_BASE;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embedded_graphics::Pixel;
 use embedded_graphics::pixelcolor::Rgb888;
-use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions, Point, Size};
+use embedded_graphics::prelude::{Dimensions, DrawTarget, Point, Size};
 use embedded_graphics::primitives::Rectangle;
 use x86_64::PhysAddr;
 
@@ -138,7 +136,7 @@ impl WindowBuffer {
         let pixel_count = (width * height) as usize;
         let buffer_size = pixel_count * FRAMEBUFFER_BYTES_PER_PIXEL as usize;
 
-        let layout = core::alloc::Layout::from_size_align(buffer_size, PAGE_SIZE as usize).unwrap();
+        let layout = core::alloc::Layout::from_size_align(buffer_size, PAGE_SIZE).unwrap();
         let back_buffer_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut u32 };
         let front_buffer_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut u32 };
 
@@ -302,7 +300,7 @@ impl Drop for WindowBuffer {
     fn drop(&mut self) {
         let pixel_count = (self.width * self.height) as usize;
         let buffer_size = pixel_count * FRAMEBUFFER_BYTES_PER_PIXEL as usize;
-        let layout = core::alloc::Layout::from_size_align(buffer_size, PAGE_SIZE as usize).unwrap();
+        let layout = core::alloc::Layout::from_size_align(buffer_size, PAGE_SIZE).unwrap();
         unsafe {
             alloc::alloc::dealloc(self.back_buffer_ptr() as *mut u8, layout);
             alloc::alloc::dealloc(self.front_buffer_ptr() as *mut u8, layout);

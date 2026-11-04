@@ -6,9 +6,6 @@ use crate::{
 use core::sync::atomic::Ordering;
 use x86_64::instructions::hlt;
 
-const AP_READY_TIMEOUT_TICKS: u64 = 500;
-const AP_READY_POLL_INTERVAL_MS: u64 = 10;
-
 pub fn init_shared_state_on_bsp() {
     init_shared_state();
     serial_println_core!("bsp_init: shared state initialized");

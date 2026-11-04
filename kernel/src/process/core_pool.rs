@@ -1,4 +1,3 @@
-use crate::process::process::INVALID_PID;
 use crate::{MAX_CORES, serial_println};
 use limine::mp::MpInfo;
 use spin::Mutex;
@@ -61,5 +60,11 @@ impl CorePool {
         debug_assert!(core_id < self.total_cores);
 
         self.lapic_ids[core_id as usize]
+    }
+}
+
+impl Default for CorePool {
+    fn default() -> Self {
+        Self::new()
     }
 }

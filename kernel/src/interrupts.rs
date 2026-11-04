@@ -1,62 +1,30 @@
-#![allow(unused)]
-use crate::events::event_buffer::{InputEvent, KeyModifiers, KeyState, Keys};
+use crate::events::event_buffer::{InputEvent, KeyModifiers, KeyState};
 use crate::graphics::compositor;
-use crate::io::serial;
-use crate::process::process::DEFAULT_NEW_PROCESS_STACK_SIZE;
-use crate::process::{
-    process::INVALID_PID,
-    process_manager::{ARCHE_PID, PROCESS_MANAGER},
-};
+use crate::process::DEFAULT_NEW_PROCESS_STACK_SIZE;
 use crate::serial_println_core;
 use crate::trap::{TrapFrame, interrupt_stub, is_user_frame};
 use crate::util::apic::APICOffset;
 use crate::util::cpuinfo::get_current_core_id;
-use crate::util::msr::{msr_read, msr_write};
+use crate::util::msr::msr_write;
 use crate::{
     gdt, hlt_loop,
-    memory::memory::{IdentityAcpiHandler, MemoryMapFrameAllocator},
+    memory::paging::IdentityAcpiHandler,
     serial_print, serial_println,
     util::cpuinfo::{CpuFeatureFlags, get_cpu_info_for_core},
 };
-use acpi::{
-    AcpiTables, PhysicalMapping,
-    platform::interrupt::{Apic, InterruptModel, IoApic},
-    platform::{AcpiMode, AcpiPlatform},
-    sdt::{
-        Signature,
-        madt::{
-            InterruptSourceOverrideEntry, IoApicEntry, LocalApicEntry, Madt, MadtEntry,
-            NmiSourceEntry, PlatformInterruptSourceEntry,
-        },
-    },
-};
+use acpi::{AcpiTables, platform::AcpiPlatform, platform::interrupt::InterruptModel};
 use core::arch::asm;
-use core::arch::x86_64::__rdtscp;
 use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
 use lazy_static::lazy_static;
-use pc_keyboard::KeyCode;
-#[cfg(feature = "ps2_mouse")]
-use ps2_mouse::{Mouse, MouseState};
-use spin::{Mutex, Once, lazy};
-use x86_64::instructions::port::Port;
-use x86_64::structures::paging::frame;
 use x86_64::{
     PhysAddr, VirtAddr,
-    registers::rflags::RFlags,
     structures::{
         idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
         paging::{FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB},
     },
 };
-#[cfg(feature = "ps2_mouse")]
-lazy_static! {
-    static ref MOUSE: Mutex<Mouse> = Mutex::new(Mouse::new());
-}
-
 const TIMER_DEBUG_PRINT: bool = false;
 const KEYBOARD_DEBUG_PRINT: bool = false;
-#[cfg(feature = "ps2_mouse")]
-const MOUSE_DEBUG_PRINT: bool = false;
 const TIMER_ENABLED: bool = true;
 
 /// TSC frequency measured at boot via PIT calibration
@@ -78,16 +46,11 @@ pub const TICK_DURATION_NS: u64 = 1_000_000_000 / TIMER_TICK_FREQ_HZ;
 pub const TICK_DURATION_US: u64 = 1_000_000 / TIMER_TICK_FREQ_HZ;
 
 const LAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_0000_0000;
-const IOAPIC_VIRT_BASE: u64 = 0xFFFF_FFFF_FF00_0000;
 
 const PIT_CHANNEL2_DATA: u16 = 0x42;
 const PIT_CMD: u16 = 0x43;
 const PIT_PC_SPEAKER: u16 = 0x61;
 const PIT_BASE_HZ: u64 = 1_193_182;
-
-const KEYBOARD_IRQ: u32 = 1;
-#[cfg(feature = "ps2_mouse")]
-const MOUSE_IRQ: u32 = 12;
 
 /// Measure the TSC frequency by counting cycles over a PIT-timed interval
 /// Must be called with interrupts disabled
@@ -310,149 +273,113 @@ unsafe fn map_apic_mem(
     page.start_address()
 }
 
-unsafe fn init_io_apic(
-    phys_address: u32,
-    mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-) {
-    serial_println!("Mapping IO APIC");
-
-    let virt_addr =
-        unsafe { map_apic_mem(phys_address, IOAPIC_VIRT_BASE, mapper, frame_allocator) };
-
-    let io_apic_ptr = virt_addr.as_mut_ptr::<u32>();
-
-    unsafe {
-        const IOAPIC_ID_REG: u32 = 0x00;
-        const IOAPIC_VER_REG: u32 = 0x01;
-        io_apic_ptr.offset(0).write_volatile(IOAPIC_ID_REG);
-        let ioapic_id = io_apic_ptr.offset(4).read_volatile() >> 24;
-        serial_println!("IO APIC ID: {}", ioapic_id);
-
-        io_apic_ptr.offset(0).write_volatile(IOAPIC_VER_REG);
-        let version = io_apic_ptr.offset(4).read_volatile() & 0xFF;
-        let max_redir_entry = ((io_apic_ptr.offset(4).read_volatile() >> 16) & 0xFF) + 1;
-        serial_println!(
-            "IO APIC version: {}, max redirection entries: {}",
-            version,
-            max_redir_entry
-        );
-
-        set_ioapic_redirection(
-            io_apic_ptr,
-            KEYBOARD_IRQ,
-            InterruptIndex::Keyboard as u8,
-            false,
-        );
-
-        #[cfg(feature = "ps2_mouse")]
-        set_ioapic_redirection(io_apic_ptr, MOUSE_IRQ, InterruptIndex::Mouse as u8, false);
-    }
-}
-
 unsafe fn set_ioapic_redirection(
     io_apic_ptr: *mut u32,
     irq: u32,
     vector: u8,
     level_triggered: bool,
 ) {
-    let entry_low = 0x10 + (irq * 2);
-    let entry_high = 0x10 + (irq * 2 + 1);
+    unsafe {
+        let entry_low = 0x10 + (irq * 2);
+        let entry_high = 0x10 + (irq * 2 + 1);
 
-    let mut low_value = vector as u32;
-    if level_triggered {
-        low_value |= 1 << 15;
+        let mut low_value = vector as u32;
+        if level_triggered {
+            low_value |= 1 << 15;
+        }
+        // Bit 16: 0 = enabled, 1 = masked
+        // Bit 11: destination mode: 0 = physical, 1 = logical
+        // Bits 8-10: delivery mode: 000 = fixed
+        // Bits 24-27: destination field: APIC ID of target CPU
+        let high_value = 0u32; // Send to APIC ID 0 (BSP)
+
+        io_apic_ptr.offset(0).write_volatile(entry_low);
+        io_apic_ptr.offset(4).write_volatile(low_value);
+
+        io_apic_ptr.offset(0).write_volatile(entry_high);
+        io_apic_ptr.offset(4).write_volatile(high_value);
+
+        io_apic_ptr.offset(0).write_volatile(entry_low);
+        let readback_low = io_apic_ptr.offset(4).read_volatile();
+
+        serial_println!(
+            "IO APIC IRQ {}: wrote {:#x}, readback {:#x} (vector: {}, enabled: {})",
+            irq,
+            low_value,
+            readback_low,
+            readback_low & 0xFF,
+            (readback_low >> 16) & 1 == 0,
+        );
     }
-    // Bit 16: 0 = enabled, 1 = masked
-    // Bit 11: destination mode: 0 = physical, 1 = logical
-    // Bits 8-10: delivery mode: 000 = fixed
-    // Bits 24-27: destination field: APIC ID of target CPU
-    let high_value = 0u32; // Send to APIC ID 0 (BSP)
-
-    io_apic_ptr.offset(0).write_volatile(entry_low);
-    io_apic_ptr.offset(4).write_volatile(low_value);
-
-    io_apic_ptr.offset(0).write_volatile(entry_high);
-    io_apic_ptr.offset(4).write_volatile(high_value);
-
-    io_apic_ptr.offset(0).write_volatile(entry_low);
-    let readback_low = io_apic_ptr.offset(4).read_volatile();
-
-    serial_println!(
-        "IO APIC IRQ {}: wrote {:#x}, readback {:#x} (vector: {}, enabled: {})",
-        irq,
-        low_value,
-        readback_low,
-        readback_low & 0xFF,
-        (readback_low >> 16) & 1 == 0,
-    );
 }
 
 pub unsafe fn init_lapic_for_current_core(core_id: u8) {
-    let lapic_ptr = get_lapic_base_addr();
+    unsafe {
+        let lapic_ptr = get_lapic_base_addr();
 
-    serial_println!("Core {}: Initializing Local APIC...", core_id);
+        serial_println!("Core {}: Initializing Local APIC...", core_id);
 
-    // Enable the APIC by setting the Spurious Interrupt Vector Register
-    // Bit 8 = APIC Software Enable/Disable
-    // Bits 0-7 = Spurious vector
-    let svr = lapic_ptr.offset(APICOffset::Svr as isize / 4);
-    let current_svr = svr.read_volatile();
-    svr.write_volatile(current_svr | (1 << 8) | 0xFF);
-    serial_println!(
-        "Core {}: APIC enabled (SVR = {:#x})",
-        core_id,
-        current_svr | (1 << 8) | 0xFF
-    );
+        // Enable the APIC by setting the Spurious Interrupt Vector Register
+        // Bit 8 = APIC Software Enable/Disable
+        // Bits 0-7 = Spurious vector
+        let svr = lapic_ptr.offset(APICOffset::Svr as isize / 4);
+        let current_svr = svr.read_volatile();
+        svr.write_volatile(current_svr | (1 << 8) | 0xFF);
+        serial_println!(
+            "Core {}: APIC enabled (SVR = {:#x})",
+            core_id,
+            current_svr | (1 << 8) | 0xFF
+        );
 
-    // Mask all LVT entries initially
-    lapic_ptr
-        .offset(APICOffset::LvtT as isize / 4)
-        .write_volatile(0x10000);
-    lapic_ptr
-        .offset(APICOffset::LvtLint0 as isize / 4)
-        .write_volatile(0x10000);
-    lapic_ptr
-        .offset(APICOffset::LvtLint1 as isize / 4)
-        .write_volatile(0x10000);
-    lapic_ptr
-        .offset(APICOffset::LvtErr as isize / 4)
-        .write_volatile(0x10000);
-    lapic_ptr
-        .offset(APICOffset::LvtPmcr as isize / 4)
-        .write_volatile(0x10000);
-    lapic_ptr
-        .offset(APICOffset::LvtTsr as isize / 4)
-        .write_volatile(0x10000);
-    serial_println!("Core {}: LVT entries masked", core_id);
+        // Mask all LVT entries initially
+        lapic_ptr
+            .offset(APICOffset::LvtT as isize / 4)
+            .write_volatile(0x10000);
+        lapic_ptr
+            .offset(APICOffset::LvtLint0 as isize / 4)
+            .write_volatile(0x10000);
+        lapic_ptr
+            .offset(APICOffset::LvtLint1 as isize / 4)
+            .write_volatile(0x10000);
+        lapic_ptr
+            .offset(APICOffset::LvtErr as isize / 4)
+            .write_volatile(0x10000);
+        lapic_ptr
+            .offset(APICOffset::LvtPmcr as isize / 4)
+            .write_volatile(0x10000);
+        lapic_ptr
+            .offset(APICOffset::LvtTsr as isize / 4)
+            .write_volatile(0x10000);
+        serial_println!("Core {}: LVT entries masked", core_id);
 
-    lapic_ptr
-        .offset(APICOffset::Esr as isize / 4)
-        .write_volatile(0);
-    lapic_ptr
-        .offset(APICOffset::Esr as isize / 4)
-        .write_volatile(0);
+        lapic_ptr
+            .offset(APICOffset::Esr as isize / 4)
+            .write_volatile(0);
+        lapic_ptr
+            .offset(APICOffset::Esr as isize / 4)
+            .write_volatile(0);
 
-    lapic_ptr
-        .offset(APICOffset::Eoi as isize / 4)
-        .write_volatile(0);
+        lapic_ptr
+            .offset(APICOffset::Eoi as isize / 4)
+            .write_volatile(0);
 
-    // Set Task Priority to 0
-    lapic_ptr
-        .offset(APICOffset::Tpr as isize / 4)
-        .write_volatile(0);
+        // Set Task Priority to 0
+        lapic_ptr
+            .offset(APICOffset::Tpr as isize / 4)
+            .write_volatile(0);
 
-    // Set Logical Destination Register
-    lapic_ptr
-        .offset(APICOffset::Ldr as isize / 4)
-        .write_volatile((core_id as u32) << 24);
+        // Set Logical Destination Register
+        lapic_ptr
+            .offset(APICOffset::Ldr as isize / 4)
+            .write_volatile((core_id as u32) << 24);
 
-    // Set Destination Format Register for flat model
-    lapic_ptr
-        .offset(APICOffset::Dfr as isize / 4)
-        .write_volatile(0xFFFFFFFF);
+        // Set Destination Format Register for flat model
+        lapic_ptr
+            .offset(APICOffset::Dfr as isize / 4)
+            .write_volatile(0xFFFFFFFF);
 
-    serial_println!("Core {}: APIC initialization complete", core_id);
+        serial_println!("Core {}: APIC initialization complete", core_id);
+    }
 }
 
 unsafe fn init_local_apic(
@@ -579,20 +506,22 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32, core_id: u8) {
 }
 
 pub unsafe fn set_tsc_aux(core_id: u8) {
-    // Store core ID in low byte of TSC_AUX
-    let aux_value = core_id as u64;
+    unsafe {
+        // Store core ID in low byte of TSC_AUX
+        let aux_value = core_id as u64;
 
-    // Write to IA32_TSC_AUX MSR (0xC0000103)
-    let low = aux_value as u32;
-    let high = (aux_value >> 32) as u32;
+        // Write to IA32_TSC_AUX MSR (0xC0000103)
+        let low = aux_value as u32;
+        let high = (aux_value >> 32) as u32;
 
-    asm!(
-        "wrmsr",
-        in("ecx") 0xC0000103_u32,
-        in("eax") low,
-        in("edx") high,
-        options(nostack, preserves_flags)
-    );
+        asm!(
+            "wrmsr",
+            in("ecx") 0xC0000103_u32,
+            in("eax") low,
+            in("edx") high,
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 pub unsafe fn init_timer_for_core(core_id: u8) {
@@ -614,7 +543,7 @@ pub unsafe fn init_timer_for_core(core_id: u8) {
     unsafe { init_timer_tsc(lapic_addr, core_id) };
 }
 
-pub unsafe fn init_timer_tsc(local_apic_ptr: *mut u32, core_id: u8) {
+pub unsafe fn init_timer_tsc(local_apic_ptr: *mut u32, _core_id: u8) {
     serial_println_core!("TSC-Deadline mode supported, using for timer");
 
     unsafe {
@@ -638,13 +567,6 @@ pub unsafe fn init_timer_tsc(local_apic_ptr: *mut u32, core_id: u8) {
     }
 
     serial_println!("Timer configured in TSC-Deadline mode");
-}
-
-unsafe fn init_keyboard(local_apic_ptr: *mut u32) {
-    // unsafe {
-    //     let keyboard_register = local_apic_ptr.offset(APICOffset::LvtLint1 as isize / 4);
-    //     keyboard_register.write_volatile(InterruptIndex::Keyboard as u8 as u32);
-    // }
 }
 
 pub fn enable_interrupts() {
@@ -733,9 +655,7 @@ pub unsafe fn init_acpi(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) {
     serial_println!("init_acpi()");
-    let handler = IdentityAcpiHandler {
-        phys_offset: phys_offset,
-    };
+    let handler = IdentityAcpiHandler { phys_offset };
     serial_println!("creating AcpiTables");
     let acpi_tables =
         unsafe { AcpiTables::from_rsdp(handler, rsdp_addr).expect("Failed to parse ACPI") };
@@ -746,8 +666,6 @@ pub unsafe fn init_acpi(
         AcpiPlatform::new(acpi_tables, handler).expect("Cannot create AcpiPlatform");
 
     let mut lapic_addr: u32 = 0;
-    let mut io_apic_addr: u32 = 0;
-    let mut got_apic_addr = false;
 
     serial_println!("AcpiPlatform created");
 
@@ -756,10 +674,9 @@ pub unsafe fn init_acpi(
             serial_println!("APIC supported");
             lapic_addr = apic.local_apic_address as u32;
             serial_println!("Found {} IO APICs", apic.io_apics.len());
-            let io_apic = apic.io_apics.get(0).unwrap();
+            let io_apic = apic.io_apics.first().unwrap();
             let io_apic_id = io_apic.id;
-            io_apic_addr = io_apic.address;
-            got_apic_addr = true;
+            let io_apic_addr = io_apic.address;
             let gsi_base = io_apic.global_system_interrupt_base;
 
             serial_println!("LAPIC at addr: {:#x}", lapic_addr);
@@ -775,15 +692,10 @@ pub unsafe fn init_acpi(
             let ioapic_ptr = ioapic_virt.as_mut_ptr::<u32>();
 
             let mut keyboard_irq: u32 = 1;
-            #[cfg(feature = "ps2_mouse")]
-            let mut mouse_irq: u32 = 12;
 
             for iso in apic.interrupt_source_overrides.iter() {
-                match iso.isa_source {
-                    1 => keyboard_irq = iso.global_system_interrupt,
-                    #[cfg(feature = "ps2_mouse")]
-                    12 => mouse_irq = iso.global_system_interrupt,
-                    _ => {}
+                if iso.isa_source == 1 {
+                    keyboard_irq = iso.global_system_interrupt;
                 }
                 serial_println!(
                     "ISO: ISA IRQ {} -> GSI {}",
@@ -799,8 +711,6 @@ pub unsafe fn init_acpi(
                     InterruptIndex::Keyboard as u8,
                     false,
                 );
-                #[cfg(feature = "ps2_mouse")]
-                set_ioapic_redirection(ioapic_ptr, mouse_irq, InterruptIndex::Mouse as u8, false);
             }
         }
         _ => {
@@ -812,13 +722,6 @@ pub unsafe fn init_acpi(
     }
 
     disable_pic();
-
-    #[cfg(feature = "ps2_mouse")]
-    {
-        MOUSE.lock().init().unwrap();
-        MOUSE.lock().set_on_complete(mouse_on_packed_processed);
-        serial_println_core!("Mouse initialized");
-    }
 }
 
 lazy_static! {
@@ -849,14 +752,11 @@ lazy_static! {
         // Hardware interrupts
         unsafe {
             idt[InterruptIndex::Timer as u8]
-                .set_handler_addr(VirtAddr::new(timer_interrupt_stub as usize as u64));
+                .set_handler_addr(VirtAddr::new(timer_interrupt_stub as *const () as usize as u64));
             idt[InterruptIndex::Keyboard as u8]
-                .set_handler_addr(VirtAddr::new(keyboard_interrupt_stub as usize as u64));
+                .set_handler_addr(VirtAddr::new(keyboard_interrupt_stub as *const () as usize as u64));
             idt[InterruptIndex::Reschedule as u8]
-                .set_handler_addr(VirtAddr::new(reschedule_interrupt_stub as usize as u64));
-            #[cfg(feature = "ps2_mouse")]
-            idt[InterruptIndex::Mouse as u8]
-                .set_handler_addr(VirtAddr::new(mouse_interrupt_stub as usize as u64));
+                .set_handler_addr(VirtAddr::new(reschedule_interrupt_stub as *const () as usize as u64));
         }
 
         //unsafe {idt[0x80].set_handler_fn(syscall_int80_handler).set_stack_index(1)};
@@ -1062,8 +962,6 @@ extern "C" fn reschedule_interrupt_handler(_frame: &mut TrapFrame) {
 interrupt_stub!(timer_interrupt_stub, timer_interrupt_handler);
 interrupt_stub!(keyboard_interrupt_stub, keyboard_interrupt_handler);
 interrupt_stub!(reschedule_interrupt_stub, reschedule_interrupt_handler);
-#[cfg(feature = "ps2_mouse")]
-interrupt_stub!(mouse_interrupt_stub, mouse_interrupt_handler);
 
 extern "C" fn keyboard_interrupt_handler(_frame: &mut TrapFrame) {
     use pc_keyboard::{
@@ -1110,19 +1008,15 @@ extern "C" fn keyboard_interrupt_handler(_frame: &mut TrapFrame) {
         if let Some(decoded_key) = decoded_key {
             match decoded_key {
                 DecodedKey::Unicode(c) => {
-                    unsafe {
-                        compositor::get_input_event_buffer()
-                            .push(InputEvent::new_char(c as u32, key_state, modifiers));
-                    };
+                    let _ = compositor::get_input_event_buffer()
+                        .push(InputEvent::new_char(c as u32, key_state, modifiers));
                     if KEYBOARD_DEBUG_PRINT {
                         serial_println_core!("keyboard_handler: Pushed char: {}", c);
                     }
                 }
                 DecodedKey::RawKey(k) => {
-                    unsafe {
-                        compositor::get_input_event_buffer()
-                            .push(InputEvent::new_key(k as u32, key_state, modifiers));
-                    };
+                    let _ = compositor::get_input_event_buffer()
+                        .push(InputEvent::new_key(k as u32, key_state, modifiers));
                     if KEYBOARD_DEBUG_PRINT {
                         serial_println_core!("keyboard_handler: Pushed key: {:?}", k);
                     }
@@ -1133,67 +1027,6 @@ extern "C" fn keyboard_interrupt_handler(_frame: &mut TrapFrame) {
 
     unsafe {
         interrupt_over();
-    }
-}
-
-#[cfg(feature = "ps2_mouse")]
-extern "C" fn mouse_interrupt_handler(_frame: &mut TrapFrame) {
-    if MOUSE_DEBUG_PRINT {
-        serial_println_core!("Mouse interrupt received");
-    }
-
-    let mut mouse_port = Port::new(0x60);
-    let packet: u8 = unsafe { mouse_port.read() };
-    let mut mouse = MOUSE.lock();
-    mouse.process_packet(packet);
-
-    unsafe {
-        interrupt_over();
-    }
-}
-
-#[cfg(feature = "ps2_mouse")]
-fn mouse_on_packed_processed(mouse_state: MouseState) {
-    use crate::events::event_buffer::{MouseButtons, MouseEvent};
-    if MOUSE_DEBUG_PRINT {
-        serial_println_core!("mouse_on_packed_processed: Mouse state: {:?}", mouse_state);
-    }
-
-    let buttons = {
-        let mut mouse_buttons = MouseButtons::empty();
-        if mouse_state.left_button_down() {
-            mouse_buttons |= MouseButtons::LEFT;
-        }
-        if mouse_state.right_button_down() {
-            mouse_buttons |= MouseButtons::RIGHT;
-        }
-        // Middle button not accessible via public API
-        //TODO: can try to read from mem layout
-        mouse_buttons
-    };
-
-    // Overflow flags not accessible via public API
-    let x_overflow = false;
-    let y_overflow = false;
-
-    let mouse_event = MouseEvent {
-        x_delta: mouse_state.get_x(),
-        y_delta: -mouse_state.get_y(),
-        buttons,
-        x_overflow,
-        y_overflow,
-    };
-
-    let input_event = InputEvent::new_mouse(mouse_event);
-    match unsafe { compositor::get_input_event_buffer().push(input_event) } {
-        Ok(()) => {
-            if MOUSE_DEBUG_PRINT {
-                serial_println_core!("Mouse event pushed to buffer: {:?}", mouse_event);
-            }
-        }
-        Err(e) => {
-            serial_println_core!("Failed to push mouse event to buffer: {:?}", e);
-        }
     }
 }
 
