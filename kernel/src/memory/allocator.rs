@@ -6,7 +6,7 @@ use core::{
     ptr::NonNull,
 };
 use x86_64::{
-    VirtAddr,
+    PhysAddr, VirtAddr,
     structures::paging::{
         FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB, mapper::MapToError,
     },
@@ -26,7 +26,7 @@ pub static ALLOCATOR: MutexWrapper<FixedSizeBlockAllocator> =
     MutexWrapper::new(FixedSizeBlockAllocator::new());
 
 pub const HEAP_POINTER: usize = 0xFFFF_8080_0000_0000;
-pub const HEAP_SIZE_BYTES: usize = 16 * 1024 * 1024; // 16 MB
+pub const HEAP_SIZE_BYTES: usize = 32 * 1024 * 1024; // 64 MB
 
 // Wrapper around spin::Mutex to implement GlobalAlloc on a foreign type
 pub struct MutexWrapper<T> {
@@ -45,8 +45,8 @@ impl<T> MutexWrapper<T> {
     }
 }
 
-/// Block sizes used by the fixed-size block allocator.
-/// Also used as alignment for each block so they need to be powers of two.
+/// Block sizes used by the fixed-size block allocator
+/// Also used as alignment for each block so they need to be powers of two
 const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
 struct AllocatorListNode {
@@ -76,8 +76,8 @@ pub fn init_heap(
 
     let heap_ptr = VirtAddr::new(HEAP_POINTER as u64);
     let heap_end = heap_ptr + HEAP_SIZE_BYTES as u64 - 1;
-    let heap_start_page = Page::containing_address(heap_ptr);
-    let heap_last_page = Page::containing_address(heap_end);
+    let heap_start_page: Page<Size4KiB> = Page::containing_address(heap_ptr);
+    let heap_last_page: Page<Size4KiB> = Page::containing_address(heap_end);
     let page_range = Page::range_inclusive(heap_start_page, heap_last_page);
 
     serial_println!(
@@ -95,6 +95,12 @@ pub fn init_heap(
         unsafe {
             mapper.map_to(page, frame, flags, frame_allocator)?.flush();
         }
+
+        // serial_println!(
+        //     "Mapped page {:#x} to frame {:#x}",
+        //     page.start_address(),
+        //     frame.start_address()
+        // );
     }
     serial_println!("All heap pages mapped successfully");
 
@@ -117,10 +123,6 @@ impl FixedSizeBlockAllocator {
         }
     }
 
-    /// # Safety
-    ///
-    /// `heap_start` must be a valid virtual address pointing to at least `heap_size` bytes of
-    /// writable memory that is exclusively owned by this allocator and not used for anything else.
     pub unsafe fn init_fallback_allocator(&mut self, heap_start: usize, heap_size: usize) {
         serial_println!(
             "Initializing fallback allocator: HEAP_START={:#x}, HEAP_SIZE={:#x}",

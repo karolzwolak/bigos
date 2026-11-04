@@ -1,8 +1,17 @@
 use crate::data_structures::vector::Vec;
+use crate::process::process::ProcessResources;
+//use alloc::vec::Vec;
+use crate::memory::usermem::USER_STACK_TOP;
+use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
-use crate::process::task::{INVALID_PID, Process, ProcessState};
-use crate::serial_println;
+use crate::process::process::{INVALID_PID, MAX_PRIORITY, PID, Process, ProcessState};
+use crate::process::scheduler;
+use crate::process::task::{self, TaskState};
+use crate::{serial_println, serial_println_core};
+use alloc::string::String;
 use spin::Mutex;
+use x86_64::PhysAddr;
+use x86_64::instructions::interrupts;
 
 pub const ARCHE_PID: usize = 0;
 
@@ -20,20 +29,19 @@ pub enum ProcessError {
     ParentNotFound,
     DoubleDelete,
     ElfLoadError(ElfLoadError),
+    NoCoresAvailable,
+    SchedulerError,
+    OutOfTaskSlots,
 }
 
+/// Manages processes and their associated kernel threads
+/// Implements task parallelism using a one-to-one threading model
 pub struct ProcessManager {
     processes: Vec<Process>,
     new_pid: usize,
 }
 
 unsafe impl Send for ProcessManager {}
-
-impl Default for ProcessManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl ProcessManager {
     pub fn new() -> Self {
@@ -44,68 +52,110 @@ impl ProcessManager {
     }
 
     pub fn init_arche(&mut self) -> usize {
-        // let arche = Process::new(
-        //     ARCHE_PID,
-        //     ARCHE_PID,
-        //     MAX_PRIORITY,
-        //     String::from("arche"),
-        //     true,
-        //     ProcessResources {
-        //         memory_limit: usize::MAX,
-        //         memory_used: 0,
-        //         cpu_time_slice: 0,
-        //     },
-        //     0,
-        //     0,
-        //     0,
-        // );
+        let arche = Process::new(
+            ARCHE_PID,
+            ARCHE_PID,
+            MAX_PRIORITY,
+            String::from("arche"),
+            true,
+            ProcessResources {
+                memory_limit: usize::MAX,
+                memory_used: 0,
+                cpu_time_slice: 0,
+            },
+            0,
+        );
         serial_println!("Initialized arche process with PID 0");
-        // self.processes.push(arche);
+        self.processes.push(arche.unwrap());
         0
     }
 
-    pub fn create_process(
+    pub fn create_process_from_elf(
         &mut self,
         parent_pid: usize,
-        _priority: u8,
-        _name_ptr: *const u8,
-        _name_len: u8,
-        _is_out: bool,
+        elf_info: &crate::process::ElfLoadInfo,
+        name: &str,
+        priority: u8,
     ) -> Result<usize, ProcessError> {
-        assert!(
-            parent_pid != INVALID_PID,
-            "Parent PID cannot be INVALID_PID"
-        );
+        // Verify parent exists
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!("create_process_from_elf");
+        }
+
+        let _parent = self
+            .get_process(parent_pid)
+            .map_err(|_| ProcessError::ParentNotFound)?;
 
         let new_pid = self.new_pid;
         self.new_pid += 1;
 
-        // let parent = self.get_process_mut(parent_pid)?;
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!("create_process_from_elf: assigned pid: {}", new_pid);
+        }
 
-        // //TODO:
-        // //let child_resources = if is_out {
-        // let resources = ProcessResources {
-        //     memory_limit: parent.resources.memory_limit / 4,
-        //     memory_used: 0,
-        //     cpu_time_slice: parent.resources.cpu_time_slice / 2,
-        // };
+        let total_cores = CORE_POOL.lock().total_cores() as usize;
+        let core_id = {
+            let mut best_core = 1u8;
+            let mut best_count = usize::MAX;
+            for c in 1..total_cores {
+                let queued = scheduler::core_runnable_tasks_count(c as u8);
+                if queued < best_count {
+                    best_count = queued;
+                    best_core = c as u8;
+                }
+            }
+            best_core
+        };
 
-        // let name_str = unsafe {
-        //     let slice = core::slice::from_raw_parts(name_ptr, name_len as usize);
-        //     String::from_utf8_lossy(slice).into_owned()
-        // };
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!("create_process_from_elf: assigned Core ID: {}", core_id);
+        }
 
-        // let mut new_process = Process::new(
-        //     new_pid, parent_pid, priority, name_str, is_out, resources,
-        //     0, // TODO: will be set when loading program
-        //     0, // TODO: will be set when allocating process memory
-        //     0, //TODO: will be set when creating process page tables
-        // );
-        // new_process.state = ProcessState::Ready;
+        // Create process structure with ELF-loaded memory
+        let mut process = Process::create_with_elf(elf_info, name, new_pid, parent_pid)
+            .map_err(|_| ProcessError::SchedulerError)?;
 
-        // parent.children.push(new_pid);
+        // Set priority and state
+        process.priority = priority;
+        process.state = ProcessState::Ready;
 
-        // self.processes.push(new_process);
+        let cr3 = process.memory_layout.top_page_table_phys.as_u64();
+        let Some(slot_index) = task::allocate_task_slot(new_pid, priority, core_id, cr3) else {
+            let user_mgr = crate::memory::get_user_mem_mgr();
+            let mut frame_allocator = crate::memory::get_frame_allocator();
+            process
+                .memory_layout
+                .free_address_space(user_mgr, &mut frame_allocator);
+            return Err(ProcessError::OutOfTaskSlots);
+        };
+        task::init_task_stack(slot_index, elf_info.entry_point, USER_STACK_TOP);
+
+        // Store the process BEFORE enqueuing to the scheduler, an AP core can pick the
+        // task up the instant it is queued
+        self.processes.push(process);
+
+        task::slot(slot_index).set_state(TaskState::Ready);
+        scheduler::core_enqueue_ready_task(core_id, slot_index, priority);
+
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!(
+                "create_process_from_elf: enqueued process PID {} on core {}; priority: {}",
+                new_pid,
+                core_id,
+                priority
+            );
+        }
+
+        if crate::process::PROCESS_DEBUG_PRINT {
+            serial_println!(
+                "Created userspace process {} (PID {}) from ELF on core {} with priority {}",
+                name,
+                new_pid,
+                core_id,
+                priority
+            );
+        }
+
         Ok(new_pid)
     }
 
@@ -119,24 +169,35 @@ impl ProcessManager {
             return Err(ProcessError::DoubleDelete);
         }
 
-        let children = {
+        let children: Vec<PID>;
+        {
             let process = self.get_process_mut(pid)?;
+            children = process.children.clone();
             process.state = ProcessState::Terminated;
             process.exit_code = Some(exit_code);
-            process.children.clone()
-        };
 
-        if let Ok(parent) = self.get_process_mut(pid) {
-            for child_pid in parent.children.iter_mut() {
-                if *child_pid == pid {
-                    *child_pid = INVALID_PID;
+            if process.memory_layout.top_page_table_phys.as_u64() != 0 {
+                let user_mgr = crate::memory::get_user_mem_mgr();
+                let mut frame_allocator = crate::memory::get_frame_allocator();
+                process
+                    .memory_layout
+                    .free_address_space(user_mgr, &mut frame_allocator);
+                process.memory_layout.top_page_table_phys = PhysAddr::new(0);
+                process.memory_layout.regions.clear();
+                if crate::process::PROCESS_DEBUG_PRINT {
+                    serial_println!(
+                        "terminate_process: freed address space for PID {} (free frames: {})",
+                        pid,
+                        frame_allocator.free_frame_count()
+                    );
                 }
             }
         }
 
+        // Handle children
         if cascade {
             for child_pid in children.iter().copied() {
-                let _ = self.terminate_process(child_pid, exit_code, true);
+                task::request_kill(child_pid, exit_code);
             }
         } else {
             for child_pid in children.iter().copied() {
@@ -153,7 +214,10 @@ impl ProcessManager {
         Ok(())
     }
 
-    pub fn cleanup_dead(&mut self) {}
+    pub fn cleanup_dead(&mut self) {
+        self.processes
+            .retain(|p| p.state != ProcessState::Terminated);
+    }
 
     pub fn get_process(&self, pid: usize) -> Result<&Process, ProcessError> {
         assert!(pid != INVALID_PID, "get_process: PID cannot be INVALID_PID");
@@ -176,5 +240,9 @@ impl ProcessManager {
 
     pub fn get_process_list(&self) -> &Vec<Process> {
         &self.processes
+    }
+
+    pub fn process_count(&self) -> usize {
+        self.processes.len()
     }
 }

@@ -2,6 +2,31 @@ use crate::serial_println;
 use alloc::vec::Vec;
 use elf::ElfBytes;
 
+pub const RUST_FIRST_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/rust_first");
+pub const THEOPHE_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/theophe");
+pub const MEMSTRESS_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/memstress");
+pub const WINSTRESS_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/winstress");
+pub const REGPROBE_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/regprobe");
+pub const SPINNER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/spinner");
+pub const BUSYLOOP_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/busyloop");
+pub const YIELDLOOP_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/yieldloop");
+pub const WORKER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/worker");
+pub const SLEEPER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/sleeper");
+pub const PINGPONG_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/pingpong");
+pub const FPUSTRESS_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fpustress");
+
 #[derive(Debug)]
 pub struct ElfLoadInfo {
     pub entry_point: u64,
@@ -14,8 +39,16 @@ pub struct ElfLoadInfo {
 pub struct LoadSegment {
     pub vaddr: u64,
     pub in_file_size: u64,
-    pub in_memory_size: u64, // includes the bss section
+    pub in_memory_size: u64,
+    pub flags: u32,
     pub data: Vec<u8>,
+}
+
+#[repr(u32)]
+pub enum ElfLoadFlags {
+    Executable = 1,
+    Writable = 2,
+    Readable = 4,
 }
 
 #[derive(Debug)]
@@ -48,7 +81,8 @@ fn merge_segments(segments: Vec<LoadSegment>) -> Vec<LoadSegment> {
         if next.vaddr <= curr_end {
             let next_end = next.vaddr + next.in_memory_size;
             let new_end = core::cmp::max(next_end, curr_end);
-            curr_seg.in_memory_size = new_end - curr_end;
+            curr_seg.in_memory_size = new_end - curr_seg.vaddr;
+            curr_seg.flags |= next.flags;
 
             if next.in_file_size > 0 {
                 let offset_in_curr = (next.vaddr - curr_seg.vaddr) as usize;
@@ -110,10 +144,11 @@ impl ElfLoadInfo {
                 let offset = segment.p_offset;
 
                 serial_println!(
-                    "ELF: Found LOAD segment: vaddr={:#x}, in_file_size={}, in_memory_size={}",
+                    "ELF: Found LOAD segment: vaddr={:#x}, in_file_size={}, in_memory_size={}, flags={:#x}",
                     vaddr,
                     in_file_size,
-                    in_memory_size
+                    in_memory_size,
+                    segment.p_flags,
                 );
 
                 min_vaddr = core::cmp::min(vaddr, min_vaddr);
@@ -136,6 +171,7 @@ impl ElfLoadInfo {
                     vaddr,
                     in_file_size,
                     in_memory_size,
+                    flags: segment.p_flags,
                     data: segment_data,
                 });
             }

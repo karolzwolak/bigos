@@ -3,3 +3,6 @@
 esp
 notes/
 logs/
+/test_logs
+*.iso
+*.hdd
