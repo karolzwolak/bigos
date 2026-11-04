@@ -73,7 +73,7 @@ static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 /// disabled.
 pub unsafe fn bsp_early_init() {
     assert!(BASE_REVISION.is_supported());
-    serial_println!("MofuOS Booted!");
+    serial_println!("BigOS booted!");
 
     let _efi_memory_map_response = EFI_MEMMAP_REQUEST
         .response()
