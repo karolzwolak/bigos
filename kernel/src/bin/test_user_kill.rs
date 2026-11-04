@@ -11,7 +11,7 @@ use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::get_shared_program_data_buffer_mut;
 use kernel::process::task::{self, MAX_TASKS, TaskState};
 use kernel::{boot_common, bsp_init, serial_println_core};
-use x86_64::instructions::{hlt, port::Port};
+use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 
 // indexes into the shared test counters, the busyloop program uses the same values
 const COUNTER_RUNNING: usize = 0;
@@ -22,27 +22,9 @@ const KILL_DEADLINE_US: u64 = 1_000_000;
 const STARTUP_DEADLINE_US: u64 = 5_000_000;
 const STRESS_ROUNDS: u32 = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum QemuExitCode {
-    Success = 0x10,
-    Failed = 0x11,
-}
-
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
-    unsafe {
-        let mut port = Port::new(0xF4);
-        port.write(exit_code as u32);
-    }
-    loop {
-        hlt();
-    }
-}
-
 #[panic_handler]
-fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println_core!("PANIC: {:#?}", info);
-    exit_qemu(QemuExitCode::Failed);
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    test_panic_handler(info)
 }
 
 #[unsafe(no_mangle)]
