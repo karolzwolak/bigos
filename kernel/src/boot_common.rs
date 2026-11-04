@@ -7,14 +7,13 @@ use crate::{
     serial_println, serial_println_core,
 };
 use crate::{
-    interrupts::map_local_apic_for_current_core,
-    memory::memory::MemoryMapFrameAllocator,
-    process::{CORE_POOL, CorePool},
-    util::cpuinfo::{self, init_core, init_cpu_infos},
+    memory::paging::MemoryMapFrameAllocator,
+    process::CORE_POOL,
+    util::cpuinfo::{self, init_core},
 };
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
-    mp::{self, MP_FLAG_X2APIC, MpGotoFunction, MpInfo, MpRespData},
+    mp::{MP_FLAG_X2APIC, MpGotoFunction},
     paging::PagingMode,
     request::{
         EfiMemmapRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest,
@@ -101,7 +100,7 @@ pub unsafe fn bsp_early_init() {
     let framebuffer_response = FRAMEBUFFER_REQUEST
         .response()
         .expect("Failed to get framebuffer response");
-    let framebuffer = framebuffer_response.framebuffers().get(0).unwrap();
+    let framebuffer = framebuffer_response.framebuffers().first().unwrap();
     crate::graphics::framebuffer::init_framebuffer(framebuffer);
 
     let boot_info = BootInfo { hhdm_offset };
@@ -113,7 +112,7 @@ pub unsafe fn bsp_early_init() {
     }
     interrupts::load_idt();
 
-    let mut mapper = unsafe { memory::memory::init_offset_page_table(hhdm_offset) };
+    let mut mapper = unsafe { memory::paging::init_offset_page_table(hhdm_offset) };
     serial_println!("Offset page table initialized");
 
     serial_println!("Creating frame_allocator");
@@ -222,11 +221,10 @@ pub unsafe fn bsp_early_init() {
 
     unsafe { interrupts::init_tsc_globals() };
 
-    for i in 1..core_count {
-        let core_id = i as u8;
+    for (core_id, cpu) in cpus.iter().enumerate().skip(1) {
         serial_println_core!("Bootstrapping AP core {}", core_id);
         let ap_bootstrap_fn: MpGotoFunction = cpuinfo::ap_core_from_limine_entry_point;
-        cpus[i].bootstrap(ap_bootstrap_fn, 0x12345678);
+        cpu.bootstrap(ap_bootstrap_fn, 0x12345678);
     }
 
     serial_println_core!("BSP continued execution");

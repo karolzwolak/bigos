@@ -1,21 +1,14 @@
 use crate::{
-    HHDM_OFFSET,
-    events::event_buffer::EventBuffer,
     memory::{
         get_frame_allocator,
-        memory::{MemoryMapFrameAllocator, PAGE_SIZE},
+        paging::{MemoryMapFrameAllocator, PAGE_SIZE},
         usermem::{self, UserMemoryManager},
     },
-    process::{
-        PID,
-        process::INVALID_PID,
-        process_mem::{FrameOwnership, ProcessMemoryLayout},
-        shared_state,
-    },
+    process::process_mem::{FrameOwnership, ProcessMemoryLayout},
     serial_println, serial_println_core,
 };
-use core::sync::atomic::{AtomicU32, Ordering};
-use spin::{Mutex, MutexGuard};
+use core::sync::atomic::AtomicU32;
+use spin::Mutex;
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{PageTableFlags, Size4KiB, mapper::MapToError},
@@ -78,6 +71,12 @@ impl SharedRegion {
     }
 }
 
+impl Default for SharedRegion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SharedState {
     pub const fn new() -> Self {
         Self {
@@ -96,8 +95,7 @@ impl SharedState {
         memory_layout: &mut ProcessMemoryLayout,
         frame_allocator: &mut MemoryMapFrameAllocator,
     ) -> Result<(), MapToError<Size4KiB>> {
-        for i in 0..SHARED_REGION_COUNT {
-            let region = self.regions[i];
+        for &region in &self.regions {
             if crate::process::PROCESS_DEBUG_PRINT {
                 serial_println_core!(
                     "map_into_process: Mapping {} to user vaddr {:#x}",
@@ -117,6 +115,12 @@ impl SharedState {
         }
 
         Ok(())
+    }
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -145,50 +149,27 @@ pub fn init_shared_state() {
     //     }
     //     None => {}
     // }
-    match init_program_shared_data_buffer() {
-        Some((buffer_phys, buffer_virt)) => {
-            shared_state.register_region(
-                PROGRAM_SHARED_DATA_INDEX as u8,
-                SharedRegion {
-                    phys_addr: buffer_phys,
-                    kernel_vaddr: buffer_virt,
-                    default_user_vaddr: VirtAddr::new(PROGRAM_SHARED_DATA_ADDR as u64),
-                    size_bytes: PAGE_SIZE as u32,
-                    region_type: SharedRegionType::ProgramSharedDataBuffer,
-                    _reserved: 0,
-                    page_table_flags: PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE
-                        | PageTableFlags::NO_EXECUTE,
-                },
-            );
-        }
-        None => {}
+    if let Some((buffer_phys, buffer_virt)) = init_program_shared_data_buffer() {
+        shared_state.register_region(
+            PROGRAM_SHARED_DATA_INDEX as u8,
+            SharedRegion {
+                phys_addr: buffer_phys,
+                kernel_vaddr: buffer_virt,
+                default_user_vaddr: VirtAddr::new(PROGRAM_SHARED_DATA_ADDR as u64),
+                size_bytes: PAGE_SIZE as u32,
+                region_type: SharedRegionType::ProgramSharedDataBuffer,
+                _reserved: 0,
+                page_table_flags: PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::USER_ACCESSIBLE
+                    | PageTableFlags::NO_EXECUTE,
+            },
+        );
     }
 
     SHARED_STATE.call_once(|| Mutex::new(shared_state));
 
     serial_println_core!("init_shared_state: shared state initialized");
-}
-
-fn init_event_buffer() -> Option<(PhysAddr, VirtAddr)> {
-    serial_println_core!("init_shared_state: init_event_buffer");
-    let mut frame_allocator = get_frame_allocator();
-    let (phys, kernel_vaddr) = match usermem::allocate_zeroed_page(&mut frame_allocator) {
-        Some((phys, virt)) => (phys, virt),
-        None => return None,
-    };
-
-    unsafe {
-        let buffer = &*(kernel_vaddr.as_u64() as *const EventBuffer);
-        assert_eq!(buffer.write_idx.load(Ordering::Relaxed), 0);
-        assert_eq!(buffer.read_idx.load(Ordering::Relaxed), 0);
-        assert_eq!(buffer.event_count.load(Ordering::Relaxed), 0);
-    }
-
-    serial_println!("EventBuffer initialized at phys {:?}", phys);
-
-    Some((phys, kernel_vaddr))
 }
 
 fn init_program_shared_data_buffer() -> Option<(PhysAddr, VirtAddr)> {

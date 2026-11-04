@@ -1,13 +1,12 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
 use core::sync::atomic::Ordering;
 use kernel::process::CORE_POOL;
-use kernel::{AP_CORES_READY, MAX_CORES, boot_common, bsp_init, serial_println_core};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use kernel::{AP_CORES_READY, MAX_CORES, boot_common, bsp_init, serial_println_core};
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -15,7 +14,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kmain() -> ! {
+extern "C" fn kmain() -> ! {
     unsafe { boot_common::bsp_early_init() };
     test_main();
 }
@@ -65,7 +64,7 @@ fn test_main() -> ! {
         success = false;
     }
 
-    if total_cores as u8 != MAX_CORES {
+    if total_cores != MAX_CORES {
         serial_println_core!(
             "INFO: total_cores {} != MAX_CORES {} (QEMU smp may be less than max)",
             total_cores,
@@ -73,7 +72,7 @@ fn test_main() -> ! {
         );
     }
 
-    if total_cores != (expected as u8 + 1) && expected != 0 {
+    if total_cores != (expected + 1) && expected != 0 {
         serial_println_core!("FAIL: total {} != expected+1 {}", total_cores, expected + 1);
         success = false;
     }

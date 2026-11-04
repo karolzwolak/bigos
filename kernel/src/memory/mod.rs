@@ -2,10 +2,10 @@
 pub const USER_MEMORY_DEBUG_PRINT: bool = false;
 
 pub mod allocator;
-pub mod memory;
+pub mod paging;
 pub mod usermem;
 
-use crate::memory::memory::MemoryMapFrameAllocator;
+use crate::memory::paging::MemoryMapFrameAllocator;
 use crate::memory::usermem::UserMemoryManager;
 use spin::{Mutex, MutexGuard, Once};
 

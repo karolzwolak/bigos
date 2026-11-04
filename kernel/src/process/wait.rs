@@ -16,7 +16,7 @@ impl WaiterList {
         Self {
             waiters: [TaskRef {
                 slot: task::INVALID_SLOT,
-                pid: crate::process::process::INVALID_PID,
+                pid: crate::process::INVALID_PID,
             }; MAX_TASKS],
             count: 0,
         }
@@ -96,7 +96,7 @@ impl WaitQueue {
         // wake_task takes a run queue lock, so no waiter list lock is held while it runs
         let mut woken = [TaskRef {
             slot: task::INVALID_SLOT,
-            pid: crate::process::process::INVALID_PID,
+            pid: crate::process::INVALID_PID,
         }; MAX_TASKS];
         let woken_count = {
             let mut list = self.list.lock();
@@ -109,6 +109,12 @@ impl WaitQueue {
         for task_ref in &woken[..woken_count] {
             scheduler::wake_task(*task_ref);
         }
+    }
+}
+
+impl Default for WaitQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

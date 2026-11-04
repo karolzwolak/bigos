@@ -1,17 +1,16 @@
 use crate::data_structures::vector::Vec;
-use crate::process::process::ProcessResources;
+use crate::process::ProcessResources;
 //use alloc::vec::Vec;
 use crate::memory::usermem::USER_STACK_TOP;
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
-use crate::process::process::{INVALID_PID, MAX_PRIORITY, PID, Process, ProcessState};
 use crate::process::scheduler;
 use crate::process::task::{self, TaskState};
-use crate::{serial_println, serial_println_core};
+use crate::process::{INVALID_PID, MAX_PRIORITY, PID, Process, ProcessState};
+use crate::serial_println;
 use alloc::string::String;
 use spin::Mutex;
 use x86_64::PhysAddr;
-use x86_64::instructions::interrupts;
 
 pub const ARCHE_PID: usize = 0;
 
@@ -244,5 +243,11 @@ impl ProcessManager {
 
     pub fn process_count(&self) -> usize {
         self.processes.len()
+    }
+}
+
+impl Default for ProcessManager {
+    fn default() -> Self {
+        Self::new()
     }
 }

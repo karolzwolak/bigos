@@ -1,6 +1,6 @@
-use crate::memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE};
+use crate::memory::paging::{MemoryMapFrameAllocator, PAGE_SIZE};
 use crate::memory::usermem::UserMemoryManager;
-use crate::process::process::{
+use crate::process::{
     PROCESS_HEAP_SIZE_BYTES, PROCESS_HEAP_VIRT_END, PROCESS_HEAP_VIRT_START,
     PROCESS_USER_VADDR_ALLOC_END, PROCESS_USER_VADDR_ALLOC_MAX_SIZE,
     PROCESS_USER_VADDR_ALLOC_START,
@@ -55,7 +55,7 @@ impl From<MapToError<Size4KiB>> for ProcessMemoryError {
 }
 
 const fn align_to_page_size(size: u64) -> u64 {
-    ((size + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64) * PAGE_SIZE as u64
+    size.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64
 }
 
 const fn align_down_to_page_size(address: u64) -> u64 {
@@ -185,7 +185,7 @@ impl ProcessMemoryLayout {
         frame_allocator: &mut MemoryMapFrameAllocator,
     ) -> bool {
         debug_assert!(start_virt.is_aligned(PAGE_SIZE as u64));
-        debug_assert!(size_bytes > 0 && size_bytes % PAGE_SIZE as u64 == 0);
+        debug_assert!(size_bytes > 0 && size_bytes.is_multiple_of(PAGE_SIZE as u64));
 
         let range_start = start_virt.as_u64();
         let range_end = range_start + size_bytes;

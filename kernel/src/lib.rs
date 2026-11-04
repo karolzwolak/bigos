@@ -1,8 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![feature(allocator_api)]
-#![allow(warnings, unused)] // TODO: remove this
+#![allow(clippy::missing_safety_doc)]
 
 use static_assertions::const_assert;
 
