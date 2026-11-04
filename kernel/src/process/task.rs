@@ -50,6 +50,9 @@ impl FpuState {
         Self { fxsave_area }
     }
 
+    /// # Safety
+    ///
+    /// SSE must be enabled on this core.
     pub unsafe fn save_from_cpu(&mut self) {
         unsafe {
             asm!(
@@ -60,6 +63,10 @@ impl FpuState {
         }
     }
 
+    /// # Safety
+    ///
+    /// SSE must be enabled on this core, and `self` must hold a state saved by
+    /// `save_from_cpu` or a valid initial FXSAVE image.
     pub unsafe fn restore_to_cpu(&self) {
         unsafe {
             asm!(

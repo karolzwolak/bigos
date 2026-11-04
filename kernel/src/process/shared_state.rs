@@ -190,12 +190,20 @@ fn init_program_shared_data_buffer() -> Option<(PhysAddr, VirtAddr)> {
 //     unsafe { &*(region.kernel_vaddr.as_u64() as *const EventBuffer) }
 // }
 
+/// # Safety
+///
+/// The shared state must be initialized, and no reference from
+/// `get_shared_program_data_buffer_mut` may be live while this one is.
 pub unsafe fn get_shared_program_data_buffer() -> &'static ProgramSharedDataBuffer {
     let shared_state = SHARED_STATE.get().unwrap().lock();
     let region = shared_state.regions[PROGRAM_SHARED_DATA_INDEX];
     unsafe { &*(region.kernel_vaddr.as_u64() as *const ProgramSharedDataBuffer) }
 }
 
+/// # Safety
+///
+/// The shared state must be initialized, and no other reference to the
+/// buffer may be live while this one is.
 pub unsafe fn get_shared_program_data_buffer_mut() -> &'static mut ProgramSharedDataBuffer {
     let shared_state = SHARED_STATE.get().unwrap().lock();
     let region = shared_state.regions[PROGRAM_SHARED_DATA_INDEX];

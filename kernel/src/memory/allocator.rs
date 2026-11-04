@@ -123,6 +123,10 @@ impl FixedSizeBlockAllocator {
         }
     }
 
+    /// # Safety
+    ///
+    /// Call once. `heap_start..heap_start + heap_size` must be mapped, writable
+    /// and unused by anything else.
     pub unsafe fn init_fallback_allocator(&mut self, heap_start: usize, heap_size: usize) {
         serial_println!(
             "Initializing fallback allocator: HEAP_START={:#x}, HEAP_SIZE={:#x}",

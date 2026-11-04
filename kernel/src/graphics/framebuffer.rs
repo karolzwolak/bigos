@@ -65,6 +65,9 @@ impl FrameBufferTarget {
         unsafe { px_ptr.write(color) };
     }
 
+    /// # Safety
+    ///
+    /// `src` must be valid for reads of `width` `u32`s.
     pub unsafe fn copy_row(&mut self, src: *const u32, dst_y: u64, dst_x: u64, width: u64) {
         if dst_y >= self.height || dst_x >= self.width {
             return;

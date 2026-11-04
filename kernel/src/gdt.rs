@@ -275,6 +275,10 @@ impl Gdt {
     }
 }
 
+/// # Safety
+///
+/// Call once per core, on that core, with `core_id < MAX_CORES`, before
+/// anything reads that core's GDT.
 pub unsafe fn init_core_gdt(core_id: u8) {
     let gdt = Gdt::new(core_id);
 
