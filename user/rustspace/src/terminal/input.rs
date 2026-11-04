@@ -55,6 +55,12 @@ impl InputState {
     }
 }
 
+impl Default for InputState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn translate(event: InputEvent, state: &mut InputState) -> Option<InputAction> {
     match event.event_type {
         crate::EventType::KeyEvent => {

@@ -37,7 +37,7 @@ const EXIT_PIXEL_VERIFY: i32 = 25;
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     unsafe { sys_write(2, b"winstress panic\n".as_ptr(), 16) };
-    unsafe { sys_exit(1) }
+    sys_exit(1)
 }
 
 fn write_str(s: &[u8]) {
@@ -46,14 +46,14 @@ fn write_str(s: &[u8]) {
 
 fn fail(message: &[u8], code: i32) -> ! {
     write_str(message);
-    unsafe { sys_exit(code) }
+    sys_exit(code)
 }
 
 fn check_circular_buffer() {
     let page_flags =
         PageTableFlags::WRITABLE | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     let mut info = CircularBufferInfo::zeroed();
-    if !unsafe { sys_create_circular_buffer(CIRCULAR_BUFFER_SIZE, page_flags, &mut info) } {
+    if !sys_create_circular_buffer(CIRCULAR_BUFFER_SIZE, page_flags, &mut info) {
         fail(
             b"winstress: circular buffer create failed\n",
             EXIT_CIRCULAR_CREATE,
@@ -83,18 +83,16 @@ fn check_circular_buffer() {
 }
 
 fn create_and_map_window() -> (u32, *mut u32, WindowInfo) {
-    let Ok(window_id) =
-        (unsafe { sys_create_window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_X, WINDOW_Y) })
-    else {
+    let Ok(window_id) = sys_create_window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_X, WINDOW_Y) else {
         fail(b"winstress: create_window failed\n", EXIT_WINDOW_CREATE);
     };
 
-    let Ok(pixels) = (unsafe { sys_map_window_buffer(window_id) }) else {
+    let Ok(pixels) = sys_map_window_buffer(window_id) else {
         fail(b"winstress: map_window_buffer failed\n", EXIT_WINDOW_MAP);
     };
 
     let mut info = WindowInfo::zeroed();
-    if !unsafe { sys_get_window_info(window_id, &mut info) } || info.event_buffer_vaddr == 0 {
+    if !sys_get_window_info(window_id, &mut info) || info.event_buffer_vaddr == 0 {
         fail(b"winstress: get_window_info failed\n", EXIT_WINDOW_INFO);
     }
 
@@ -123,7 +121,7 @@ pub extern "C" fn _start() -> ! {
     write_str(b"winstress: circular buffers ok\n");
 
     for _ in 0..HEAP_ALLOC_COUNT {
-        if !matches!(unsafe { sys_allocate(HEAP_ALLOC_SIZE) }, Ok(1..)) {
+        if !matches!(sys_allocate(HEAP_ALLOC_SIZE), Ok(1..)) {
             fail(b"winstress: alloc failed\n", EXIT_HEAP);
         }
     }
@@ -156,5 +154,5 @@ pub extern "C" fn _start() -> ! {
 
     // exit with two windows still open, the kernel has to clean them up
     write_str(b"winstress: exiting with open windows\n");
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }
