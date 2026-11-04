@@ -583,7 +583,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                         None => (s_trimmed, ""),
                     };
                     match cmd {
-                        "deb" | "odys" | "flow" | "abc" | "clear" => self.execute_command(),
+                        "deb" | "flow" | "abc" | "clear" => self.execute_command(),
                         _ => {}
                     }
                 }
