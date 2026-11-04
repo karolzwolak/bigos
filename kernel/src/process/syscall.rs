@@ -1,22 +1,18 @@
 use crate::data_structures::circular_buffer::{CircularBuffer, CircularBufferInfo};
-use crate::events::event_buffer::EventBuffer;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::window::{WindowInfo, event_buffer_user_vaddr};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
-use crate::io::serial;
 use crate::memory::get_frame_allocator;
-use crate::memory::memory::PAGE_SIZE;
+use crate::memory::paging::PAGE_SIZE;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
+use crate::process::FileDescriptor;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
-use crate::process::process::FileDescriptor;
 use crate::process::process_mem::FrameOwnership;
-use crate::process::CORE_POOL;
-use crate::serial_println;
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
 use crate::util::msr::msr_write;
 use crate::{
     process::{
-        process::INVALID_PID,
+        INVALID_PID,
         process_manager::{ARCHE_PID, PROCESS_MANAGER},
         scheduler,
     },
@@ -26,7 +22,7 @@ use crate::{
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
-use x86_64::structures::paging::{Mapper, PageTableFlags};
+use x86_64::structures::paging::PageTableFlags;
 
 const SYSCALL_DEBUG_PRINT: bool = false;
 
@@ -537,10 +533,10 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
             let window_id = frame.arg1 as u32;
             let compositor = crate::graphics::compositor::get_compositor();
             let windows = compositor.windows.read();
-            if let Some(w) = windows.get(window_id as usize) {
-                if w.is_visible {
-                    w.buffer.present();
-                }
+            if let Some(w) = windows.get(window_id as usize)
+                && w.is_visible
+            {
+                w.buffer.present();
             }
             //serial_println_core!("sys_present_window: window_id={} presented", window_id);
             drop(windows);
@@ -652,7 +648,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                             buffer_info.virtual_base,
                             buffer_info.view_size
                         );
-                        buffer_info_out.write_unaligned(buffer_info);
+                        unsafe { buffer_info_out.write_unaligned(buffer_info) };
                         return 0;
                     }
                     None => {
@@ -713,7 +709,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
             // blocks while the word still holds the expected value
             crate::process::wait::block_current_task_until_event(
                 &crate::process::wait::FUTEX_WAIT_QUEUE,
-                || core::ptr::read_volatile(word_ptr as *const u32) != expected,
+                || unsafe { core::ptr::read_volatile(word_ptr as *const u32) } != expected,
             );
             0
         }

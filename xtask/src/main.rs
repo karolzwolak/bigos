@@ -17,15 +17,15 @@ fn kernel_max_cores(root: &Path) -> u8 {
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
     for line in content.lines() {
         let t = line.trim();
-        if t.starts_with("pub const MAX_CORES") {
-            if let Some(eq) = t.find('=') {
-                let after = &t[eq + 1..];
-                let digits: String = after.chars().filter(|c| c.is_ascii_digit()).collect();
-                if let Ok(v) = digits.parse::<u8>() {
-                    if v >= 1 && v <= 64 {
-                        return v;
-                    }
-                }
+        if t.starts_with("pub const MAX_CORES")
+            && let Some(eq) = t.find('=')
+        {
+            let after = &t[eq + 1..];
+            let digits: String = after.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(v) = digits.parse::<u8>()
+                && (1..=64).contains(&v)
+            {
+                return v;
             }
         }
     }
@@ -55,37 +55,6 @@ fn run_quiet(cmd: &mut Command) {
     if !status.success() {
         panic!("{:?} exited with status {status}", cmd.get_program());
     }
-}
-
-fn find_tool(env_var: &str, bare: &str) -> String {
-    if let Ok(v) = env::var(env_var) {
-        return v;
-    }
-    if which(bare) {
-        return bare.to_string();
-    }
-    for ver in (10u32..=30).rev() {
-        let p = format!("/usr/lib/llvm{ver}/bin/{bare}");
-        if Path::new(&p).exists() {
-            return p;
-        }
-    }
-    bare.to_string()
-}
-
-fn which(prog: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {prog}")])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn cc() -> String {
-    find_tool("CC", "clang")
-}
-fn ld() -> String {
-    find_tool("LD", "ld.lld")
 }
 
 fn ensure_limine(root: &Path) {
@@ -284,13 +253,12 @@ fn save_test_logs(root: &Path, test_name: &str, serial: &str, com2_raw_path: Opt
     let _ = fs::write(test_logs_root.join(format!("{}.log", test_name)), serial);
     // Merge COM2 raw if present
     let mut combined = serial.to_string();
-    if let Some(p) = com2_raw_path {
-        if let Ok(com2) = fs::read_to_string(p) {
-            if !com2.trim().is_empty() {
-                combined.push_str("\n");
-                combined.push_str(&com2);
-            }
-        }
+    if let Some(p) = com2_raw_path
+        && let Ok(com2) = fs::read_to_string(p)
+        && !com2.trim().is_empty()
+    {
+        combined.push('\n');
+        combined.push_str(&com2);
     }
     // ANSI strip
     let ansi_re = regex_lite_strip_ansi(&combined);
@@ -300,25 +268,19 @@ fn save_test_logs(root: &Path, test_name: &str, serial: &str, com2_raw_path: Opt
     let _ = fs::write(test_logs_root.join(format!("{}.log", test_name)), &ansi_re);
     // Split per core / per pid like log_splitter.py
     let max_cores = kernel_max_cores(root) as usize;
-    let mut core_writers: Vec<Option<std::fs::File>> = (0..max_cores).map(|_| None).collect();
-    for i in 0..max_cores {
-        let path = test_dir.join(format!("core_{}.txt", i));
-        if let Ok(f) = std::fs::File::create(&path) {
-            core_writers[i] = Some(f);
-        }
-    }
+    let mut core_writers: Vec<Option<std::fs::File>> = (0..max_cores)
+        .map(|i| std::fs::File::create(test_dir.join(format!("core_{i}.txt"))).ok())
+        .collect();
     let mut pid_writers: std::collections::HashMap<u32, std::fs::File> =
         std::collections::HashMap::new();
     for line in ansi_re.lines() {
         // core split: ^[Core N
-        if line.starts_with("[Core ") {
-            if let Some(core_id) = parse_core_id(line) {
-                if core_id < max_cores {
-                    if let Some(f) = core_writers[core_id].as_mut() {
-                        let _ = std::io::Write::write_all(f, format!("{}\n", line).as_bytes());
-                    }
-                }
-            }
+        if line.starts_with("[Core ")
+            && let Some(core_id) = parse_core_id(line)
+            && core_id < max_cores
+            && let Some(f) = core_writers[core_id].as_mut()
+        {
+            let _ = std::io::Write::write_all(f, format!("{}\n", line).as_bytes());
         }
         // pid split: [pid=N]
         if let Some(pid) = parse_pid(line) {
@@ -339,17 +301,15 @@ fn regex_lite_strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                // consume until 'm' or letter
-                for ch in chars.by_ref() {
-                    if ch.is_ascii_alphabetic() {
-                        break;
-                    }
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            // consume until 'm' or letter
+            for ch in chars.by_ref() {
+                if ch.is_ascii_alphabetic() {
+                    break;
                 }
-                continue;
             }
+            continue;
         }
         out.push(c);
     }
@@ -430,7 +390,7 @@ fn run_test_with_timeout(
     // Merge COM2 file (userspace) if present — QEMU file backend for -serial 2
     if let Ok(com2) = fs::read_to_string(&com2_tmp) {
         if !com2.trim().is_empty() {
-            serial.push_str("\n");
+            serial.push('\n');
             serial.push_str(&com2);
         }
         let _ = fs::remove_file(&com2_tmp);
@@ -551,39 +511,9 @@ fn run_tests(root: &Path, args: &[String]) {
     }
 }
 
-fn cflags() -> Vec<&'static str> {
-    vec![
-        "--target=x86_64-unknown-elf",
-        "-ffreestanding",
-        "-nostdlib",
-        "-nostdinc",
-        "-fno-builtin",
-        "-fno-stack-protector",
-        "-fno-pie",
-        "-mno-red-zone",
-        "-m64",
-        "-Wall",
-        "-Wextra",
-        "-I.",
-        "-g",
-    ]
-}
-
-fn compile_c(src: &Path, out: &Path, extra_flags: &[&str]) {
-    let mut cmd = Command::new(cc());
-    cmd.args(cflags())
-        .args(extra_flags)
-        .arg("-c")
-        .arg(src)
-        .arg("-o")
-        .arg(out);
-    run(&mut cmd);
-}
-
 fn build_user(root: &Path) {
     println!("Building user programs…");
     let user_dir = root.join("user");
-    let build_dir = root.join("target/user");
     let rustspace_dir = user_dir.join("rustspace");
     if rustspace_dir.join("Cargo.toml").exists() {
         println!("Building Rust userspace…");
@@ -603,10 +533,10 @@ fn build_user(root: &Path) {
             ])
             .current_dir(&rustspace_dir)
             .status();
-        if let Ok(s) = status {
-            if !s.success() {
-                eprintln!("warning: Rust userspace build failed (non-fatal)");
-            }
+        if let Ok(s) = status
+            && !s.success()
+        {
+            eprintln!("warning: Rust userspace build failed (non-fatal)");
         }
     }
 }
@@ -877,10 +807,11 @@ fn run_iso(root: &Path) {
 
     let status = cmd.status().expect("failed to run qemu");
     let _ = log_child.kill();
-    if !status.success() {
-        if let Some(code) = status.code() {
-            std::process::exit(code);
-        }
+    let _ = log_child.wait();
+    if !status.success()
+        && let Some(code) = status.code()
+    {
+        std::process::exit(code);
     }
 }
 
@@ -993,7 +924,6 @@ fn main() {
     match task.as_deref() {
         Some("--help") | Some("-h") | Some("help") => {
             print_usage();
-            return;
         }
         Some("build") => {
             build_user(&root);

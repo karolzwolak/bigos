@@ -1,5 +1,5 @@
+use crate::process::INVALID_PID;
 use crate::process::PID;
-use crate::process::process::INVALID_PID;
 use crate::process::task::{self, INVALID_SLOT, TaskRef, TaskState};
 use crate::util::cpuinfo::get_current_core_id;
 use crate::util::irq_mutex::IrqMutex;

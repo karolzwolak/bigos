@@ -6,7 +6,7 @@ extern crate kernel;
 use core::panic::PanicInfo;
 use kernel::{
     HHDM_OFFSET,
-    memory::memory::init_offset_page_table,
+    memory::paging::init_offset_page_table,
     serial_print, serial_println,
     testing::{QemuExitCode, exit_qemu, test_panic_handler},
 };

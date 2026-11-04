@@ -1,6 +1,6 @@
 use crate::{
     HHDM_OFFSET,
-    memory::memory::{MemoryMapFrameAllocator, PAGE_SIZE},
+    memory::paging::{MemoryMapFrameAllocator, PAGE_SIZE},
     process::process_mem::{FrameOwnership, MappedMemoryRegion},
     serial_println, serial_println_core,
 };
@@ -472,9 +472,7 @@ impl UserMemoryManager {
         let frame =
             x86_64::structures::paging::PhysFrame::<Size4KiB>::containing_address(pml4_phys);
         frame_allocator.deallocate_frame(frame);
-        unsafe {
-            x86_64::instructions::tlb::flush_all();
-        }
+        x86_64::instructions::tlb::flush_all();
     }
 }
 

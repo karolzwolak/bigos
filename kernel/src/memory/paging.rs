@@ -11,7 +11,6 @@ use x86_64::{
 };
 
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
-const FRAME_FREE_LIST_DEFAULT_SIZE: usize = 1024;
 
 #[derive(Clone, Copy)]
 pub struct IdentityAcpiHandler {
@@ -207,10 +206,10 @@ impl MemoryMapFrameAllocator {
             }
         }
 
-        if let Some(region) = self.memory_map.get(self.curr_region_index) {
-            if region.type_ == MEMMAP_USABLE {
-                count += (self.frame_offset_in_region / page_size) as usize;
-            }
+        if let Some(region) = self.memory_map.get(self.curr_region_index)
+            && region.type_ == MEMMAP_USABLE
+        {
+            count += (self.frame_offset_in_region / page_size) as usize;
         }
         if count >= self.free_list.len() {
             count - self.free_list.len()

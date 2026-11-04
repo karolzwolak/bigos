@@ -3,11 +3,10 @@ use core::cell::UnsafeCell;
 use x86_64::VirtAddr;
 use x86_64::registers::segmentation::Segment;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
-use x86_64::structures::paging::Mapper;
 use x86_64::structures::tss::TaskStateSegment;
 
 use crate::process::task::MAX_TASKS;
-use crate::{MAX_CORES, serial_println, serial_println_core};
+use crate::{MAX_CORES, serial_println};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
@@ -154,7 +153,7 @@ pub fn scheduler_bounds(core_id: u8) -> (VirtAddr, VirtAddr) {
     }
 }
 
-pub fn install_guard_pages(frame_allocator: &mut crate::memory::memory::MemoryMapFrameAllocator) {
+pub fn install_guard_pages(frame_allocator: &mut crate::memory::paging::MemoryMapFrameAllocator) {
     for core_id in 0..MAX_CORES as usize {
         unsafe {
             crate::stack_guard::ensure_guard_unmapped(
@@ -201,10 +200,7 @@ pub fn assert_rsp_in_task_stack(core_id: u8) {
     );
 }
 
-static mut PER_CORE_GDT: [Gdt; MAX_CORES as usize] = {
-    const EMPTY: Gdt = Gdt::empty();
-    [EMPTY; MAX_CORES as usize]
-};
+static mut PER_CORE_GDT: [Gdt; MAX_CORES as usize] = [const { Gdt::empty() }; MAX_CORES as usize];
 
 struct Gdt {
     table: GlobalDescriptorTable,
@@ -216,7 +212,7 @@ struct Gdt {
 }
 
 static mut PER_CORE_TSS: [UnsafeCell<TaskStateSegment>; MAX_CORES as usize] =
-    unsafe { [const { UnsafeCell::new(TaskStateSegment::new()) }; MAX_CORES as usize] };
+    [const { UnsafeCell::new(TaskStateSegment::new()) }; MAX_CORES as usize];
 
 impl Gdt {
     const fn empty() -> Self {

@@ -1,4 +1,3 @@
-use crate::graphics::framebuffer::FrameBufferTarget;
 use crate::serial_println;
 
 use core::cmp::min;
@@ -18,8 +17,6 @@ const MARGIN_TOP: i32 = 0;
 const MAX_LINES: usize = 20;
 const LINE_SPACING: i32 = 15;
 const MAX_CHARS_PER_LINE: usize = 80;
-
-const DEBUG_LOG: bool = false;
 
 const CHARACTER_STYLE: MonoTextStyle<Rgb888> = MonoTextStyle::new(&FONT_8X13, Rgb888::WHITE);
 const BACKGROUND_COLOR: Rgb888 = Rgb888::BLACK;
@@ -179,17 +176,15 @@ impl<D: DrawTarget<Color = Rgb888>> Theophe<D> {
         let max_chars_per_line = self.max_chars_per_line;
 
         for i in 0..bytes_len {
-            if bytes[i] == b'\n' {
-                if i > bytes_start {
-                    let line = self.get_last_line();
-                    let written = line.write_slice(&bytes[bytes_start..i]);
-                    if DEBUG_PRINT {
-                        serial_println!(
-                            "Found newline, written: {}, space left now: {}",
-                            written,
-                            max_chars_per_line - line.length
-                        );
-                    }
+            if bytes[i] == b'\n' && i > bytes_start {
+                let line = self.get_last_line();
+                let written = line.write_slice(&bytes[bytes_start..i]);
+                if DEBUG_PRINT {
+                    serial_println!(
+                        "Found newline, written: {}, space left now: {}",
+                        written,
+                        max_chars_per_line - line.length
+                    );
                 }
             }
         }

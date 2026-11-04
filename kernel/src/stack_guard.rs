@@ -1,10 +1,10 @@
-use crate::memory::memory::MemoryMapFrameAllocator;
+use crate::memory::paging::MemoryMapFrameAllocator;
 use crate::serial_println;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
-    structures::paging::{Page, PageTable, PageTableFlags, PhysFrame, Size4KiB},
+    structures::paging::{PageTable, PageTableFlags},
 };
 
 const PAGE_SIZE: u64 = 4096;
@@ -66,7 +66,7 @@ pub unsafe fn unmap_guard_page(
 
         let base_flags = huge_flags & !PageTableFlags::HUGE_PAGE;
         for i in 0..512 {
-            let cur_vaddr = VirtAddr::new((huge_phys_base & !0x1FFFFF) + i as u64 * PAGE_SIZE);
+            let _cur_vaddr = VirtAddr::new((huge_phys_base & !0x1FFFFF) + i as u64 * PAGE_SIZE);
             let phys = PhysAddr::new(huge_phys_base + i as u64 * PAGE_SIZE);
             // ensure present
             let mut flags = base_flags;
@@ -77,12 +77,10 @@ pub unsafe fn unmap_guard_page(
         pt[pt_idx].set_unused();
 
         // update PD entry to point to new PT
-        let mut pd_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        let pd_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
         pd_entry.set_addr(pt_phys, pd_flags);
 
-        unsafe {
-            x86_64::instructions::tlb::flush_all();
-        }
+        x86_64::instructions::tlb::flush_all();
 
         serial_println!(
             "guard: split 2MiB huge page at pd_idx {} for vaddr {:#x}",
@@ -90,7 +88,7 @@ pub unsafe fn unmap_guard_page(
             vaddr.as_u64()
         );
 
-        return Ok(());
+        Ok(())
     } else {
         // 4KiB mapping via PT
         let pt_phys = pd_entry.addr();
@@ -103,11 +101,9 @@ pub unsafe fn unmap_guard_page(
 
         pt_entry.set_unused();
 
-        unsafe {
-            x86_64::instructions::tlb::flush(VirtAddr::new(vaddr.as_u64()));
-        }
+        x86_64::instructions::tlb::flush(VirtAddr::new(vaddr.as_u64()));
 
-        return Ok(());
+        Ok(())
     }
 }
 

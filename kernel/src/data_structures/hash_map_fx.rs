@@ -86,10 +86,6 @@ where
         Self { slots, count: 0 }
     }
 
-    pub fn default() -> Self {
-        Self::new()
-    }
-
     #[inline]
     fn get_slot_index(&self, key: K) -> usize {
         let mut hasher = FxHasher::default();
@@ -313,6 +309,15 @@ where
                 self.insert(k, v);
             }
         }
+    }
+}
+
+impl<K, V> Default for FxHashMap<K, V>
+where
+    K: Copy + Eq + Into<usize>,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
