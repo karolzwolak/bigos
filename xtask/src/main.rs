@@ -757,8 +757,8 @@ fn run_iso(root: &Path) {
     build_iso(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
-    let socket1 = "/tmp/mofuos_com1.sock";
-    let socket2 = "/tmp/mofuos_com2.sock";
+    let socket1 = "/tmp/bigos_com1.sock";
+    let socket2 = "/tmp/bigos_com2.sock";
     let _ = fs::create_dir_all(root.join("logs"));
     let _ = fs::remove_file(socket1);
     let _ = fs::remove_file(socket2);
@@ -804,7 +804,7 @@ fn run_iso(root: &Path) {
     .args(["-serial", &format!("unix:{socket1},server")])
     .args(["-serial", &format!("unix:{socket2},server,nowait")])
     .args(["-no-reboot"])
-    .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])
+    .args(["-monitor", "telnet:127.0.0.1:1235,server,nowait"])
     .args(qemu_flags());
 
     let status = cmd.status().expect("failed to run qemu");
@@ -851,7 +851,7 @@ fn run_nologs(root: &Path) {
     .args(["-cdrom", iso.to_str().unwrap()])
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
     .args(["-no-reboot"])
-    .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])
+    .args(["-monitor", "telnet:127.0.0.1:1235,server,nowait"])
     .args(qemu_flags());
     run(&mut cmd);
 }

@@ -7,7 +7,7 @@ Reads QEMU serial output from two Unix sockets:
 All files are written into  logs/<YYYY-MM-DD_HH-MM-SS>/
 
 Usage:
-  python3 scripts/log_splitter.py /tmp/mofuos_com1.sock /tmp/mofuos_com2.sock
+  python3 scripts/log_splitter.py /tmp/bigos_com1.sock /tmp/bigos_com2.sock
   or its just hooked up to make run
 """
 
