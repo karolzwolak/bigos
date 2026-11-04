@@ -10,7 +10,8 @@ use kernel::process::process::ProcessState;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::scheduler;
 use kernel::{boot_common, bsp_init, serial_println_core};
-use x86_64::instructions::{hlt, port::Port};
+use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use x86_64::instructions::hlt;
 
 const FRAMEBUFFER_WIDTH: u32 = 640;
 const FRAMEBUFFER_HEIGHT: u32 = 480;
@@ -20,27 +21,9 @@ const SETTLE_HLT_COUNT: usize = 10;
 // kernel heap growth caused by the window buffers and the compositor window list
 const KERNEL_HEAP_GROWTH_MARGIN_FRAMES: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum QemuExitCode {
-    Success = 0x10,
-    Failed = 0x11,
-}
-
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
-    unsafe {
-        let mut port = Port::new(0xF4);
-        port.write(exit_code as u32);
-    }
-    loop {
-        hlt();
-    }
-}
-
 #[panic_handler]
-fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println_core!("PANIC: {:#?}", info);
-    exit_qemu(QemuExitCode::Failed);
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    test_panic_handler(info)
 }
 
 #[unsafe(no_mangle)]

@@ -35,6 +35,7 @@ pub mod process;
 pub mod process_start;
 pub mod programs;
 pub mod stack_guard;
+pub mod testing;
 pub mod tests_exp;
 pub mod trap;
 pub mod util;
@@ -42,6 +43,7 @@ pub mod util;
 pub use alloc::string::String;
 
 extern crate lazy_static;
+extern crate linkme;
 
 #[inline(always)]
 /// Do nothing loop that tells the CPU to halt until the next interrupt
