@@ -3,16 +3,12 @@
 
 mod boot;
 
-use core::sync::atomic::Ordering;
-
-use kernel::graphics::compositor::Compositor;
-use kernel::util::cpuinfo::get_cpu_info_for_core;
-use kernel::{AP_CORE_COUNT, AP_CORES_READY_COUNT, serial_println_core};
-use kernel::{programs::theophe::Theophe, serial_println};
+use kernel::bsp_init::{init_shared_state_on_bsp, wait_for_ap_cores_blocking};
+use kernel::graphics::compositor::{get_compositor, init_compositor};
+use kernel::{interrupts, serial_println_core};
+use x86_64::instructions::hlt;
 extern crate alloc;
-use kernel::graphics::demo;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {
     Success = 0x10,
@@ -34,64 +30,52 @@ pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println!("PANIC: {:#?}", info);
+    serial_println_core!("PANIC: {:#?}", info);
     exit_qemu(QemuExitCode::Failed);
 }
 
 fn main() -> ! {
-    serial_println!("Welcome to BigOS!");
+    serial_println_core!("Welcome to MofuOS!");
 
-    let expected_ap = AP_CORE_COUNT;
-    while AP_CORES_READY_COUNT.load(Ordering::Acquire) < expected_ap {
-        x86_64::instructions::hlt();
-    }
-    serial_println_core!("bsp_init: all {} AP cores ready", expected_ap);
+    {
+        let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
+        let fb = &mut *framebuffer_target;
 
-    kernel::process::syscall::init_syscall_stack();
+        let fb_width = fb.width as f32;
+        let fb_height = fb.height as f32;
 
-    let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();
-    let fb = &mut *framebuffer_target;
+        serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
-    let fb_width = fb.width as f32;
-    let fb_height = fb.height as f32;
+        init_shared_state_on_bsp();
 
-    //TODO: compositor should own the framebuffer; adjust theophe to work as other processes would, with its own window backbufer
-    serial_println!("Framebuffer size: {}x{}", fb_width, fb_height);
-    let compositor = Compositor::new();
-    let (_window_id, window_buffer) = compositor.create_window(600, 600, 50, 50);
+        serial_println_core!("Shared state initialized");
 
-    let (window2_id, window2_buffer) = compositor.create_window(400, 300, 700, 200);
-    compositor.set_z_index(window2_id, 5);
-    serial_println!("Created window with ID: {}", window2_id);
+        serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
-    demo::render_shaders(&window2_buffer);
+        init_compositor(fb_width as u32, fb_height as u32);
+        serial_println_core!("Compositor initialized");
 
-    let mut theophe = Theophe::new(window_buffer.back_buffer_mut());
-    theophe.write_line("");
-    theophe.write_line("  Welcome to bigOS!");
-    theophe.write_line("==========================================================");
-    let cpu_info = get_cpu_info_for_core(0);
-    let cpu_info_str = cpu_info.to_pretty_string();
-    theophe.write_str(&cpu_info_str);
+        wait_for_ap_cores_blocking();
+        serial_println_core!("AP cores ready, creating userspace processes");
+        kernel::process_start::create_userspace_processes();
 
-    demo::init_demo_filesystem();
+        serial_println_core!("Created initial userspace processes");
 
-    theophe.render();
+        serial_println_core!("Entering main kernel loop");
 
-    compositor.focus_window(0);
-    let mut last_time_start = kernel::interrupts::system_uptime_ns();
-    let mut dynamic_renderer = demo::DynamicRenderer::new();
-
-    loop {
-        let time_start = kernel::interrupts::system_uptime_ns();
-        let dt = time_start - last_time_start;
-        last_time_start = time_start;
-        theophe.update();
-        if kernel::DEMO_ACTIVE.load(core::sync::atomic::Ordering::Relaxed) {
-            let uv = kernel::DEMO_UV_MODE.load(core::sync::atomic::Ordering::Relaxed);
-            dynamic_renderer.setup(uv);
-            dynamic_renderer.update(&window2_buffer, dt as f32 / 1_000_000.0);
+        loop {
+            //serial_println_core!("loop");
+            let time_start = interrupts::system_uptime_ns();
+            let mut compositor = get_compositor();
+            compositor.process_input_events();
+            compositor.compose(fb);
+            let time_end = interrupts::system_uptime_ns();
+            let dt: u64 = time_end - time_start;
+            // time_elapsed += dt;
+            //serial_println_core!("Loop time: {} ns; {} ms", dt, dt as f32 / 1_000_000.0);
+            hlt();
         }
-        compositor.compose(&mut framebuffer_target);
     }
+
+    exit_qemu(QemuExitCode::Success);
 }
