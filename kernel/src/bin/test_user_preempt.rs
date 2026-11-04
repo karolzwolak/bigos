@@ -10,7 +10,8 @@ use kernel::process::process::{PID, ProcessState};
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::get_shared_program_data_buffer_mut;
 use kernel::{AP_CORE_COUNT, boot_common, bsp_init, serial_println_core};
-use x86_64::instructions::{hlt, port::Port};
+use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use x86_64::instructions::hlt;
 
 // one more spinner than AP cores, so some core has to take turns between two of them
 const PROCESS_COUNT: usize = AP_CORE_COUNT as usize + 1;
@@ -21,27 +22,9 @@ const TIMEOUT_MS: u64 = 20000;
 const NS_PER_MS: u64 = 1_000_000;
 const PROCESS_PRIORITY: u8 = 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum QemuExitCode {
-    Success = 0x10,
-    Failed = 0x11,
-}
-
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
-    unsafe {
-        let mut port = Port::new(0xF4);
-        port.write(exit_code as u32);
-    }
-    loop {
-        hlt();
-    }
-}
-
 #[panic_handler]
-fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println_core!("PANIC: {:#?}", info);
-    exit_qemu(QemuExitCode::Failed);
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    test_panic_handler(info)
 }
 
 #[unsafe(no_mangle)]

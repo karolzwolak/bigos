@@ -6,32 +6,14 @@ extern crate alloc;
 use kernel::gdt;
 use kernel::process::task::MAX_TASKS;
 use kernel::{MAX_CORES, boot_common, serial_println_core};
+use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use x86_64::VirtAddr;
-use x86_64::instructions::{hlt, port::Port};
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{OffsetPageTable, PageTable, Translate};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum QemuExitCode {
-    Success = 0x10,
-    Failed = 0x11,
-}
-
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
-    unsafe {
-        let mut port = Port::new(0xF4);
-        port.write(exit_code as u32);
-    }
-    loop {
-        hlt();
-    }
-}
-
 #[panic_handler]
-fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println_core!("PANIC: {:#?}", info);
-    exit_qemu(QemuExitCode::Failed);
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    test_panic_handler(info)
 }
 
 #[unsafe(no_mangle)]

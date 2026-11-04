@@ -9,7 +9,7 @@ use kernel::memory::memory::PAGE_SIZE;
 use kernel::process::process::PROCESS_HEAP_VIRT_START;
 use kernel::process::process_mem::{FrameOwnership, ProcessMemoryLayout};
 use kernel::{boot_common, serial_println_core};
-use x86_64::instructions::{hlt, port::Port};
+use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use x86_64::structures::paging::{FrameAllocator, PageTableFlags};
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -20,27 +20,9 @@ const BORROWED_TEST_VADDR: u64 = 0x0000_0002_0000_0000;
 const BORROWED_TEST_PAGES: usize = 3;
 const BORROWED_TEST_MIDDLE_PAGE: usize = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum QemuExitCode {
-    Success = 0x10,
-    Failed = 0x11,
-}
-
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
-    unsafe {
-        let mut port = Port::new(0xF4);
-        port.write(exit_code as u32);
-    }
-    loop {
-        hlt();
-    }
-}
-
 #[panic_handler]
-fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println_core!("PANIC: {:#?}", info);
-    exit_qemu(QemuExitCode::Failed);
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    test_panic_handler(info)
 }
 
 #[unsafe(no_mangle)]
