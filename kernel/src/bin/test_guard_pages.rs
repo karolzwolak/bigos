@@ -5,8 +5,8 @@ extern crate alloc;
 
 use kernel::gdt;
 use kernel::process::task::MAX_TASKS;
-use kernel::{MAX_CORES, boot_common, serial_println_core};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use kernel::{MAX_CORES, boot_common, serial_println_core};
 use x86_64::VirtAddr;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{OffsetPageTable, PageTable, Translate};
@@ -17,7 +17,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kmain() -> ! {
+extern "C" fn kmain() -> ! {
     unsafe { boot_common::bsp_early_init() };
     test_main();
 }

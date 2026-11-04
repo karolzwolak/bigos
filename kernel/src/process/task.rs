@@ -1,7 +1,6 @@
 use crate::gdt::{self, USER_CODE_SELECTOR_VALUE, USER_DATA_SELECTOR_VALUE};
-use crate::process::process::{INVALID_PID, PID, RFLAGS_DEFAULT};
 use crate::process::scheduler;
-use crate::serial_println_core;
+use crate::process::{INVALID_PID, PID, RFLAGS_DEFAULT};
 use crate::trap::{TRAP_FRAME_SIZE, TrapFrame, pop_all_gprs};
 use crate::util::cpuinfo::get_current_core_id;
 use core::arch::{asm, naked_asm};
@@ -69,6 +68,12 @@ impl FpuState {
                 options(nostack, readonly),
             );
         }
+    }
+}
+
+impl Default for FpuState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -259,7 +264,7 @@ pub fn init_task_stack(slot_index: usize, user_rip: u64, user_rsp: u64) {
         core::ptr::write(trap_frame_addr as *mut TrapFrame, frame);
         core::ptr::write(
             return_address_slot as *mut u64,
-            task_first_entry as usize as u64,
+            task_first_entry as *const () as usize as u64,
         );
         core::ptr::write_bytes(saved_rsp as *mut u64, 0, CALLEE_SAVED_REGISTER_COUNT);
         *task.saved_rsp.get() = saved_rsp;

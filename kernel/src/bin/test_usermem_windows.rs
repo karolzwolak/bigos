@@ -1,16 +1,15 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
 use kernel::graphics::compositor::{get_compositor, init_compositor};
+use kernel::process::ProcessState;
 use kernel::process::elf_loader::{ElfLoadInfo, WINSTRESS_ELF};
-use kernel::process::process::ProcessState;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::scheduler;
-use kernel::{boot_common, bsp_init, serial_println_core};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use kernel::{boot_common, bsp_init, serial_println_core};
 use x86_64::instructions::hlt;
 
 const FRAMEBUFFER_WIDTH: u32 = 640;
@@ -27,7 +26,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kmain() -> ! {
+extern "C" fn kmain() -> ! {
     unsafe { boot_common::bsp_early_init() };
     test_main();
 }

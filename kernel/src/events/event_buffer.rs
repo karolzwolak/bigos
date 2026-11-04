@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::{
     events::keyboard_state::{BITSET_WORD_COUNT, KeyBitset},
-    memory::memory::PAGE_SIZE,
+    memory::paging::PAGE_SIZE,
     serial_println,
 };
 
@@ -132,11 +132,11 @@ impl InputEvent {
 
     pub fn new_mouse(mouse_event: MouseEvent) -> Self {
         let value = mouse_event.x_delta as i32 as u32;
-        let mut extra = (mouse_event.y_delta as i16 as u32) & 0xFFFF;
+        let mut extra = (mouse_event.y_delta as u32) & 0xFFFF;
         extra |= ((mouse_event.buttons.bits() as u32) << 16) & 0x00070000;
 
         let overflow_bits =
-            ((mouse_event.x_overflow as u32) << 0) | ((mouse_event.y_overflow as u32) << 1);
+            (mouse_event.x_overflow as u32) | ((mouse_event.y_overflow as u32) << 1);
         extra |= (overflow_bits << 19) & 0x00180000;
 
         Self::new(EventType::MouseEvent, value, extra)
@@ -144,7 +144,7 @@ impl InputEvent {
 
     pub fn decode_mouse(&self) -> MouseEvent {
         let x_delta = self.value as i32 as i16;
-        let y_delta = (self.extra & 0xFFFF) as i16 as i16;
+        let y_delta = (self.extra & 0xFFFF) as i16;
         let buttons = MouseButtons::from_bits_truncate(((self.extra >> 16) as u16) & 0x07);
 
         let overflow_bits = (self.extra >> 19) & 0x03;

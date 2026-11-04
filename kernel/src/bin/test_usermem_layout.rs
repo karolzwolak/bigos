@@ -1,15 +1,14 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
 use kernel::data_structures::circular_buffer::CircularBuffer;
-use kernel::memory::memory::PAGE_SIZE;
-use kernel::process::process::PROCESS_HEAP_VIRT_START;
+use kernel::memory::paging::PAGE_SIZE;
+use kernel::process::PROCESS_HEAP_VIRT_START;
 use kernel::process::process_mem::{FrameOwnership, ProcessMemoryLayout};
-use kernel::{boot_common, serial_println_core};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
+use kernel::{boot_common, serial_println_core};
 use x86_64::structures::paging::{FrameAllocator, PageTableFlags};
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -26,7 +25,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kmain() -> ! {
+extern "C" fn kmain() -> ! {
     unsafe { boot_common::bsp_early_init() };
     test_main();
 }

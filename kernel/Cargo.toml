@@ -3,12 +3,6 @@ name = "kernel"
 version.workspace = true
 edition.workspace = true
 
-[build-dependencies]
-cc = "1.0"
-
-[target.'cfg(target_arch = "x86_64")'.build-dependencies]
-cc = "1.0"
-
 [dependencies]
 limine = "0.6.3"
 uart_16550 = "0.5.0"
@@ -20,7 +14,6 @@ acpi = "6.1.1"
 linked_list_allocator = "0.9.0"
 bitflags = "2.11.0"
 elf = {version = "0.8.0", default-features = false }
-bytemuck = "1.25.0"
 static_assertions = "1.1.0"
 linkme = "0.3"
 kernel-macros = { path = "../kernel-macros" }
@@ -30,7 +23,3 @@ kernel-macros = { path = "../kernel-macros" }
 version = "1.5"
 features = ["spin_no_std"]
 
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1

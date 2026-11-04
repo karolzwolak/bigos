@@ -1,7 +1,5 @@
-#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy)]
 #[repr(isize)]
-#[allow(dead_code)]
 pub enum APICOffset {
     R0x00 = 0x0,      // --reserved--
     R0x10 = 0x10,     // --reserved--

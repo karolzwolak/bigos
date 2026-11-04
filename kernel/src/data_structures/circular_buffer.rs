@@ -1,17 +1,16 @@
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use x86_64::{
-    PhysAddr, VirtAddr,
-    structures::paging::{FrameAllocator, Page, PageTableFlags, PhysFrame, Size4KiB},
+    PhysAddr,
+    structures::paging::{FrameAllocator, PageTableFlags, PhysFrame},
 };
 
 use crate::{
     memory::{
-        memory::{MemoryMapFrameAllocator, PAGE_SIZE, align_up},
+        paging::{MemoryMapFrameAllocator, PAGE_SIZE, align_up},
         usermem::UserMemoryManager,
     },
     process::{
-        process::PROCESS_USER_VADDR_ALLOC_MAX_SIZE,
+        PROCESS_USER_VADDR_ALLOC_MAX_SIZE,
         process_mem::{FrameOwnership, ProcessMemoryLayout},
     },
 };
@@ -19,12 +18,7 @@ use crate::{
 // both views together must fit in the reservation window
 const CIRCULAR_BUFFER_MAX_VIEW_BYTES: u64 = PROCESS_USER_VADDR_ALLOC_MAX_SIZE / 2;
 
-pub struct CircularBuffer {
-    data: VirtAddr,
-    size: usize,
-    curr_write_pos: usize,
-    total_written_bytes: usize,
-}
+pub struct CircularBuffer;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

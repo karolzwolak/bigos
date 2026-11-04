@@ -1,23 +1,11 @@
-use crate::interrupts::{
-    self, get_lapic_base_addr, get_lapic_base_addr_phys, init_timer_for_core,
-    map_local_apic_for_current_core, tsc_read,
-};
-use crate::memory::{FRAME_ALLOCATOR, get_frame_allocator};
-use crate::process::process::INVALID_PID;
-use crate::process::{self, CORE_POOL};
+use crate::interrupts::{self, get_lapic_base_addr, get_lapic_base_addr_phys, init_timer_for_core};
+use crate::process::{self};
 use crate::util::apic::APICOffset;
-use crate::util::msr::msr_read;
-use crate::{HHDM_OFFSET, MAX_CORES, gdt, hlt_loop, serial_println, serial_println_core};
+use crate::{MAX_CORES, gdt, serial_println, serial_println_core};
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
 use limine::mp::MpInfo;
-use x86_64::VirtAddr;
-use x86_64::instructions::hlt;
-use x86_64::structures::paging::{
-    FrameAllocator, Mapper, OffsetPageTable, PageTable, Size4KiB, frame,
-};
 
 #[derive(Clone, Copy)]
 pub struct CpuInfo {
@@ -32,18 +20,6 @@ pub struct CpuInfo {
     pub display_model: u8,
     pub vendor: CpuVendor,
 }
-
-static mut CPU_INFO: CpuInfo = CpuInfo {
-    features: CpuFeatureFlags::empty(),
-    cache_line_size: 0,
-    apic_id: 0,
-    family: 0,
-    model: 0,
-    stepping: 0,
-    display_family: 0,
-    display_model: 0,
-    vendor: CpuVendor::Unknown,
-};
 
 const DEFAULT_CPU_INFO: CpuInfo = CpuInfo {
     features: CpuFeatureFlags::empty(),
@@ -119,15 +95,15 @@ impl core::fmt::Display for CpuVendor {
 
 unsafe fn get_vendor(ebx: u32, ecx: u32, edx: u32) -> CpuVendor {
     let vendor_bytes: [u8; 12] = [
-        (ebx >> 0) as u8,
+        ebx as u8,
         (ebx >> 8) as u8,
         (ebx >> 16) as u8,
         (ebx >> 24) as u8,
-        (edx >> 0) as u8,
+        edx as u8,
         (edx >> 8) as u8,
         (edx >> 16) as u8,
         (edx >> 24) as u8,
-        (ecx >> 0) as u8,
+        ecx as u8,
         (ecx >> 8) as u8,
         (ecx >> 16) as u8,
         (ecx >> 24) as u8,
@@ -345,9 +321,8 @@ pub fn get_current_core_id() -> u8 {
     unsafe {
         let lapic = get_lapic_base_addr();
         let apic_id_reg = lapic.offset(APICOffset::IDr as isize / 4);
-        let apic_id = (apic_id_reg.read_volatile() >> 24) as u8;
 
-        apic_id
+        (apic_id_reg.read_volatile() >> 24) as u8
     }
 }
 
@@ -480,7 +455,7 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
     if proc_id == 0 {
         serial_println!("BSP core entered AP entry point, this should never happen!");
         loop {
-            core::arch::asm!("hlt");
+            unsafe { core::arch::asm!("hlt") };
         }
     }
 
@@ -509,7 +484,7 @@ pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
         lapic_id
     );
 
-    gdt::init_core_gdt(proc_id);
+    unsafe { gdt::init_core_gdt(proc_id) };
     serial_println!("Core {}: GDT loaded", proc_id);
     interrupts::load_idt();
     serial_println!("Core {}: IDT loaded", proc_id);
@@ -536,7 +511,7 @@ impl CpuInfoFlat {
         boot_tsc: u64,
         core_count: u8,
     ) -> Self {
-        let mut flat = CpuInfoFlat {
+        CpuInfoFlat {
             vendor: cpu_info.vendor as u8,
             family: cpu_info.family,
             model: cpu_info.model,
@@ -551,8 +526,6 @@ impl CpuInfoFlat {
             max_cpuid_leaf: 0,
             max_extended_cpuid_leaf: 0,
             core_count,
-        };
-
-        flat
+        }
     }
 }
