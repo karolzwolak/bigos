@@ -58,10 +58,6 @@ impl LineIndex {
         &self.lines[idx]
     }
 
-    pub fn len(&self) -> usize {
-        self.count
-    }
-
     pub fn line_count(&self) -> usize {
         self.count
     }

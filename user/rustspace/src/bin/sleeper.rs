@@ -19,7 +19,7 @@ const EXIT_CODE_WOKE_TOO_EARLY: i32 = 3;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { sys_exit(EXIT_CODE_PANIC) }
+    sys_exit(EXIT_CODE_PANIC)
 }
 
 // the kernel enters with a 16 byte aligned rsp, the ABI wants it 8 off at function entry
@@ -41,24 +41,24 @@ extern "C" fn sleep_main() -> ! {
     let sleep_ms = counters[COUNTER_SLEEP_MS].load(Ordering::Acquire) as u64;
 
     let mut cpu_info = CpuInfoFlat::zeroed();
-    if !unsafe { sys_get_cpu_info(&mut cpu_info) } || cpu_info.tsc_frequency_hz == 0 {
-        unsafe { sys_exit(EXIT_CODE_NO_CPU_INFO) }
+    if !sys_get_cpu_info(&mut cpu_info) || cpu_info.tsc_frequency_hz == 0 {
+        sys_exit(EXIT_CODE_NO_CPU_INFO)
     }
 
     counters[COUNTER_RUNNING].fetch_add(1, Ordering::AcqRel);
 
     // rdtscp is not offered by the cpu model the tests boot with
     let start_tsc = unsafe { _rdtsc() };
-    unsafe { sys_sleep_ms(sleep_ms) };
+    sys_sleep_ms(sleep_ms);
     let end_tsc = unsafe { _rdtsc() };
 
     let elapsed_us = (end_tsc - start_tsc) as u128 * MICROSECONDS_PER_SECOND as u128
         / cpu_info.tsc_frequency_hz as u128;
     if elapsed_us < (sleep_ms * MICROSECONDS_PER_MILLISECOND) as u128 {
-        unsafe { sys_exit(EXIT_CODE_WOKE_TOO_EARLY) }
+        sys_exit(EXIT_CODE_WOKE_TOO_EARLY)
     }
 
     counters[COUNTER_SLEEPING_TASKS_DONE].fetch_add(1, Ordering::AcqRel);
 
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }

@@ -12,21 +12,13 @@ global_asm!(
     "    ud2",
 );
 
-const MSG: &[u8] = b"the userspace is in rust btw\n";
-
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main() -> ! {
-    unsafe {
-        let syscall_result = rustspace::sys_echo(123);
-        loop {}
-
-        // rustspace::sys_write(1, MSG.as_ptr(), MSG.len());
-
-        // rustspace::sys_exit(0);
-    }
+    rustspace::sys_echo(123);
+    rustspace::sys_exit(0)
 }
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { rustspace::sys_exit(1) }
+    rustspace::sys_exit(1)
 }

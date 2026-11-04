@@ -152,11 +152,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
 
     fn current_line_remaining_space(&self) -> usize {
         let len = self.current_line_len();
-        if len >= self.max_chars_per_line {
-            0
-        } else {
-            self.max_chars_per_line - len
-        }
+        self.max_chars_per_line.saturating_sub(len)
     }
 
     fn ensure_current_line_has_space(&mut self) {
@@ -333,11 +329,11 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
     fn det_flow_demo(&mut self, count: usize) {
         const LINE: &str = "AAAAA BBBB CCC ";
         let total = count.saturating_mul(5);
-        let t0 = unsafe { crate::tsc_read().0 };
+        let t0 = crate::tsc_read().0;
         for _ in 0..total {
             self.write_str(LINE);
         }
-        let t1 = unsafe { crate::tsc_read().0 };
+        let t1 = crate::tsc_read().0;
         let delta = t1.wrapping_sub(t0);
         let mut msg_buf = [0u8; 64];
         let mut pos = 0;
@@ -392,11 +388,11 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             self.write_line("flow: no example text data");
             return;
         }
-        let mut rng_state = unsafe { crate::tsc_read().0 };
+        let mut rng_state = crate::tsc_read().0;
         if rng_state == 0 {
             rng_state = 0x9E3779B97F4A7C15;
         }
-        let t0 = unsafe { crate::tsc_read().0 };
+        let t0 = crate::tsc_read().0;
         let mut line_buf = [0u8; 128];
         for _ in 0..count {
             rng_state ^= rng_state << 13;
@@ -428,7 +424,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 self.write_line(slice);
             }
         }
-        let t1 = unsafe { crate::tsc_read().0 };
+        let t1 = crate::tsc_read().0;
         let delta = t1.wrapping_sub(t0);
         let mut msg_buf = [0u8; 64];
         let mut pos = 0;
@@ -540,19 +536,6 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 self.det_flow_demo(count);
             }
             _ => {}
-        }
-    }
-
-    fn handle_special_key(&mut self, key: crate::KeyCode, key_state: crate::KeyState) {
-        let mut tmp_event = crate::InputEvent {
-            event_type: crate::EventType::KeyEvent,
-            _pad: [0; 3],
-            value: key as u32,
-            extra: key_state as u32,
-            modifiers: 0,
-        };
-        if let Some(action) = input::translate(tmp_event, &mut self.input_state) {
-            self.apply_action(action);
         }
     }
 
