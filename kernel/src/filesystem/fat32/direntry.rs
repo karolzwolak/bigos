@@ -177,10 +177,7 @@ impl DirectoryEntry {
     }
 
     pub fn is_valid(&self) -> bool {
-        if self.name[0] == FIRST_BYTE_IS_EMPTY_FLAG || self.name[0] == FIRST_BYTE_IS_DELETED_FLAG {
-            return false;
-        }
-        true
+        self.name[0] != FIRST_BYTE_IS_EMPTY_FLAG && self.name[0] != FIRST_BYTE_IS_DELETED_FLAG
     }
 
     pub fn is_deleted(&self) -> bool {

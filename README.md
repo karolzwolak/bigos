@@ -10,7 +10,7 @@ BigOS — barely implemented general operating system
 
 - llvm tools
 
-- rustc 1.96.0-nightly
+- rustc nightly-2026-11-04 (pinned in `rust-toolchain.toml`)
 
 ### Instructions
 
