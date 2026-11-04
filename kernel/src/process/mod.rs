@@ -79,10 +79,6 @@ pub struct FileDescriptor {
     pub flags: u8,
 }
 
-impl FileDescriptor {
-    pub const INVALID_FD: u64 = u64::MAX;
-}
-
 pub struct Process {
     pub pid: PID,
     pub parent_pid: PID,
