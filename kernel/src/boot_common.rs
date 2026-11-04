@@ -67,6 +67,10 @@ static MP_REQUEST: MpRequest = MpRequest::new(MP_FLAG_NO_X2APIC);
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
+/// # Safety
+///
+/// Call once, on the BSP, before any other kernel code runs, with interrupts
+/// disabled.
 pub unsafe fn bsp_early_init() {
     assert!(BASE_REVISION.is_supported());
     serial_println!("MofuOS Booted!");

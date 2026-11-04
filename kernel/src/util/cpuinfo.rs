@@ -148,6 +148,10 @@ pub fn init_cpu_infos(cpus: &[&MpInfo]) {
     debug_assert!(core_count <= MAX_CORES as usize);
 }
 
+/// # Safety
+///
+/// Call once per core, on that core, with interrupts disabled, after its local
+/// APIC is mapped and `init_tsc_globals` has run.
 pub unsafe fn init_core(core_id: u8) {
     serial_println!("Core {}: init_core", core_id);
 
@@ -170,6 +174,10 @@ pub unsafe fn init_core(core_id: u8) {
 /// CR0.EM (bit 2) = 0 - clear FPU emulation flag
 /// CR4.OSFXSR (bit 9) = 1 - OS supports FXSAVE/FXRSTOR
 /// CR4.OSXMMEXCPT (bit 10) = 1 - OS handles SSE exceptions
+///
+/// # Safety
+///
+/// The CPU must support SSE and FXSAVE/FXRSTOR.
 pub unsafe fn enable_sse_for_current_core() {
     unsafe {
         core::arch::asm!(
@@ -187,6 +195,9 @@ pub unsafe fn enable_sse_for_current_core() {
     }
 }
 
+/// # Safety
+///
+/// Call once per core, on core `core_id`, before anything reads its CPU info.
 pub unsafe fn init_cpu_info_for_core(core_id: u8) {
     let (max_leaf, vendor_ebx, vendor_ecx, vendor_edx) = unsafe { cpuid(0) };
     serial_println_core!(
@@ -447,6 +458,9 @@ impl CpuInfo {
     }
 }
 
+/// # Safety
+///
+/// Only Limine may call it, as the goto address of an AP.
 pub unsafe extern "C" fn ap_core_from_limine_entry_point(cpu: &MpInfo) -> ! {
     //hlt_loop();
 

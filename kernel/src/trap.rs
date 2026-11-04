@@ -132,6 +132,9 @@ pub fn is_user_frame(frame: &TrapFrame) -> bool {
 /// `handler(&mut TrapFrame)`, runs the common return path and returns with iretq
 macro_rules! interrupt_stub {
     ($stub_name:ident, $handler:path) => {
+        /// # Safety
+        ///
+        /// Only the CPU may enter it, through the IDT.
         #[unsafe(naked)]
         pub unsafe extern "C" fn $stub_name() {
             core::arch::naked_asm!(

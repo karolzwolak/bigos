@@ -17,6 +17,10 @@ pub struct IdentityAcpiHandler {
     pub phys_offset: u64,
 }
 
+/// # Safety
+///
+/// Call once, since it returns `&'static mut` to the active level 4 table.
+/// All physical memory must be mapped at `hhdm_offset`.
 pub unsafe fn init_offset_page_table(hhdm_offset: u64) -> OffsetPageTable<'static> {
     let phys_mem_offset = VirtAddr::new(hhdm_offset);
     serial_println!(
@@ -146,6 +150,9 @@ fn map_region(
 }
 
 impl MemoryMapFrameAllocator {
+    /// # Safety
+    ///
+    /// Every frame in the usable entries of `memory_map` must be unused.
     pub unsafe fn init(memory_map: &'static [&'static Entry]) -> Self {
         serial_println!("Initializing frame allocator with memory map:");
 
