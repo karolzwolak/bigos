@@ -173,24 +173,6 @@ fn discover_test_bins(root: &Path) -> Vec<String> {
     names
 }
 
-fn discover_usertest_bins(root: &Path) -> Vec<String> {
-    let bin_dir = root.join("kernel/src/bin");
-    let Ok(entries) = fs::read_dir(&bin_dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let name = entry.file_name().into_string().ok()?;
-            let stem = name.strip_suffix(".rs")?;
-            (stem.starts_with("test_user") || stem.starts_with("test_usermem"))
-                .then(|| stem.to_string())
-        })
-        .collect();
-    names.sort();
-    names
-}
-
 /// Splits the --release switch off the test name filters, test kernels then build with the release profile
 fn split_release_flag(args: &[String]) -> (bool, Vec<String>) {
     let release = args.iter().any(|arg| arg == "--release");
@@ -463,39 +445,7 @@ fn run_test_with_timeout(
 }
 
 fn run_test(root: &Path, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
-    run_test_with_timeout(root, iso, ovmf_code, ovmf_vars, "15")
-}
-
-fn build_user_rust_only(root: &Path) {
-    println!("Building Rust userspace (for usertest)…");
-    let rustspace_dir = root.join("user/rustspace");
-    if !rustspace_dir.join("Cargo.toml").exists() {
-        eprintln!("user/rustspace/Cargo.toml not found — nothing to build");
-        return;
-    }
-    let _ = Command::new("cargo")
-        .args(["fmt"])
-        .current_dir(&rustspace_dir)
-        .status();
-    let status = Command::new("cargo")
-        .args([
-            "build",
-            "-Z",
-            "build-std=core,alloc",
-            "-Z",
-            "json-target-spec",
-            "--target",
-            "x86_64-user.json",
-        ])
-        .current_dir(&rustspace_dir)
-        .status();
-    if let Ok(s) = status {
-        if !s.success() {
-            panic!("Rust userspace build failed");
-        }
-    } else {
-        panic!("failed to spawn cargo for rustspace");
-    }
+    run_test_with_timeout(root, iso, ovmf_code, ovmf_vars, "30")
 }
 
 fn run_tests(root: &Path, args: &[String]) {
@@ -503,7 +453,6 @@ fn run_tests(root: &Path, args: &[String]) {
     let all_bins = discover_test_bins(root);
     if all_bins.is_empty() {
         eprintln!("No test binaries found in kernel/src/bin/test_*.rs");
-        eprintln!("MofuOS in-kernel tests live in kernel/src/tests_exp/ - run via normal boot.");
         std::process::exit(1);
     }
     let bins: Vec<String> = if filters.is_empty() {
@@ -1030,111 +979,9 @@ fn clippy(root: &Path, extra: &[String]) {
     }
 }
 
-fn run_usertests(root: &Path, args: &[String]) {
-    let (release, filters) = split_release_flag(args);
-    let all_bins = discover_usertest_bins(root);
-    if all_bins.is_empty() {
-        eprintln!("No usertest binaries found in kernel/src/bin/test_user*.rs or test_usermem*.rs");
-        std::process::exit(1);
-    }
-    let bins: Vec<String> = if filters.is_empty() {
-        all_bins
-    } else {
-        all_bins
-            .into_iter()
-            .filter(|name| filters.iter().any(|f| name.contains(f.as_str())))
-            .collect()
-    };
-    if bins.is_empty() {
-        eprintln!("No usertests matched the given filter(s).");
-        std::process::exit(1);
-    }
-    ensure_limine(root);
-    build_user_rust_only(root);
-    println!("{BOLD}Building usertest kernels…{RESET}");
-    build_all_test_kernels(root, &bins, release);
-    let (ovmf_code, ovmf_vars) = ovmf(root);
-    println!();
-    let mut passed_names: Vec<&str> = Vec::new();
-    let mut failed_names: Vec<(&str, Option<i32>)> = Vec::new();
-    let smp = qemu_smp_arg(root);
-    println!(
-        "{BOLD}SMP cores:{RESET} {} (from kernel/src/lib.rs MAX_CORES)",
-        kernel_max_cores(root)
-    );
-    println!("{BOLD}QEMU smp:{RESET} {}", smp);
-    for name in &bins {
-        print!("  {BOLD}{name}{RESET} ... ");
-        std::io::stdout().flush().unwrap();
-        let iso = package_test_iso(root, name, release);
-        let result = run_test_with_timeout(root, &iso, &ovmf_code, &ovmf_vars, "30");
-        save_test_logs(root, name, &result.serial, None);
-        if result.passed {
-            println!("{GREEN}ok{RESET} (log: test_logs/{}/all.txt)", name);
-            let serial = result.serial.trim();
-            if !serial.is_empty() {
-                println!("  {YELLOW}---- serial output ----{RESET}");
-                for line in serial.lines() {
-                    println!("  {line}");
-                }
-                println!("  {YELLOW}-----------------------{RESET}");
-            }
-            passed_names.push(name);
-        } else {
-            let code_str = match result.exit_code {
-                None => "none (timeout)".to_string(),
-                Some(UNEXPECTED_EXIT) => format!("{} (unexpected exit)", UNEXPECTED_EXIT),
-                Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
-                Some(c) => c.to_string(),
-            };
-            println!(
-                "{RED}FAILED{RESET} (exit code: {code_str}) (log: test_logs/{}/all.txt)",
-                name
-            );
-            let serial = result.serial.trim();
-            if !serial.is_empty() {
-                println!("  {YELLOW}---- serial output ----{RESET}");
-                for line in serial.lines() {
-                    println!("  {line}");
-                }
-                println!("  {YELLOW}-----------------------{RESET}");
-            }
-            failed_names.push((name, result.exit_code));
-        }
-    }
-    println!();
-    if failed_names.is_empty() {
-        println!(
-            "{GREEN}{BOLD}usertest result: ok.{RESET} {} passed; 0 failed (logs in test_logs/)",
-            passed_names.len()
-        );
-    } else {
-        println!("{BOLD}usertests:{RESET}");
-        for name in &passed_names {
-            println!("  {GREEN}ok{RESET}    {name}");
-        }
-        for (name, exit_code) in &failed_names {
-            let code_str = match exit_code {
-                None => "none (timeout)".to_string(),
-                Some(UNEXPECTED_EXIT) => format!("{} (unexpected exit)", UNEXPECTED_EXIT),
-                Some(TEST_FAILED_EXIT) => format!("{} (kernel reported failure)", TEST_FAILED_EXIT),
-                Some(c) => c.to_string(),
-            };
-            println!("  {RED}FAILED{RESET} {name} (exit code: {code_str})");
-        }
-        println!();
-        println!(
-            "{RED}{BOLD}usertest result: FAILED.{RESET} {} passed; {} failed",
-            passed_names.len(),
-            failed_names.len()
-        );
-        std::process::exit(1);
-    }
-}
-
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  usertest [--release] [filter…] Build and run userspace integration tests (kernel/src/bin/test_user*.rs, test_usermem*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 
@@ -1157,7 +1004,6 @@ fn main() {
         Some("run") => run_iso(&root),
         Some("run-nologs") => run_nologs(&root),
         Some("test") => run_tests(&root, &extra),
-        Some("usertest") => run_usertests(&root, &extra),
         Some("clean") => clean(&root),
         Some("fmt") => fmt(&root, &extra),
         Some("clippy") => clippy(&root, &extra),

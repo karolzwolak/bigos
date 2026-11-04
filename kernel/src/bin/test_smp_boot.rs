@@ -7,29 +7,11 @@ extern crate alloc;
 use core::sync::atomic::Ordering;
 use kernel::process::CORE_POOL;
 use kernel::{AP_CORES_READY, MAX_CORES, boot_common, bsp_init, serial_println_core};
-use x86_64::instructions::{hlt, port::Port};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum QemuExitCode {
-    Success = 0x10,
-    Failed = 0x11,
-}
-
-pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
-    unsafe {
-        let mut port = Port::new(0xF4);
-        port.write(exit_code as u32);
-    }
-    loop {
-        hlt();
-    }
-}
+use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 
 #[panic_handler]
-fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println_core!("PANIC: {:#?}", info);
-    exit_qemu(QemuExitCode::Failed);
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    test_panic_handler(info)
 }
 
 #[unsafe(no_mangle)]
