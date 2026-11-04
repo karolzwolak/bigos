@@ -53,7 +53,11 @@ const PIT_PC_SPEAKER: u16 = 0x61;
 const PIT_BASE_HZ: u64 = 1_193_182;
 
 /// Measure the TSC frequency by counting cycles over a PIT-timed interval
-/// Must be called with interrupts disabled
+///
+/// # Safety
+///
+/// Interrupts must be disabled, and nothing else may use PIT channel 2 or
+/// port 0x61 meanwhile.
 pub unsafe fn measure_tsc_frequency_via_pit() -> u64 {
     // We count down from 65535 ticks of the PIT (around 54.9 ms)
     // Actual elapsed time = count / PIT_BASE_HZ seconds
@@ -116,13 +120,16 @@ pub unsafe fn measure_tsc_frequency_via_pit() -> u64 {
 }
 
 /// Initialise the global TSC frequency and boot epoch
-/// Have to call this on core 0 once, before starting APs, with interrupts disabled
+///
+/// # Safety
+///
+/// Call once, on core 0, with interrupts disabled, before starting the APs.
 pub unsafe fn init_tsc_globals() {
     let freq = unsafe { measure_tsc_frequency_via_pit() };
     TSC_FREQUENCY_HZ.store(freq, Ordering::SeqCst);
     // Record the epoch *after* calibration so t=0 is close to the point
     // where meaningful kernel work begins.
-    BOOT_TSC.store(unsafe { tsc_read() }, Ordering::SeqCst);
+    BOOT_TSC.store(tsc_read(), Ordering::SeqCst);
     serial_println!(
         "TSC globals: freq={} Hz, boot_tsc={}",
         freq,
@@ -139,7 +146,7 @@ pub fn tsc_timestamp_us() -> u64 {
         return 0;
     }
     let boot = BOOT_TSC.load(Ordering::Relaxed);
-    let now = unsafe { tsc_read() };
+    let now = tsc_read();
     now.saturating_sub(boot) / (freq / 1_000_000)
 }
 
@@ -213,6 +220,10 @@ fn disable_pic() {
     }
 }
 
+/// # Safety
+///
+/// Call only at the end of an interrupt handler, after this core's local APIC
+/// is mapped.
 pub unsafe fn interrupt_over() {
     unsafe {
         let local_apic_ptr = LAPIC_ADDRESS.load(Ordering::Acquire);
@@ -313,6 +324,9 @@ unsafe fn set_ioapic_redirection(
     }
 }
 
+/// # Safety
+///
+/// This core's local APIC must be mapped at `get_lapic_base_addr()`.
 pub unsafe fn init_lapic_for_current_core(core_id: u8) {
     unsafe {
         let lapic_ptr = get_lapic_base_addr();
@@ -438,7 +452,7 @@ unsafe fn init_local_apic(
 
 /// Read the Time Stamp Counter (TSC) register
 /// Returns the current cycle count since processor reset
-pub unsafe fn tsc_read() -> u64 {
+pub fn tsc_read() -> u64 {
     let low: u32;
     let high: u32;
     unsafe {
@@ -505,6 +519,9 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32, core_id: u8) {
     }
 }
 
+/// # Safety
+///
+/// The CPU must support RDTSCP, which provides IA32_TSC_AUX.
 pub unsafe fn set_tsc_aux(core_id: u8) {
     unsafe {
         // Store core ID in low byte of TSC_AUX
@@ -524,6 +541,10 @@ pub unsafe fn set_tsc_aux(core_id: u8) {
     }
 }
 
+/// # Safety
+///
+/// Call on core `core_id` after its local APIC is mapped and
+/// `init_tsc_globals` has run.
 pub unsafe fn init_timer_for_core(core_id: u8) {
     if !TIMER_ENABLED {
         return;
@@ -543,6 +564,10 @@ pub unsafe fn init_timer_for_core(core_id: u8) {
     unsafe { init_timer_tsc(lapic_addr, core_id) };
 }
 
+/// # Safety
+///
+/// `local_apic_ptr` must point to this core's mapped local APIC, the CPU must
+/// support TSC-deadline mode, and `init_tsc_globals` must have run.
 pub unsafe fn init_timer_tsc(local_apic_ptr: *mut u32, _core_id: u8) {
     serial_println_core!("TSC-Deadline mode supported, using for timer");
 
@@ -584,6 +609,11 @@ pub fn disable_interrupts() {
 static LAPIC_VIRT_ADDR: spin::Mutex<Option<VirtAddr>> = spin::Mutex::new(None);
 
 /// Map the Local APIC for the current core (must be called on each core)
+///
+/// # Safety
+///
+/// `mapper` must describe the active page table, and mapping the local APIC
+/// frame there must not alias memory in use.
 pub unsafe fn map_local_apic_for_current_core(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
@@ -648,6 +678,10 @@ pub fn get_lapic_base_addr() -> *mut u32 {
     LAPIC_ADDRESS.load(Ordering::Acquire)
 }
 
+/// # Safety
+///
+/// `rsdp_addr` must be the physical address of a valid RSDP, and all physical
+/// memory must be mapped at `phys_offset`.
 pub unsafe fn init_acpi(
     rsdp_addr: usize,
     phys_offset: u64,

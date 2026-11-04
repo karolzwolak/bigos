@@ -153,6 +153,9 @@ pub struct SyscallFrame {
     pub user_rsp: u64,
 }
 
+/// # Safety
+///
+/// Only the CPU may enter it, through `syscall` with IA32_LSTAR pointing here.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn syscall_handler() -> ! {

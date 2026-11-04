@@ -505,6 +505,11 @@ pub fn wake_task(task_ref: TaskRef) {
 
 /// Saves the callee-saved registers on the current stack, stores the stack pointer
 /// to `save_rsp`, then continues on `load_rsp`
+///
+/// # Safety
+///
+/// `save_rsp` must be valid for writes, and `load_rsp` must be a stack pointer
+/// saved by `switch_context` or a stack prepared to look like one.
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_context(save_rsp: *mut u64, load_rsp: u64) {
     naked_asm!(

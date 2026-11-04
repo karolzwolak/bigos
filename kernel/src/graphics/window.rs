@@ -236,6 +236,9 @@ impl<'a> WindowBackBuffer<'a> {
         }
     }
 
+    /// # Safety
+    ///
+    /// `x` and `y` must lie inside the window.
     pub unsafe fn write_pixel_unchecked(&mut self, x: u32, y: u32, color: Rgba8888UNORM) {
         let offset = (y * self.window.width + x) as usize;
         let xrgb = rgba_to_xrgb(color);
@@ -277,6 +280,9 @@ impl<'a> WindowPresentBuffer<'a> {
         }
     }
 
+    /// # Safety
+    ///
+    /// `x` and `y` must lie inside the window.
     pub unsafe fn read_pixel_unchecked(&self, x: u32, y: u32) -> Rgba8888UNORM {
         let offset = (y * self.window.width + x) as usize;
         let xrgb = unsafe { *self.window.front_buffer_ptr().add(offset) };

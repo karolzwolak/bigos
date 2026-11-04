@@ -9,6 +9,10 @@ use x86_64::{
 
 const PAGE_SIZE: u64 = 4096;
 
+/// # Safety
+///
+/// Nothing may rely on the page at `vaddr` staying mapped, and nothing else
+/// may edit the active page tables meanwhile.
 pub unsafe fn unmap_guard_page(
     vaddr: VirtAddr,
     frame_allocator: &mut MemoryMapFrameAllocator,
@@ -107,6 +111,9 @@ pub unsafe fn unmap_guard_page(
     }
 }
 
+/// # Safety
+///
+/// Same as `unmap_guard_page`.
 pub unsafe fn ensure_guard_unmapped(
     vaddr: VirtAddr,
     frame_allocator: &mut MemoryMapFrameAllocator,
