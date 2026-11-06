@@ -72,4 +72,3 @@ spin = "0.10.0"
 embedded-graphics = "0.8.2"
 bitflags = "2.11.0"
 static_assertions = "1.1.0"
-micromath = { version = "2.1.0", default-features = false }

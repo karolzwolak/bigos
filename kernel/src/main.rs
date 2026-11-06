@@ -7,7 +7,7 @@ use kernel::bsp_init::{
     init_filesystem_on_bsp, init_shared_state_on_bsp, wait_for_ap_cores_blocking,
 };
 use kernel::graphics::compositor::{get_compositor, init_compositor};
-use kernel::{interrupts, serial_println_core, tests_exp::test_graphics};
+use kernel::{interrupts, serial_println_core};
 use x86_64::instructions::hlt;
 extern crate alloc;
 
@@ -48,8 +48,6 @@ fn main() -> ! {
 
         let fb_width = fb.width as f32;
         let fb_height = fb.height as f32;
-
-        test_graphics::draw_shapes(fb);
 
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
