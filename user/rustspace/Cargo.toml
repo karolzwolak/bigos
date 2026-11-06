@@ -5,10 +5,6 @@ name = "rustspace"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = ["test_big_files"]
-test_big_files = []
-
 [lib]
 name = "rustspace"
 path = "src/lib.rs"
@@ -24,10 +20,6 @@ path = "src/bin/window_app.rs"
 [[bin]]
 name = "theophe"
 path = "src/bin/theophe.rs"
-
-[[bin]]
-name = "fs_test"
-path = "src/bin/fs_test.rs"
 
 [[bin]]
 name = "memstress"

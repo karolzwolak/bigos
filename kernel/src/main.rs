@@ -3,9 +3,7 @@
 
 mod boot;
 
-use kernel::bsp_init::{
-    init_filesystem_on_bsp, init_shared_state_on_bsp, wait_for_ap_cores_blocking,
-};
+use kernel::bsp_init::{init_shared_state_on_bsp, wait_for_ap_cores_blocking};
 use kernel::graphics::compositor::{get_compositor, init_compositor};
 use kernel::{interrupts, serial_println_core};
 use x86_64::instructions::hlt;
@@ -38,9 +36,6 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 
 fn main() -> ! {
     serial_println_core!("Welcome to MofuOS!");
-
-    let _ = init_filesystem_on_bsp();
-    kernel::tests_exp::test_ata::test_ata_filesystem();
 
     {
         let mut framebuffer_target = kernel::graphics::framebuffer::get_framebuffer();

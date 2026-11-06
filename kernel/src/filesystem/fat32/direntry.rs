@@ -51,7 +51,7 @@ pub struct DirectoryEntry {
 }
 
 const fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 const DAYS_UNTIL_YEAR_SINCE_1970: [u32; 128] = {
@@ -134,10 +134,10 @@ impl DirectoryEntry {
             creation_time: u16::from_le_bytes([data[14], data[15]]),
             creation_date: u16::from_le_bytes([data[16], data[17]]),
             access_date: u16::from_le_bytes([data[18], data[19]]),
-            first_cluster_high: first_cluster_high,
+            first_cluster_high,
             write_time: u16::from_le_bytes([data[22], data[23]]),
             write_date: u16::from_le_bytes([data[24], data[25]]),
-            first_cluster_low: first_cluster_low,
+            first_cluster_low,
             file_size: u32::from_le_bytes([data[28], data[29], data[30], data[31]]),
         }
     }
@@ -177,10 +177,7 @@ impl DirectoryEntry {
     }
 
     pub fn is_valid(&self) -> bool {
-        if self.name[0] == FIRST_BYTE_IS_EMPTY_FLAG || self.name[0] == FIRST_BYTE_IS_DELETED_FLAG {
-            return false;
-        }
-        true
+        self.name[0] != FIRST_BYTE_IS_EMPTY_FLAG && self.name[0] != FIRST_BYTE_IS_DELETED_FLAG
     }
 
     pub fn is_deleted(&self) -> bool {
@@ -272,12 +269,7 @@ impl DirectoryEntry {
         self.name == fullname[0..8] && self.extension == fullname[8..11]
     }
 
-    pub fn set_filename(
-        &mut self,
-        filename: &str,
-    ) -> crate::filesystem::sirius::FileSystemResult<()> {
-        use crate::filesystem::sirius::FileSystemError;
-
+    pub fn set_filename(&mut self, filename: &str) {
         self.name.fill(b' ');
         self.extension.fill(b' ');
 
@@ -292,18 +284,8 @@ impl DirectoryEntry {
             None => (filename, None),
         };
 
-        if name_part.len() > MAX_NAME_LENGTH {
-            return Err(FileSystemError::InvalidFilename);
-        }
-        if let Some(ext) = ext_part {
-            if ext.len() > MAX_EXT_LENGTH {
-                return Err(FileSystemError::InvalidFilename);
-            }
-        }
-
         let name_bytes = name_part.as_bytes();
-        for i in 0..name_bytes.len() {
-            let c = name_bytes[i];
+        for (i, &c) in name_bytes.iter().enumerate().take(8) {
             self.name[i] = match c {
                 b'a'..=b'z' => c - 32,
                 _ => c,
@@ -312,16 +294,13 @@ impl DirectoryEntry {
 
         if let Some(ext) = ext_part {
             let ext_bytes = ext.as_bytes();
-            for i in 0..ext_bytes.len() {
-                let c = ext_bytes[i];
+            for (i, &c) in ext_bytes.iter().enumerate().take(3) {
                 self.extension[i] = match c {
                     b'a'..=b'z' => c - 32,
                     _ => c,
                 };
             }
         }
-
-        Ok(())
     }
 
     pub fn mark_deleted(&mut self) {
@@ -357,8 +336,8 @@ impl DirectoryEntry {
     // NOTE: this is a fake directory entry
     pub fn create_for_root() -> Self {
         DirectoryEntry {
-            name: [b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' '],
-            extension: [b' ', b' ', b' '],
+            name: *b"        ",
+            extension: *b"   ",
             attributes: FatFileAttributes::Directory as u8,
             nt_reserved: 0,
             creation_time_tenth: 0,

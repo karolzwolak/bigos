@@ -539,20 +539,6 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 };
                 self.det_flow_demo(count);
             }
-            "odys" => unsafe {
-                match crate::lookup_program(cmd) {
-                    Some(elf_path) => {
-                        let chars: Vec<char> = elf_path.chars().collect();
-                        let name = "odys";
-                        let name_chars = name.chars().collect::<Vec<char>>();
-                        let args = [0u8; 0];
-                        crate::sys_create_process(chars.as_slice(), name_chars.as_slice(), &args);
-                    }
-                    None => {
-                        self.write_line("Command not found");
-                    }
-                }
-            },
             _ => {}
         }
     }
