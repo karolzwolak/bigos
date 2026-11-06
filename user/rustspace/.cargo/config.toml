@@ -1,0 +1,11 @@
+[build]
+target = "x86_64-user.json"
+
+[target.'cfg(target_arch = "x86_64")']
+rustflags = [
+    "-C", "link-arg=-Tlinker.ld",
+]
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

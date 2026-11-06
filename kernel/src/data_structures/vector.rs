@@ -12,12 +12,6 @@ pub struct Vec<T> {
     pub data: NonNull<T>,
 }
 
-impl<T> Default for Vec<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<T> Vec<T> {
     pub fn new() -> Self {
         Vec::with_capacity(4)
@@ -37,18 +31,18 @@ impl<T> Vec<T> {
         Self {
             size: 0,
             capacity,
-            data,
+            data: data,
         }
     }
 
     pub fn get(&self, index: usize) -> &T {
         assert!(index < self.size, "Index out of bounds");
-        unsafe { &*self.data.as_ptr().add(index) }
+        unsafe { Some(&*self.data.as_ptr().add(index)).unwrap() }
     }
 
     pub fn get_mut(&mut self, index: usize) -> &mut T {
         assert!(index < self.size, "Index out of bounds");
-        unsafe { &mut *self.data.as_ptr().add(index) }
+        unsafe { Some(&mut *self.data.as_ptr().add(index)).unwrap() }
     }
 
     pub fn resize(&mut self, new_capacity: usize) {
@@ -61,7 +55,7 @@ impl<T> Vec<T> {
             self.capacity = 1;
         }
         while self.capacity < new_capacity {
-            self.capacity *= 2;
+            self.capacity = self.capacity * 2;
         }
 
         let new_layout = Layout::array::<T>(new_capacity).expect("Layout creation failed");
@@ -86,12 +80,14 @@ impl<T> Vec<T> {
         }
         self.size += 1;
 
-        serial_println!(
-            "Vec push: size={}, capacity={} ptr={:#x}",
-            self.size,
-            self.capacity,
-            self.data.as_ptr() as usize
-        );
+        if super::DATA_STRUCTURE_DEBUG_PRINT {
+            serial_println!(
+                "Vec push: size={}, capacity={} ptr={:#x}",
+                self.size,
+                self.capacity,
+                self.data.as_ptr() as usize
+            );
+        }
     }
 
     pub fn pop(&mut self) -> Option<T> {
@@ -206,6 +202,43 @@ impl<T> Drop for Vec<T> {
     }
 }
 
+impl<T> Vec<T> {
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.as_slice().iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.as_mut_slice().iter_mut()
+    }
+
+    pub fn retain<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let mut write_pos = 0;
+        for read_pos in 0..self.size {
+            unsafe {
+                if predicate(&*self.data.as_ptr().add(read_pos)) {
+                    if read_pos != write_pos {
+                        let item = ptr::read(self.data.as_ptr().add(read_pos));
+                        ptr::write(self.data.as_ptr().add(write_pos), item);
+                    }
+                    write_pos += 1;
+                }
+            }
+        }
+        self.size = write_pos;
+    }
+}
+
 impl<T> Clone for Vec<T>
 where
     T: Clone,
@@ -218,3 +251,6 @@ where
         new_vec
     }
 }
+
+unsafe impl<T: Send> Send for Vec<T> {}
+unsafe impl<T: Sync> Sync for Vec<T> {}

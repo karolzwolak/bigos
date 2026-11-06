@@ -45,6 +45,12 @@ impl Rgba8888UNORM {
         b: 255,
         a: 255,
     };
+    pub const DARK_BLUE: Self = Self {
+        r: 0,
+        g: 0,
+        b: 55,
+        a: 255,
+    };
     pub const GRAY: Self = Self {
         r: 64,
         g: 64,
@@ -102,7 +108,7 @@ impl Rgba8888UNORM {
         }
     }
 
-    pub const fn to_u32_xrgb(&self) -> u32 {
+    pub fn to_u32_xrgb(&self) -> u32 {
         ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
     }
 
@@ -133,5 +139,57 @@ pub const fn xrgb_to_rgba(xrgb: u32) -> Rgba8888UNORM {
         g: ((xrgb >> 8) & 0xFF) as u8,
         b: (xrgb & 0xFF) as u8,
         a: 255,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgba8888F {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Rgba8888F {
+    pub const RED: Self = Self {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const GREEN: Self = Self {
+        r: 0.0,
+        g: 1.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const BLUE: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    pub const GRAY: Self = Self {
+        r: 0.25,
+        g: 0.25,
+        b: 0.25,
+        a: 1.0,
+    };
+    pub const WHITE: Self = Self {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    pub fn from_rgbf32(r: f32, g: f32, b: f32) -> Self {
+        Self { r, g, b, a: 1.0 }
+    }
+
+    pub fn to_u32_xrgb(&self) -> u32 {
+        let r = (self.r.clamp(0.0, 1.0) * 255.0) as u32;
+        let g = (self.g.clamp(0.0, 1.0) * 255.0) as u32;
+        let b = (self.b.clamp(0.0, 1.0) * 255.0) as u32;
+        (r << 16) | (g << 8) | b
     }
 }
