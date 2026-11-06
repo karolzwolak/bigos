@@ -4,14 +4,8 @@ use elf::ElfBytes;
 
 pub const RUST_FIRST_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/rust_first");
-pub const GAME_ELF: &[u8] = include_bytes!("../../../user/rustspace/target/x86_64-user/debug/game");
 pub const THEOPHE_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/theophe");
-pub const FS_TEST_ELF: &[u8] =
-    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_test");
-pub const FS_CACHED_TEST_ELF: &[u8] =
-    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_test_cached");
-pub const ODYS_ELF: &[u8] = include_bytes!("../../../user/rustspace/target/x86_64-user/debug/odys");
 pub const MEMSTRESS_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/memstress");
 pub const WINSTRESS_ELF: &[u8] =

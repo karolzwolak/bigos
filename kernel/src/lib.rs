@@ -3,16 +3,10 @@
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
 #![allow(warnings, unused)] // TODO: remove this
-#![feature(str_from_raw_parts)]
 
 use static_assertions::const_assert;
 
 pub const RUN_THEOPHE: bool = true;
-pub const RUN_ODYS: bool = false;
-pub const USE_RUST_USER_PROGRAMS: bool = false;
-pub const USE_GAME_PROGRAM: bool = false;
-pub const RUN_FS_TEST: bool = false;
-pub const RUN_FS_CACHED_TEST: bool = false;
 
 pub const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const MAX_CORES: u8 = 4;

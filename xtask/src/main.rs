@@ -814,27 +814,6 @@ fn build_hdd(root: &Path) {
     println!("HDD ready: {}", hdd.display());
 }
 
-fn ensure_ata_disk(root: &Path) -> PathBuf {
-    let ata_path = root.join("storage/ata_disk.img");
-    if ata_path.exists() {
-        return ata_path;
-    }
-    println!("Creating ATA disk image…");
-    let template = root.join("disk_templates/fat32_os_disk_template_default");
-    run(Command::new("bash")
-        .args([
-            "scripts/create_ata_disk.sh",
-            "-i",
-            template.to_str().unwrap(),
-            "-o",
-            "ata_disk.img",
-            "-s",
-            "64",
-        ])
-        .current_dir(root));
-    ata_path
-}
-
 fn qemu_flags() -> Vec<String> {
     env::var("QEMUFLAGS")
         .unwrap_or_else(|_| "-m 2G".to_string())
@@ -899,7 +878,6 @@ fn ovmf(root: &Path) -> (PathBuf, PathBuf) {
 
 fn run_iso(root: &Path) {
     build_iso(root);
-    let ata = ensure_ata_disk(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
     let socket1 = "/tmp/mofuos_com1.sock";
@@ -945,12 +923,6 @@ fn run_iso(root: &Path) {
         &format!("if=pflash,unit=1,format=raw,file={}", vars.display()),
     ])
     .args(["-cdrom", iso.to_str().unwrap()])
-    .args(["-device", "piix3-ide,id=ide"])
-    .args(["-device", "ide-hd,drive=ata0,bus=ide.0,unit=0"])
-    .args([
-        "-drive",
-        &format!("file={},format=raw,id=ata0,if=none", ata.display()),
-    ])
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
     .args(["-serial", &format!("unix:{socket1},server")])
     .args(["-serial", &format!("unix:{socket2},server,nowait")])
@@ -969,7 +941,6 @@ fn run_iso(root: &Path) {
 
 fn run_nologs(root: &Path) {
     build_iso(root);
-    let ata = ensure_ata_disk(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
     let smp = qemu_smp_arg(root);
@@ -1000,12 +971,6 @@ fn run_nologs(root: &Path) {
         &format!("if=pflash,unit=1,format=raw,file={}", vars.display()),
     ])
     .args(["-cdrom", iso.to_str().unwrap()])
-    .args(["-device", "piix3-ide,id=ide"])
-    .args(["-device", "ide-hd,drive=ata0,bus=ide.0,unit=0"])
-    .args([
-        "-drive",
-        &format!("file={},format=raw,id=ata0,if=none", ata.display()),
-    ])
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
     .args(["-no-reboot"])
     .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])
@@ -1173,7 +1138,7 @@ fn run_usertests(root: &Path, args: &[String]) {
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO + ATA disk and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n   ata-disk     Create ATA disk image (storage/ata_disk.img)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  usertest [--release] [filter…] Build and run userspace integration tests (kernel/src/bin/test_user*.rs, test_usermem*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  usertest [--release] [filter…] Build and run userspace integration tests (kernel/src/bin/test_user*.rs, test_usermem*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 
@@ -1195,9 +1160,6 @@ fn main() {
         Some("hdd") => build_hdd(&root),
         Some("run") => run_iso(&root),
         Some("run-nologs") => run_nologs(&root),
-        Some("ata-disk") => {
-            ensure_ata_disk(&root);
-        }
         Some("test") => run_tests(&root, &extra),
         Some("usertest") => run_usertests(&root, &extra),
         Some("clean") => clean(&root),

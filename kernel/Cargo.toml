@@ -9,11 +9,6 @@ cc = "1.0"
 [target.'cfg(target_arch = "x86_64")'.build-dependencies]
 cc = "1.0"
 
-[features]
-default = ["use_cached_fs"]
-use_cached_fs = []
-
-
 [dependencies]
 limine = "0.6.3"
 uart_16550 = "0.5.0"

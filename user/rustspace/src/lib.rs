@@ -50,6 +50,13 @@ pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 pub const SYS_ECHO: u64 = 997;
 
+/// Mirrors the kernel's `SyscallError::NotImplemented.as_return()`.
+pub const SYSCALL_NOT_IMPLEMENTED: u64 = 6u64.wrapping_neg();
+
+fn syscall_failed(ret: u64) -> bool {
+    ret == u64::MAX || ret == SYSCALL_NOT_IMPLEMENTED
+}
+
 pub const FD_FLAG_READ: u8 = 0x01;
 pub const FD_FLAG_WRITE: u8 = 0x02;
 
@@ -61,17 +68,6 @@ pub struct ProgramEntry {
     pub elf_path: &'static str,
 }
 pub static KNOWN_PROGRAMS: Mutex<Vec<ProgramEntry>> = Mutex::new(Vec::new());
-pub fn init_programs() {
-    let mut programs = KNOWN_PROGRAMS.lock();
-
-    if programs.is_empty() {
-        programs.push(ProgramEntry {
-            name: "odys",
-            elf_path: "/bin/odys",
-        });
-    }
-}
-
 pub fn lookup_program(name: &str) -> Option<&'static str> {
     let programs = KNOWN_PROGRAMS.lock();
     programs.iter().find(|p| p.name == name).map(|p| p.elf_path)
@@ -406,7 +402,7 @@ pub unsafe fn sys_open_file(path: &str, flags: u8) -> usize {
             flags as u64,
         )
     };
-    if ret == u64::MAX {
+    if syscall_failed(ret) {
         usize::MAX
     } else {
         ret as usize
@@ -417,7 +413,7 @@ pub unsafe fn sys_open_file(path: &str, flags: u8) -> usize {
 /// Returns true on success.
 #[inline(always)]
 pub unsafe fn sys_close_file(fd: usize) -> bool {
-    unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) != u64::MAX }
+    !syscall_failed(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) })
 }
 
 /// Read up to buf.len() bytes from an open fd
@@ -433,10 +429,10 @@ pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> usize {
             buf.len() as u64,
         )
     };
-    if ret != u64::MAX {
-        ret as usize
-    } else {
+    if syscall_failed(ret) {
         usize::MAX
+    } else {
+        ret as usize
     }
 }
 
@@ -453,10 +449,10 @@ pub unsafe fn sys_read_file_at(fd: usize, offset: usize, buf: &mut [u8]) -> usiz
             buf.len() as u64,
         )
     };
-    if ret != u64::MAX {
-        ret as usize
-    } else {
+    if syscall_failed(ret) {
         usize::MAX
+    } else {
+        ret as usize
     }
 }
 
@@ -473,7 +469,7 @@ pub unsafe fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> usize {
             buf.len() as u64,
         )
     };
-    if ret == u64::MAX {
+    if syscall_failed(ret) {
         usize::MAX
     } else {
         ret as usize
@@ -491,7 +487,7 @@ pub unsafe fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
             out_stat as *mut StatFlat as u64,
         )
     };
-    ret != u64::MAX
+    !syscall_failed(ret)
 }
 
 #[inline(always)]
@@ -539,7 +535,7 @@ pub unsafe fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> usiz
             0,
         )
     };
-    if ret == u64::MAX {
+    if syscall_failed(ret) {
         usize::MAX
     } else {
         ret as usize
@@ -550,21 +546,21 @@ pub unsafe fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> usiz
 #[inline(always)]
 pub unsafe fn sys_create_file(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_CREATE_FILE, path.as_ptr() as u64, path.len() as u64, 0) };
-    ret != u64::MAX
+    !syscall_failed(ret)
 }
 
 /// Create a new directory at the given path. Returns true on success.
 #[inline(always)]
 pub unsafe fn sys_create_dir(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_CREATE_DIR, path.as_ptr() as u64, path.len() as u64, 0) };
-    ret != u64::MAX
+    !syscall_failed(ret)
 }
 
 /// Delete a file or directory at the given path. Returns true on success.
 #[inline(always)]
 pub unsafe fn sys_delete(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0) };
-    ret != u64::MAX
+    !syscall_failed(ret)
 }
 
 #[inline(always)]

@@ -89,8 +89,6 @@ pub extern "C" fn main() -> ! {
 
     rustspace::println!("theophe: starting loop");
 
-    rustspace::init_programs();
-
     rustspace::println!(
         "theophe: window info: {}x{} event_buffer_vaddr: {}",
         window_info.width,

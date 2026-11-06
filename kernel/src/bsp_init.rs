@@ -1,6 +1,5 @@
 use crate::{
     AP_CORES_READY, MAX_CORES,
-    filesystem::init_filesystem_ata,
     process::{CORE_POOL, shared_state::init_shared_state},
     serial_println_core,
 };
@@ -13,19 +12,6 @@ const AP_READY_POLL_INTERVAL_MS: u64 = 10;
 pub fn init_shared_state_on_bsp() {
     init_shared_state();
     serial_println_core!("bsp_init: shared state initialized");
-}
-
-pub fn init_filesystem_on_bsp() -> Result<(), &'static str> {
-    match init_filesystem_ata() {
-        Ok(()) => {
-            serial_println_core!("bsp_init: filesystem initialized from ATA drive");
-            Ok(())
-        }
-        Err(e) => {
-            serial_println_core!("bsp_init: filesystem init failed: {}", e);
-            Err(e)
-        }
-    }
 }
 
 pub fn wait_for_ap_cores_blocking() {

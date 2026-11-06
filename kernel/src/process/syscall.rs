@@ -1,6 +1,5 @@
 use crate::data_structures::circular_buffer::{CircularBuffer, CircularBufferInfo};
 use crate::events::event_buffer::EventBuffer;
-use crate::filesystem::sirius::{DirEntryFlat, FS_NAME_LEN, FilesystemDriver, StatFlat};
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::window::{WindowInfo, event_buffer_user_vaddr};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
@@ -9,10 +8,9 @@ use crate::memory::get_frame_allocator;
 use crate::memory::memory::PAGE_SIZE;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
-use crate::process::elf_loader::ODYS_ELF;
 use crate::process::process::FileDescriptor;
 use crate::process::process_mem::FrameOwnership;
-use crate::process::{CORE_POOL, ElfLoadInfo};
+use crate::process::CORE_POOL;
 use crate::serial_println;
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
 use crate::util::msr::msr_write;
@@ -25,15 +23,10 @@ use crate::{
     serial_println_core,
     util::cpuinfo::get_current_core_id,
 };
-use alloc::string::String;
-use alloc::vec::Vec;
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
 use x86_64::structures::paging::{Mapper, PageTableFlags};
-
-#[cfg(feature = "use_cached_fs")]
-use crate::filesystem::file_cache::CacheImportance;
 
 const SYSCALL_DEBUG_PRINT: bool = false;
 
@@ -41,17 +34,6 @@ const SYSCALL_DEBUG_PRINT: bool = false;
 fn validate_user_ptr(ptr: usize, len: usize) -> bool {
     let end = ptr.saturating_add(len);
     ptr != 0 && end <= USER_MEM_MAX_ADDRESS && end >= ptr
-}
-
-fn read_user_string(ptr: usize, len: usize) -> Option<String> {
-    if !validate_user_ptr(ptr, len) {
-        return None;
-    }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
-    match core::str::from_utf8(bytes) {
-        Ok(s) => Some(String::from(s)),
-        Err(_) => None,
-    }
 }
 
 #[repr(u32)]
@@ -63,10 +45,19 @@ pub enum SyscallError {
     OutOfMemory = 3,
     ProcessNotFound = 4,
     InvalidFd = 5,
+    NotImplemented = 6,
     SyscallNotFound = 999,
 }
 
+impl SyscallError {
+    /// Negated so an error can't be mistaken for a valid fd or byte count.
+    pub const fn as_return(self) -> u64 {
+        (self as u64).wrapping_neg()
+    }
+}
+
 #[repr(u64)]
+#[derive(Debug)]
 pub enum SyscallNumber {
     CreateProcess = 0,
     TerminateProcess = 1,
@@ -93,7 +84,6 @@ pub enum SyscallNumber {
     CreateFile = 26,
     CreateDir = 27,
     Delete = 28,
-    // Cache control syscalls (only meaningful with use_cached_fs feature)
     PinFile = 30,
     UnpinFile = 31,
     ReserveCache = 32,
@@ -250,44 +240,8 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
 
     match syscall {
         SyscallNumber::CreateProcess => {
-            let elf_path_ptr = frame.arg1 as u64;
-            let elf_path_len = frame.arg2 as u64;
-            let name_ptr = frame.arg3 as u64;
-            let name_len = frame.arg4 as u64;
-
-            let elf_path =
-                core::str::from_raw_parts(elf_path_ptr as *const u8, elf_path_len as usize);
-            let name = core::str::from_raw_parts(name_ptr as *const u8, name_len as usize);
-
-            serial_println_core!("CreateProcess called");
-            serial_println_core!("CreateProcess creating process {} from: {}", name, elf_path);
-
-            match ElfLoadInfo::from_elf_data(&ODYS_ELF) {
-                Ok(info) => {
-                    serial_println!("  Parsed ELF: entry_point={:#x}", info.entry_point);
-                    let mut pm = PROCESS_MANAGER.lock();
-                    match pm.create_process_from_elf(0, &info, "proc1", 5) {
-                        Ok(init_pid) => {
-                            serial_println!(
-                                "Init process created (PID {}), added to scheduler",
-                                init_pid
-                            );
-                        }
-                        Err(e) => {
-                            serial_println!("ERROR: Failed to create init process: {:?}", e);
-                            drop(pm);
-                            return u64::MAX;
-                        }
-                    }
-                    drop(pm);
-                }
-                Err(e) => {
-                    serial_println!("  ERROR: Failed to parse ELF: {:?}", e);
-                    return u64::MAX;
-                }
-            };
-
-            0u64
+            serial_println_core!("CreateProcess: not implemented");
+            SyscallError::NotImplemented.as_return()
         }
         SyscallNumber::TerminateProcess => {
             let target_pid = frame.arg1 as usize;
@@ -643,545 +597,23 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
             0
         }
 
-        SyscallNumber::OpenFile => {
-            let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                Some(s) => s,
-                None => return FileDescriptor::INVALID_FD,
-            };
-            let flags = frame.arg3 as u8;
-
-            let node_id: usize = {
-                let mut sirius_guard = crate::filesystem::sirius::get_sirius();
-                match sirius_guard.resolve_path(&path) {
-                    Ok(node) => node.node_id,
-                    Err(e) => {
-                        serial_println_core!("sys_open_file: '{}' not found: {:?}", path, e);
-                        return FileDescriptor::INVALID_FD;
-                    }
-                }
-            };
-
-            let core_id = get_current_core_id();
-            let pid = scheduler::get_current_process_for_core(core_id);
-
-            let fd_index = {
-                let mut pm = PROCESS_MANAGER.lock();
-                match pm.get_process_mut(pid) {
-                    Ok(proc) => {
-                        let idx = proc.file_descriptors.size;
-                        proc.file_descriptors
-                            .push(FileDescriptor { node_id, flags });
-                        idx
-                    }
-                    Err(_) => return FileDescriptor::INVALID_FD,
-                }
-            };
-
-            serial_println_core!("sys_open_file: '{}' -> fd={}", path, fd_index);
-            fd_index as u64
-        }
-
-        SyscallNumber::CloseFile => {
-            let fd = frame.arg1 as usize;
-            let core_id = get_current_core_id();
-            let pid = scheduler::get_current_process_for_core(core_id);
-
-            let mut pm = PROCESS_MANAGER.lock();
-            match pm.get_process_mut(pid) {
-                Ok(proc) => {
-                    if fd >= proc.file_descriptors.size {
-                        return FileDescriptor::INVALID_FD;
-                    }
-                    let last = proc.file_descriptors.size - 1;
-                    if fd != last {
-                        let last_fd = *proc.file_descriptors.get(last);
-                        *proc.file_descriptors.get_mut(fd) = last_fd;
-                    }
-                    proc.file_descriptors.size -= 1;
-                    serial_println_core!("sys_closeFile: fd={} closed", fd);
-                    0
-                }
-                Err(_) => FileDescriptor::INVALID_FD,
-            }
-        }
-
-        SyscallNumber::ReadFile => {
-            let fd = frame.arg1 as usize;
-            let offset = frame.arg2 as usize;
-            let buffer_ptr = frame.arg3 as usize;
-            let count = frame.arg4 as usize;
-            serial_println_core!(
-                "sys_read_file: fd={} offset={} buffer_ptr={:p} count={}",
-                fd,
-                offset,
-                buffer_ptr as *const u8,
-                count
-            );
-
-            if !validate_user_ptr(buffer_ptr, count) {
-                return FileDescriptor::INVALID_FD;
-            }
-
-            let core_id = get_current_core_id();
-            let pid = scheduler::get_current_process_for_core(core_id);
-
-            let (node_id, flags) = {
-                let pm = PROCESS_MANAGER.lock();
-                match pm.get_process(pid) {
-                    Ok(proc) => {
-                        if fd >= proc.file_descriptors.size {
-                            return FileDescriptor::INVALID_FD;
-                        }
-                        let d = proc.file_descriptors.get(fd);
-                        (d.node_id, d.flags)
-                    }
-                    Err(_) => return FileDescriptor::INVALID_FD,
-                }
-            };
-
-            if flags & crate::process::process::FD_FLAG_READ == 0 {
-                return FileDescriptor::INVALID_FD;
-            }
-
-            let buffer = unsafe { core::slice::from_raw_parts_mut(buffer_ptr as *mut u8, count) };
-
-            let bytes_read = {
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-
-                #[cfg(feature = "use_cached_fs")]
-                {
-                    match sirius.driver.read_file(node_id, offset, buffer) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            serial_println_core!("sys_read_file: fd={} error: {:?}", fd, e);
-                            return FileDescriptor::INVALID_FD;
-                        }
-                    }
-                }
-
-                #[cfg(not(feature = "use_cached_fs"))]
-                {
-                    match sirius.driver.read_file(node_id, offset, buffer) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            serial_println_core!("sys_read_file: fd={} error: {:?}", fd, e);
-                            return FileDescriptor::INVALID_FD;
-                        }
-                    }
-                }
-            };
-
-            bytes_read as u64
-        }
-
-        SyscallNumber::WriteFile => {
-            let fd = frame.arg1 as usize;
-            let offset = frame.arg2 as usize;
-            let buffer_ptr = frame.arg3 as usize;
-            let count = frame.arg4 as usize;
-
-            if !validate_user_ptr(buffer_ptr, count) {
-                return FileDescriptor::INVALID_FD;
-            }
-
-            let core_id = get_current_core_id();
-            let pid = scheduler::get_current_process_for_core(core_id);
-
-            let (node_id, flags) = {
-                let pm = PROCESS_MANAGER.lock();
-                match pm.get_process(pid) {
-                    Ok(proc) => {
-                        if fd >= proc.file_descriptors.size {
-                            return FileDescriptor::INVALID_FD;
-                        }
-                        let descriptor = proc.file_descriptors.get(fd);
-                        (descriptor.node_id, descriptor.flags)
-                    }
-                    Err(_) => return FileDescriptor::INVALID_FD,
-                }
-            };
-
-            if flags & crate::process::process::FD_FLAG_WRITE == 0 {
-                return FileDescriptor::INVALID_FD;
-            }
-
-            let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr as *const u8, count) };
-            let bytes_written = {
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-                match sirius.driver.write_file(node_id, offset, buffer) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        serial_println_core!("sys_write_file: fd={} error: {:?}", fd, e);
-                        return FileDescriptor::INVALID_FD;
-                    }
-                }
-            };
-
-            // {
-            //     let mut pm = PROCESS_MANAGER.lock();
-            //     if let Ok(proc) = pm.get_process_mut(pid) {
-            //         if fd < proc.file_descriptors.size {
-            //             proc.file_descriptors.get_mut(fd).offset += bytes_written;
-            //         }
-            //     }
-            // }
-
-            bytes_written as u64
-        }
-
-        SyscallNumber::StatFile => {
-            let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                Some(s) => s,
-                None => return FileDescriptor::INVALID_FD,
-            };
-            let stat_ptr = frame.arg3 as usize;
-
-            if !validate_user_ptr(stat_ptr, core::mem::size_of::<StatFlat>()) {
-                return FileDescriptor::INVALID_FD;
-            }
-
-            let node = {
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-                match sirius.resolve_path(&path) {
-                    Ok(file_node) => file_node,
-                    Err(e) => {
-                        serial_println_core!("sys_stat: '{}' error: {:?}", path, e);
-                        return FileDescriptor::INVALID_FD;
-                    }
-                }
-            };
-
-            let out = unsafe { &mut *(stat_ptr as *mut StatFlat) };
-            out.name = [0u8; FS_NAME_LEN];
-            let name_bytes = node.name.as_bytes();
-            let copy_len = name_bytes.len().min(FS_NAME_LEN);
-            out.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-            out.name_len = copy_len as u8;
-            out.is_dir = (node.file_type == crate::filesystem::sirius::FileType::Directory) as u8;
-            out.size = node.size as u64;
-            out.created_time = node.created_time;
-            out.modified_time = node.modified_time;
-
-            serial_println_core!("sys_stat: {}, size: {}", path, out.size);
-
-            0
-        }
-
-        SyscallNumber::ListDir => {
-            let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                Some(s) => s,
-                None => return FileDescriptor::INVALID_FD,
-            };
-            let out_ptr = frame.arg3 as usize;
-            let out_buffer_len = frame.arg4 as usize;
-
-            if !validate_user_ptr(out_ptr, out_buffer_len) {
-                return FileDescriptor::INVALID_FD;
-            }
-
-            let entries = {
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-                match sirius.list_directory(&path) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        serial_println_core!("sys_list_dir: '{}' error: {:?}", path, e);
-                        return FileDescriptor::INVALID_FD;
-                    }
-                }
-            };
-
-            let entry_size = core::mem::size_of::<DirEntryFlat>();
-            let max_entries = out_buffer_len / entry_size;
-            let write_count = entries.len().min(max_entries);
-
-            for (i, node) in entries.iter().take(write_count).enumerate() {
-                let slot_ptr = (out_ptr + i * entry_size) as *mut DirEntryFlat;
-                let slot = unsafe { &mut *slot_ptr };
-                slot.name = [0u8; FS_NAME_LEN];
-                let name_bytes = node.name.as_bytes();
-                let copy_len = name_bytes.len().min(FS_NAME_LEN);
-                slot.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-                slot.name_len = copy_len as u8;
-                slot.is_dir =
-                    (node.file_type == crate::filesystem::sirius::FileType::Directory) as u8;
-                slot.size = node.size as u64;
-                slot.created_time = node.created_time;
-                slot.modified_time = node.modified_time;
-            }
-
-            write_count as u64
-        }
-
-        SyscallNumber::CreateFile => {
-            let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                Some(s) => s,
-                None => return FileDescriptor::INVALID_FD,
-            };
-
-            let mut sirius = crate::filesystem::sirius::get_sirius();
-            match sirius.create_file(&path) {
-                Ok(_) => {
-                    serial_println_core!("sys_create_file: '{}' created", path);
-                    0
-                }
-                Err(e) => {
-                    serial_println_core!("sys_create_file: '{}' error: {:?}", path, e);
-                    FileDescriptor::INVALID_FD
-                }
-            }
-        }
-
-        SyscallNumber::CreateDir => {
-            let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                Some(s) => s,
-                None => return FileDescriptor::INVALID_FD,
-            };
-
-            let mut sirius = crate::filesystem::sirius::get_sirius();
-            match sirius.create_directory(&path) {
-                Ok(_) => {
-                    serial_println_core!("sys_create_dir: '{}' created", path);
-                    0
-                }
-                Err(e) => {
-                    serial_println_core!("sys_create_dir: '{}' error: {:?}", path, e);
-                    FileDescriptor::INVALID_FD
-                }
-            }
-        }
-
-        SyscallNumber::Delete => {
-            let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                Some(s) => s,
-                None => return FileDescriptor::INVALID_FD,
-            };
-
-            let mut sirius = crate::filesystem::sirius::get_sirius();
-            match sirius.delete(&path) {
-                Ok(_) => {
-                    serial_println_core!("sys_delete: '{}' deleted", path);
-                    0
-                }
-                Err(e) => {
-                    serial_println_core!("sys_delete: '{}' error: {:?}", path, e);
-                    FileDescriptor::INVALID_FD
-                }
-            }
-        }
-
-        SyscallNumber::PinFile => {
-            #[cfg(not(feature = "use_cached_fs"))]
-            {
-                serial_println_core!("sys_pin_file: cache not enabled");
-                return u64::MAX;
-            }
-
-            #[cfg(feature = "use_cached_fs")]
-            {
-                let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                    Some(s) => s,
-                    None => return u64::MAX,
-                };
-
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-                match sirius.pin_file(&path) {
-                    Ok(()) => {
-                        serial_println_core!("sys_pin_file: '{}' pinned", path);
-                        0
-                    }
-                    Err(e) => {
-                        serial_println_core!("sys_pin_file: '{}' error: {:?}", path, e);
-                        u64::MAX
-                    }
-                }
-            }
-        }
-
-        SyscallNumber::UnpinFile => {
-            #[cfg(not(feature = "use_cached_fs"))]
-            {
-                serial_println_core!("sys_unpin_file: cache not enabled");
-                return u64::MAX;
-            }
-
-            #[cfg(feature = "use_cached_fs")]
-            {
-                let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                    Some(s) => s,
-                    None => return u64::MAX,
-                };
-
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-                match sirius.unpin_file(&path) {
-                    Ok(()) => {
-                        serial_println_core!("sys_unpin_file: '{}' unpinned", path);
-                        0
-                    }
-                    Err(e) => {
-                        serial_println_core!("sys_unpin_file: '{}' error: {:?}", path, e);
-                        u64::MAX
-                    }
-                }
-            }
-        }
-
-        SyscallNumber::ReserveCache => {
-            #[cfg(not(feature = "use_cached_fs"))]
-            {
-                serial_println_core!("sys_reserve_cache: cache not enabled");
-                return u64::MAX;
-            }
-
-            #[cfg(feature = "use_cached_fs")]
-            {
-                let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                    Some(s) => s,
-                    None => return u64::MAX,
-                };
-
-                let importance = match frame.arg3 {
-                    0 => CacheImportance::Minimal,
-                    1 => CacheImportance::Low,
-                    2 => CacheImportance::Normal,
-                    3 => CacheImportance::High,
-                    4 => CacheImportance::VeryHigh,
-                    5 => CacheImportance::Critical,
-                    6 => CacheImportance::Resident,
-                    _ => {
-                        serial_println_core!(
-                            "sys_reserve_cache: invalid importance {}",
-                            frame.arg3
-                        );
-                        return u64::MAX;
-                    }
-                };
-
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-                match sirius.reserve_cache(&path, importance) {
-                    Ok(()) => {
-                        serial_println_core!(
-                            "sys_reserve_cache: '{}' reserved with importance {}",
-                            path,
-                            importance
-                        );
-                        0
-                    }
-                    Err(e) => {
-                        serial_println_core!("sys_reserve_cache: '{}' error: {:?}", path, e);
-                        u64::MAX
-                    }
-                }
-            }
-        }
-
-        SyscallNumber::EvictDirectory => {
-            #[cfg(not(feature = "use_cached_fs"))]
-            {
-                serial_println_core!("sys_evict_directory: cache not enabled");
-                return u64::MAX;
-            }
-
-            #[cfg(feature = "use_cached_fs")]
-            {
-                let path = match read_user_string(frame.arg1 as usize, frame.arg2 as usize) {
-                    Some(s) => s,
-                    None => return u64::MAX,
-                };
-
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-                match sirius.evict_directory(&path) {
-                    Ok(freed) => {
-                        serial_println_core!(
-                            "sys_evict_directory: '{}' evicted, freed {} bytes",
-                            path,
-                            freed
-                        );
-                        freed as u64
-                    }
-                    Err(e) => {
-                        serial_println_core!("sys_evict_directory: '{}' error: {:?}", path, e);
-                        u64::MAX
-                    }
-                }
-            }
-        }
-
-        SyscallNumber::GetCacheStats => {
-            #[cfg(not(feature = "use_cached_fs"))]
-            {
-                0
-            }
-
-            #[cfg(feature = "use_cached_fs")]
-            {
-                let stats_ptr = frame.arg1 as usize;
-
-                if !validate_user_ptr(stats_ptr, core::mem::size_of::<CacheStatsFlat>()) {
-                    return u64::MAX;
-                }
-
-                let sirius = crate::filesystem::sirius::get_sirius();
-                let stats = sirius.cache_stats();
-                let flat = CacheStatsFlat {
-                    total_files: stats.total_files as u64,
-                    total_bytes: stats.total_bytes as u64,
-                    max_bytes: stats.max_bytes as u64,
-                    dirty_files: stats.dirty_files as u64,
-                };
-
-                unsafe {
-                    core::ptr::write(stats_ptr as *mut CacheStatsFlat, flat);
-                }
-
-                serial_println_core!(
-                    "sys_get_cache_stats: {} files, {} / {} bytes",
-                    stats.total_files,
-                    stats.total_bytes,
-                    stats.max_bytes
-                );
-                0
-            }
-        }
-
-        SyscallNumber::FlushFileCache => {
-            #[cfg(not(feature = "use_cached_fs"))]
-            {
-                0
-            }
-
-            #[cfg(feature = "use_cached_fs")]
-            {
-                let core_id = get_current_core_id();
-                let pid = scheduler::get_current_process_for_core(core_id);
-
-                let node_ids: Vec<crate::filesystem::fat32::FileNodeHandle> = {
-                    let pm = PROCESS_MANAGER.lock();
-                    match pm.get_process(pid) {
-                        Ok(proc) => proc
-                            .file_descriptors
-                            .iter()
-                            .map(|fd| fd.node_id as crate::filesystem::fat32::FileNodeHandle)
-                            .collect(),
-                        Err(_) => return u64::MAX,
-                    }
-                };
-
-                let mut sirius = crate::filesystem::sirius::get_sirius();
-                match sirius.flush_nodes(&node_ids) {
-                    Ok(()) => {
-                        serial_println_core!(
-                            "sys_flush_file_cache: pid={} flushed {} nodes",
-                            pid,
-                            node_ids.len()
-                        );
-                        0
-                    }
-                    Err(e) => {
-                        serial_println_core!("sys_flush_file_cache: pid={} error: {:?}", pid, e);
-                        u64::MAX
-                    }
-                }
-            }
+        file_syscall @ (SyscallNumber::OpenFile
+        | SyscallNumber::CloseFile
+        | SyscallNumber::ReadFile
+        | SyscallNumber::WriteFile
+        | SyscallNumber::StatFile
+        | SyscallNumber::ListDir
+        | SyscallNumber::CreateFile
+        | SyscallNumber::CreateDir
+        | SyscallNumber::Delete
+        | SyscallNumber::PinFile
+        | SyscallNumber::UnpinFile
+        | SyscallNumber::ReserveCache
+        | SyscallNumber::EvictDirectory
+        | SyscallNumber::GetCacheStats
+        | SyscallNumber::FlushFileCache) => {
+            serial_println_core!("{:?}: not implemented", file_syscall);
+            SyscallError::NotImplemented.as_return()
         }
 
         SyscallNumber::CreateCircularBuffer => {
@@ -1294,15 +726,6 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
     }
 }
 
-#[cfg(feature = "use_cached_fs")]
-#[repr(C)]
-pub struct CacheStatsFlat {
-    pub total_files: u64,
-    pub total_bytes: u64,
-    pub max_bytes: u64,
-    pub dirty_files: u64,
-}
-
 pub fn init_syscall() {
     let core_id = get_current_core_id() as usize;
     debug_assert!(core_id < crate::MAX_CORES as usize);
@@ -1337,16 +760,4 @@ pub fn init_syscall() {
     }
 
     serial_println_core!("Syscall MSRs initialized");
-}
-
-/// Flush all dirty cached files to disk. Call this from the kernel whenever a
-/// global writeback is needed (e.g., before shutdown or unmount).
-#[cfg(feature = "use_cached_fs")]
-pub fn flush_all_file_caches() {
-    let mut sirius = crate::filesystem::sirius::get_sirius();
-    if let Err(e) = sirius.flush_all() {
-        serial_println_core!("flush_all_file_caches: error: {:?}", e);
-    } else {
-        serial_println_core!("flush_all_file_caches: all dirty files flushed");
-    }
 }
