@@ -1,10 +1,12 @@
 use core::ptr::NonNull;
 
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
+use crate::serial_println;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Size;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
+use limine::framebuffer::Framebuffer;
 use spin::{Mutex, MutexGuard};
 
 pub struct FrameBufferTarget {
@@ -20,27 +22,65 @@ pub struct FrameBufferTarget {
     pub green_mask_shift: u8,
     pub blue_mask_size: u8,
     pub blue_mask_shift: u8,
+    edid_size: u64,
+    edid: Option<NonNull<()>>,
 }
 
 unsafe impl Send for FrameBufferTarget {}
 unsafe impl Sync for FrameBufferTarget {}
 
 impl FrameBufferTarget {
-    pub fn from_limine_framebuffer(fb: &limine::framebuffer::Framebuffer) -> Self {
+    pub const fn new(
+        address: *mut (),
+        width: u64,
+        height: u64,
+        pitch: u64,
+        bpp: u16,
+        memory_model: u8,
+        red_mask_size: u8,
+        red_mask_shift: u8,
+        green_mask_size: u8,
+        green_mask_shift: u8,
+        blue_mask_size: u8,
+        blue_mask_shift: u8,
+        edid: *const (),
+        edid_size: u64,
+    ) -> Self {
         Self {
-            address: NonNull::new(fb.address()).expect("Framebuffer address cannot be null"),
-            width: fb.width,
-            height: fb.height,
-            pitch: fb.pitch,
-            bpp: fb.bpp,
-            memory_model: fb.memory_model,
-            red_mask_size: fb.red_mask_size,
-            red_mask_shift: fb.red_mask_shift,
-            green_mask_size: fb.green_mask_size,
-            green_mask_shift: fb.green_mask_shift,
-            blue_mask_size: fb.blue_mask_size,
-            blue_mask_shift: fb.blue_mask_shift,
+            address: NonNull::new(address).expect("Framebuffer address cannot be null"),
+            width,
+            height,
+            pitch,
+            bpp,
+            memory_model,
+            red_mask_size,
+            red_mask_shift,
+            green_mask_size,
+            green_mask_shift,
+            blue_mask_size,
+            blue_mask_shift,
+            edid: NonNull::new(edid as *mut ()),
+            edid_size,
         }
+    }
+
+    pub fn from_limine_framebuffer(fb: &limine::framebuffer::Framebuffer) -> Self {
+        Self::new(
+            fb.address(),
+            fb.width,
+            fb.height,
+            fb.pitch,
+            fb.bpp,
+            fb.memory_model,
+            fb.red_mask_size,
+            fb.red_mask_shift,
+            fb.green_mask_size,
+            fb.green_mask_shift,
+            fb.blue_mask_size,
+            fb.blue_mask_shift,
+            fb.edid().as_ptr() as *const (),
+            fb.edid().len() as u64,
+        )
     }
 
     pub fn address(&self) -> *mut u8 {
@@ -65,10 +105,6 @@ impl FrameBufferTarget {
         unsafe { px_ptr.write(color) };
     }
 
-    /// # Safety
-    ///
-    /// `src` must be a valid, non-null pointer to at least `width` consecutive `u32` values and
-    /// must not alias the destination region in the framebuffer.
     pub unsafe fn copy_row(&mut self, src: *const u32, dst_y: u64, dst_x: u64, width: u64) {
         if dst_y >= self.height || dst_x >= self.width {
             return;

@@ -1,7 +1,10 @@
 use crate::graphics::color::Rgba8888UNORM;
-use crate::graphics::resources::{ConstantBuffer, Texture};
-use crate::graphics::window::WindowBackBuffer;
+use crate::graphics::resources::{ConstantBuffer, RWBuffer, Texture};
+use crate::graphics::window::{WindowBackBuffer, WindowBuffer};
 use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::arch::x86_64::*;
 use core::simd::{f32x2, f32x4};
 
 #[derive(Debug, Clone, Copy)]
@@ -58,8 +61,12 @@ pub struct Vertex3D {
 }
 
 impl Vertex3D {
-    pub fn new(pos: f32x4, uv: f32x4, norm: f32x4) -> Self {
-        Self { pos, uv, norm }
+    pub fn new(x: f32, y: f32, z: f32, w: f32, u: f32, v: f32, nx: f32, ny: f32, nz: f32) -> Self {
+        Self {
+            pos: f32x4::from_array([x, y, z, w]),
+            uv: f32x4::from_array([u, v, 0.0, 0.0]),
+            norm: f32x4::from_array([nx, ny, nz, 0.0]),
+        }
     }
 
     pub fn position(&self) -> f32x4 {
@@ -83,6 +90,13 @@ impl VertexLayout {
     pub fn new_2d() -> Self {
         Self {
             stride: 8,
+            offset: 0,
+        }
+    }
+
+    pub fn new_3d() -> Self {
+        Self {
+            stride: 16,
             offset: 0,
         }
     }
@@ -140,13 +154,40 @@ pub enum RenderMode {
     XYZ,
 }
 
-pub struct PipelineState {
-    pub vs: Box<dyn VertexShader>,
+#[derive(Clone, Debug)]
+pub enum DepthFunc {
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+}
+
+pub struct PipelineState<VS, PS>
+where
+    VS: VertexShader,
+    PS: PixelShader,
+{
+    pub vs: VS,
+    pub ps: PS,
+    pub vertex_layout: VertexLayout,
+    pub rasterizer_state: RasterizerState,
+    pub blend_state: BlendState,
+    pub render_mode: RenderMode,
+    pub depth_enabled: bool,
+    pub depth_write: bool,
+    pub depth_func: DepthFunc,
+}
+
+pub struct PipelineState3D {
+    pub vs: Box<dyn VertexShader3D>,
     pub ps: Box<dyn PixelShader>,
     pub vertex_layout: VertexLayout,
     pub rasterizer_state: RasterizerState,
     pub blend_state: BlendState,
     pub render_mode: RenderMode,
+    pub depth_enabled: bool,
+    pub depth_write: bool,
+    pub depth_func: DepthFunc,
 }
 
 pub struct VSIn<'a> {
@@ -211,12 +252,77 @@ impl VSOut {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct VSOut3D {
+    pub position: f32x4,       // [x, y, z, w] - homogeneous position
+    pub world_position: f32x4, // [x, y, z, w]
+    pub attributes: f32x4,     // up to 4 interpolated attributes (u, v, ...)
+    pub extra: f32x4,          // up to 4 interpolated attributes
+}
+
+impl VSOut3D {
+    pub fn with_pos_uv(position: f32x4, uv: f32x2) -> Self {
+        Self {
+            position,
+            world_position: f32x4::splat(0.0),
+            attributes: f32x4::from_array([uv[0], uv[1], 0.0, 0.0]),
+            extra: f32x4::splat(0.0),
+        }
+    }
+
+    pub fn with_attributes(position: f32x4, attributes: f32x4, extra: f32x4) -> Self {
+        Self {
+            position,
+            world_position: f32x4::splat(0.0),
+            attributes,
+            extra,
+        }
+    }
+
+    pub fn uv(&self) -> f32x2 {
+        f32x2::from_array([self.attributes[0], self.attributes[1]])
+    }
+
+    pub fn from_xyuv(xyuv: &f32x4) -> Self {
+        Self {
+            position: f32x4::from_array([(*xyuv)[0], (*xyuv)[1], 0.0, 1.0]),
+            world_position: f32x4::splat(0.0),
+            attributes: f32x4::from_array([(*xyuv)[2], (*xyuv)[3], 0.0, 0.0]),
+            extra: f32x4::splat(0.0),
+        }
+    }
+
+    pub fn x(&self) -> f32 {
+        self.position[0]
+    }
+    pub fn y(&self) -> f32 {
+        self.position[1]
+    }
+    pub fn z(&self) -> f32 {
+        self.position[2]
+    }
+    pub fn w(&self) -> f32 {
+        self.position[3]
+    }
+    pub fn u(&self) -> f32 {
+        self.attributes[0]
+    }
+    pub fn v(&self) -> f32 {
+        self.attributes[1]
+    }
+}
+
 pub trait VertexShader: Send + Sync {
     fn run(&self, input: &VSIn, output: &mut VSOut, constants: &[ConstantBuffer]);
 }
 
+pub trait VertexShader3D: Send + Sync {
+    fn run(&self, input: &VSIn, output: &mut VSOut3D, constants: &[ConstantBuffer]);
+}
+
 pub struct PSIn<'a> {
     pub attributes: f32x4,
+    pub extra: f32x4,
     pub screen_x: u16,
     pub screen_y: u16,
     pub render_target: &'a mut [u32], //TODO: multiple render targets

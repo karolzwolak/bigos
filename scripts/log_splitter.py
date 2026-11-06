@@ -110,6 +110,12 @@ def route_com2_line(line: str, sf: SessionFiles):
 
 
 def socket_lines(sock_path: str, timeout_s: float = 5.0):
+    """
+    Connect to a QEMU Unix socket and yield decoded lines.
+    QEMU creates the socket when using  -serial unix:<path>,server
+    (blocking) or  ,server,nowait.  We retry for `timeout_s` seconds
+    so the script can be started before or concurrently with QEMU.
+    """
     import time
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     deadline = time.monotonic() + timeout_s
