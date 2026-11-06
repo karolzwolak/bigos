@@ -1,13 +1,13 @@
 [workspace]
-members = ["kernel"]
+members = ["kernel", "kernel-macros"]
 exclude = ["xtask"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-authors = ["franccium"]
-license = "MIT"
+authors = ["karolzwolak", "franccium", "norbertcygiert"]
+license = "MIT OR Apache-2.0"
 
 [profile.dev]
 panic = "abort"
