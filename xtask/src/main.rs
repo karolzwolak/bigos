@@ -899,6 +899,7 @@ fn split_extra(extra: &[String]) -> (&[String], &[String]) {
 
 fn clippy(root: &Path, extra: &[String]) {
     let (cargo_args, lint_args) = split_extra(extra);
+    build_user(root);
     for dir in [root, &root.join("xtask")] {
         run(Command::new("cargo")
             .args(["clippy", "--all-features"])
