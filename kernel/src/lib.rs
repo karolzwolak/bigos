@@ -2,7 +2,6 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
-#![feature(portable_simd)]
 #![allow(warnings, unused)] // TODO: remove this
 #![feature(str_from_raw_parts)]
 

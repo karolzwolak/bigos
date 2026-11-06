@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(portable_simd)]
 
 extern crate alloc;
 extern crate rustspace;
