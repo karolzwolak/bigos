@@ -479,7 +479,6 @@ fn build_user_rust_only(root: &Path) {
         .status();
     let status = Command::new("cargo")
         .args([
-            "+nightly",
             "build",
             "-Z",
             "build-std=core,alloc",
@@ -645,7 +644,6 @@ fn build_user(root: &Path) {
             .status();
         let status = Command::new("cargo")
             .args([
-                "+nightly",
                 "build",
                 "-Z",
                 "build-std=core,alloc",
@@ -855,16 +853,14 @@ fn ensure_ovmf(root: &Path) {
             return;
         }
     }
-    // Fallback: legacy ovmf/ at repo root (MofuOS old layout)
-    let legacy_code = root.join("ovmf/ovmf-code-x86_64.fd");
-    let legacy_vars = root.join("ovmf/ovmf-vars-x86_64.fd");
-    if legacy_code.exists() && legacy_vars.exists() {
-        println!("Using legacy ovmf/ directory");
-        fs::copy(&legacy_code, &code_dst).unwrap();
-        fs::copy(&legacy_vars, &vars_dst).unwrap();
-        return;
-    }
-    panic!("OVMF firmware not found");
+
+    panic!(
+        "OVMF firmware not found. Install it with your package manager:\n\
+         \n  Debian/Ubuntu:  sudo apt install ovmf\
+         \n  Arch Linux:     sudo pacman -S edk2-ovmf\
+         \n  Fedora/RHEL:    sudo dnf install edk2-ovmf\
+         \n  openSUSE:       sudo zypper install qemu-ovmf-x86_64"
+    );
 }
 
 fn ovmf(root: &Path) -> (PathBuf, PathBuf) {
@@ -880,8 +876,8 @@ fn run_iso(root: &Path) {
     build_iso(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
-    let socket1 = "/tmp/mofuos_com1.sock";
-    let socket2 = "/tmp/mofuos_com2.sock";
+    let socket1 = "/tmp/bigos_com1.sock";
+    let socket2 = "/tmp/bigos_com2.sock";
     let _ = fs::create_dir_all(root.join("logs"));
     let _ = fs::remove_file(socket1);
     let _ = fs::remove_file(socket2);
