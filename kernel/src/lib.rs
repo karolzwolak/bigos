@@ -32,9 +32,7 @@ pub mod interrupts;
 pub mod io;
 pub mod process;
 pub mod process_start;
-pub mod programs;
 pub mod stack_guard;
-pub mod tests_exp;
 pub mod trap;
 pub mod util;
 
