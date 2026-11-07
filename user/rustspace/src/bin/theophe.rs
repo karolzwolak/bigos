@@ -23,29 +23,29 @@ global_asm!(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
-    let window_id = unsafe { rustspace::sys_create_window(600, 400, 50, 50) };
+    let window_id = rustspace::sys_create_window(600, 400, 50, 50);
     if window_id == u32::MAX {
         rustspace::println!("theophe: create_window failed");
-        unsafe { rustspace::sys_exit(1) }
+        rustspace::sys_exit(1)
     }
     rustspace::println!("theophe: window id={}", window_id);
 
-    let pixels = unsafe { rustspace::sys_map_window_buffer(window_id) };
+    let pixels = rustspace::sys_map_window_buffer(window_id);
     if pixels.is_null() {
         rustspace::println!("theophe: map_window_buffer failed");
-        unsafe { rustspace::sys_exit(1) }
+        rustspace::sys_exit(1)
     }
     let mut window_info = WindowInfo::zeroed();
-    if !unsafe { sys_get_window_info(window_id, &mut window_info) } {
+    if !sys_get_window_info(window_id, &mut window_info) {
         rustspace::println!("theophe: get_window_info failed");
-        unsafe { rustspace::sys_exit(1) }
+        rustspace::sys_exit(1)
     }
     let pixels_second = ((pixels as u64) + window_info.front_buffer_offset) as *mut u32;
 
-    let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
+    let (width, height) = rustspace::sys_get_window_size(window_id);
     if width == 0 || height == 0 {
         rustspace::println!("theophe: get_window_size failed");
-        unsafe { rustspace::sys_exit(1) }
+        rustspace::sys_exit(1)
     }
 
     rustspace::println!(
@@ -63,12 +63,10 @@ pub extern "C" fn main() -> ! {
         let page_flags =
             PageTableFlags::WRITABLE | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
         let mut buffer_info = rustspace::CircularBufferInfo::zeroed();
-        let ok = unsafe {
-            rustspace::sys_create_circular_buffer(64 * 1024, page_flags, &mut buffer_info)
-        };
+        let ok = rustspace::sys_create_circular_buffer(64 * 1024, page_flags, &mut buffer_info);
         if !ok {
             rustspace::println!("theophe: cant create circular buffer");
-            unsafe { rustspace::sys_exit(1) }
+            rustspace::sys_exit(1)
         }
         rustspace::println!(
             "theophe: circular buffer base={:#x} view_size={} total={}",
@@ -98,18 +96,14 @@ pub extern "C" fn main() -> ! {
 
     let mut event_reader = unsafe { EventReader::new(window_info.event_buffer_vaddr as usize) };
 
-    unsafe { rustspace::sys_yield() };
+    rustspace::sys_yield();
 
     let mut frame: u32 = 0;
     loop {
-        let mut handled_event = false;
         loop {
             let event = event_reader.try_read(window_id);
             match event {
-                Some(event) => {
-                    handled_event = true;
-                    theophe.handle_event(event);
-                }
+                Some(event) => theophe.handle_event(event),
                 None => break,
             }
         }
@@ -119,11 +113,9 @@ pub extern "C" fn main() -> ! {
             theophe.render();
             theophe.needs_redraw = false;
         }
-        unsafe { rustspace::sys_present_window(window_id) };
-        unsafe {
-            theophe.draw_target.swap();
-            theophe.needs_redraw = backbuffer_redraw_required;
-        }
+        rustspace::sys_present_window(window_id);
+        theophe.draw_target.swap();
+        theophe.needs_redraw = backbuffer_redraw_required;
 
         frame = frame.wrapping_add(1);
     }
@@ -134,5 +126,5 @@ pub extern "C" fn main() -> ! {
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     rustspace::println!("theophe: panic");
-    unsafe { rustspace::sys_exit(1) }
+    rustspace::sys_exit(1)
 }

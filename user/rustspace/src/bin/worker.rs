@@ -15,7 +15,7 @@ const EXIT_CODE_PANIC: i32 = 255;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { sys_exit(EXIT_CODE_PANIC) }
+    sys_exit(EXIT_CODE_PANIC)
 }
 
 /// Finite cpu work that never enters the kernel, then reports that it finished
@@ -33,5 +33,5 @@ pub extern "C" fn _start() -> ! {
 
     program_shared_data().test_counters[COUNTER_WORKERS_DONE].fetch_add(1, Ordering::AcqRel);
 
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }

@@ -14,7 +14,7 @@ const INVALID_ALLOC: u64 = u64::MAX;
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     unsafe { sys_write(2, b"memstress panic\n".as_ptr(), 16) };
-    unsafe { sys_exit(1) }
+    sys_exit(1)
 }
 
 fn write_str(s: &[u8]) {
@@ -27,24 +27,23 @@ pub extern "C" fn _start() -> ! {
 
     let mut ptrs: [u64; ALLOC_COUNT] = [0; ALLOC_COUNT];
 
-    for i in 0..ALLOC_COUNT {
-        let ptr = unsafe { sys_allocate(ALLOC_SIZE) };
+    for (i, slot) in ptrs.iter_mut().enumerate() {
+        let ptr = sys_allocate(ALLOC_SIZE);
         if ptr == INVALID_ALLOC || ptr == 0 {
             write_str(b"memstress: alloc failed\n");
-            unsafe { sys_exit(2) }
+            sys_exit(2)
         }
-        ptrs[i] = ptr;
+        *slot = ptr;
         let slice = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, ALLOC_SIZE) };
         for b in slice.iter_mut() {
             *b = PATTERN.wrapping_add(i as u8);
         }
-        for (off, b) in slice.iter().enumerate() {
+        for b in slice.iter() {
             let expected = PATTERN.wrapping_add(i as u8);
             if *b != expected {
                 write_str(b"memstress: verify failed\n");
-                unsafe { sys_exit(3) }
+                sys_exit(3)
             }
-            let _ = off;
         }
         write_str(b"memstress: alloc ok\n");
     }
@@ -52,9 +51,9 @@ pub extern "C" fn _start() -> ! {
     let total = ALLOC_SIZE * ALLOC_COUNT;
     if total <= PROCESS_HEAP_SIZE_BYTES {
         write_str(b"memstress: total not > heap\n");
-        unsafe { sys_exit(4) }
+        sys_exit(4)
     }
 
     write_str(b"memstress: all allocs verified, exiting\n");
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }

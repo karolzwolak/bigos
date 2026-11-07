@@ -21,7 +21,7 @@ const GPR_PROBE_COUNT: usize = 8;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { sys_exit(EXIT_CODE_PANIC) }
+    sys_exit(EXIT_CODE_PANIC)
 }
 
 /// Spins without ever calling the kernel while r8-r15 and xmm0-xmm1 hold values that
@@ -94,7 +94,7 @@ extern "C" fn spin_main() -> ! {
     for round in 0..ROUNDS {
         let seed = ((spinner_index as u64) << 32) | round as u64;
         if !burn_with_registers(seed) {
-            unsafe { sys_exit(EXIT_CODE_REGISTERS_CORRUPTED) }
+            sys_exit(EXIT_CODE_REGISTERS_CORRUPTED)
         }
 
         counters[COUNTER_PROGRESS_BASE + spinner_index].store(round + 1, Ordering::Release);
@@ -112,5 +112,5 @@ extern "C" fn spin_main() -> ! {
         core::hint::spin_loop();
     }
 
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }

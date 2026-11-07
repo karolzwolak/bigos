@@ -4,8 +4,7 @@ use core::arch::x86_64::_mm_set1_epi32;
 use core::arch::x86_64::_mm_storeu_si128;
 use embedded_graphics::Pixel;
 use embedded_graphics::pixelcolor::Rgb888;
-use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions, Point, Size};
-use embedded_graphics::primitives::Rectangle;
+use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Size};
 
 /// Userspace pixel surface backed by a kernel-mapped back buffer.
 /// `pixels` points to the user virtual address returned by sys_map_window_buffer.
@@ -31,7 +30,7 @@ impl UserSurface {
         }
     }
 
-    pub unsafe fn swap(&mut self) {
+    pub fn swap(&mut self) {
         core::mem::swap(&mut self.pixels, &mut self.pixels_second);
     }
 
@@ -43,7 +42,11 @@ impl UserSurface {
         }
     }
 
-    /// Bounds-unchecked pixel write for hot paths. Caller must ensure x < width and y < height.
+    /// Bounds-unchecked pixel write for hot paths.
+    ///
+    /// # Safety
+    ///
+    /// `x` must be less than the width and `y` less than the height.
     #[inline(always)]
     pub unsafe fn write_pixel_unchecked(&mut self, x: u32, y: u32, color: Rgba8888UNORM) {
         let offset = (y * self.width + x) as usize;
@@ -61,7 +64,7 @@ impl UserSurface {
     #[inline]
     pub fn clear(&mut self, color: Rgba8888UNORM) {
         unsafe {
-            let mut buffer = self.pixels;
+            let buffer = self.pixels;
             let len = self.width * self.height;
             let color_u32 = color.to_u32_xrgb();
 

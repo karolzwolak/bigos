@@ -511,6 +511,15 @@ fn run_tests(root: &Path, args: &[String]) {
     }
 }
 
+const RUSTSPACE_TARGET_ARGS: [&str; 6] = [
+    "-Z",
+    "build-std=core,alloc",
+    "-Z",
+    "json-target-spec",
+    "--target",
+    "x86_64-user.json",
+];
+
 fn build_user(root: &Path) {
     println!("Building user programs…");
     let user_dir = root.join("user");
@@ -521,23 +530,10 @@ fn build_user(root: &Path) {
             .args(["fmt"])
             .current_dir(&rustspace_dir)
             .status();
-        let status = Command::new("cargo")
-            .args([
-                "build",
-                "-Z",
-                "build-std=core,alloc",
-                "-Z",
-                "json-target-spec",
-                "--target",
-                "x86_64-user.json",
-            ])
-            .current_dir(&rustspace_dir)
-            .status();
-        if let Ok(s) = status
-            && !s.success()
-        {
-            eprintln!("warning: Rust userspace build failed (non-fatal)");
-        }
+        run(Command::new("cargo")
+            .arg("build")
+            .args(RUSTSPACE_TARGET_ARGS)
+            .current_dir(&rustspace_dir));
     }
 }
 
@@ -881,11 +877,10 @@ fn fmt(root: &Path, extra: &[String]) {
     // Also fmt rustspace separately (outside workspace)
     let rustspace = root.join("user/rustspace");
     if rustspace.join("Cargo.toml").exists() {
-        let _ = Command::new("cargo")
+        run(Command::new("cargo")
             .args(["fmt", "--all"])
             .args(extra)
-            .current_dir(&rustspace)
-            .status();
+            .current_dir(&rustspace));
     }
 }
 
@@ -909,11 +904,19 @@ fn clippy(root: &Path, extra: &[String]) {
             .args(lint_args)
             .current_dir(dir));
     }
+    run(Command::new("cargo")
+        .arg("clippy")
+        .args(RUSTSPACE_TARGET_ARGS)
+        .args(cargo_args)
+        .arg("--")
+        .args(["-D", "warnings"])
+        .args(lint_args)
+        .current_dir(root.join("user/rustspace")));
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + rustspace)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 

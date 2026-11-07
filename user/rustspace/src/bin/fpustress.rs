@@ -136,7 +136,7 @@ macro_rules! load_xmm_bank {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { sys_exit(EXIT_CODE_PANIC) }
+    sys_exit(EXIT_CODE_PANIC)
 }
 
 fn write_str(s: &[u8]) {
@@ -273,11 +273,11 @@ extern "C" fn start_checked() -> ! {
 
     if initial_bank.registers.iter().any(|&value| value != 0) {
         write_str(b"fpustress: FAIL initial xmm not zero\n");
-        unsafe { sys_exit(EXIT_CODE_DIRTY_INITIAL_XMM) }
+        sys_exit(EXIT_CODE_DIRTY_INITIAL_XMM)
     }
     if initial_mxcsr != MXCSR_DEFAULT {
         write_str(b"fpustress: FAIL initial mxcsr\n");
-        unsafe { sys_exit(EXIT_CODE_BAD_INITIAL_MXCSR) }
+        sys_exit(EXIT_CODE_BAD_INITIAL_MXCSR)
     }
 
     let process_seed = unsafe { _rdtsc() } as u128;
@@ -297,7 +297,7 @@ extern "C" fn start_checked() -> ! {
 
         if actual_bank != expected_bank {
             write_str(b"fpustress: FAIL xmm lost across yield\n");
-            unsafe { sys_exit(EXIT_CODE_XMM_LOST_ACROSS_YIELD) }
+            sys_exit(EXIT_CODE_XMM_LOST_ACROSS_YIELD)
         }
     }
 
@@ -325,14 +325,14 @@ extern "C" fn start_checked() -> ! {
 
         if actual_bank != expected_bank {
             write_str(b"fpustress: FAIL xmm lost across yield without saved gprs\n");
-            unsafe { sys_exit(EXIT_CODE_XMM_LOST_ACROSS_YIELD) }
+            sys_exit(EXIT_CODE_XMM_LOST_ACROSS_YIELD)
         }
         if actual_gprs != expected_gprs {
             write_str(b"fpustress: FAIL gpr lost across yield\n");
-            unsafe { sys_exit(EXIT_CODE_GPR_LOST_ACROSS_YIELD) }
+            sys_exit(EXIT_CODE_GPR_LOST_ACROSS_YIELD)
         }
     }
 
     write_str(b"fpustress: ok\n");
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }

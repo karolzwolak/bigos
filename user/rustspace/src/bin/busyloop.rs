@@ -12,7 +12,7 @@ const EXIT_CODE_PANIC: i32 = 255;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { sys_exit(EXIT_CODE_PANIC) }
+    sys_exit(EXIT_CODE_PANIC)
 }
 
 /// Announces itself, then occupies the cpu without ever entering the kernel until told to stop
@@ -25,5 +25,5 @@ pub extern "C" fn _start() -> ! {
         core::hint::spin_loop();
     }
 
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }
