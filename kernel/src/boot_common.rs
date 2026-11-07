@@ -1,12 +1,19 @@
-use crate::memory::paging::MemoryMapFrameAllocator;
-use crate::util::ap_entry::{ap_core_entry_point, init_core};
 use crate::{
-    LIMINE_BASE_REVISION, graphics, interrupts, memory, memory::allocator, serial_println,
+    boot_info::{BOOT_INFO, BootInfo},
+    gdt::init_core_gdt,
+    graphics::compositor::init_input_event_buffer,
+    interrupts,
+    memory::{self, allocator},
+    serial_println, serial_println_core,
 };
-use crate::{MAX_CORES, serial_println_core};
+use crate::{
+    memory::paging::MemoryMapFrameAllocator,
+    process::CORE_POOL,
+    util::cpuinfo::{self, init_core},
+};
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
-    mp::MpGotoFunction,
+    mp::{MP_FLAG_X2APIC, MpGotoFunction},
     paging::PagingMode,
     request::{
         EfiMemmapRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest,
@@ -14,7 +21,7 @@ use limine::{
     },
 };
 
-const LIMINE_MP_FLAG_NO_X2APIC: u64 = 0;
+const MP_FLAG_NO_X2APIC: u64 = 0x0;
 
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -22,7 +29,7 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::with_revision(LIMINE_BASE_REVISION);
+static BASE_REVISION: BaseRevision = BaseRevision::with_revision(5u64);
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -54,7 +61,7 @@ static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new(
 
 #[used]
 #[unsafe(link_section = ".requests")]
-static MP_REQUEST: MpRequest = MpRequest::new(LIMINE_MP_FLAG_NO_X2APIC);
+static MP_REQUEST: MpRequest = MpRequest::new(MP_FLAG_NO_X2APIC);
 
 #[used]
 #[unsafe(link_section = ".requests_end_marker")]
@@ -62,13 +69,11 @@ static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 /// # Safety
 ///
-/// Must be called exactly once during BSP boot, with Limine requests mapped and
-/// while running on the bootloader-provided stack. Initializes GDT/IDT, paging, heap,
-/// bootstraps AP cores
-pub unsafe fn bsp_init() {
+/// Call once, on the BSP, before any other kernel code runs, with interrupts
+/// disabled.
+pub unsafe fn bsp_early_init() {
     assert!(BASE_REVISION.is_supported());
-
-    serial_println!("BigOS Booted!");
+    serial_println!("BigOS booted!");
 
     let _efi_memory_map_response = EFI_MEMMAP_REQUEST
         .response()
@@ -100,12 +105,16 @@ pub unsafe fn bsp_init() {
         .response()
         .expect("Failed to get framebuffer response");
     let framebuffer = framebuffer_response.framebuffers().first().unwrap();
-    graphics::framebuffer::init_framebuffer(framebuffer);
+    crate::graphics::framebuffer::init_framebuffer(framebuffer);
+
+    let boot_info = BootInfo { hhdm_offset };
+    BOOT_INFO.call_once(|| boot_info);
+    serial_println!("Boot Info: hhdm_offset: {}", hhdm_offset);
 
     unsafe {
-        crate::gdt::init_core_gdt(0);
+        init_core_gdt(0);
     }
-    interrupts::init_idt();
+    interrupts::load_idt();
 
     let mut mapper = unsafe { memory::paging::init_offset_page_table(hhdm_offset) };
     serial_println!("Offset page table initialized");
@@ -114,19 +123,27 @@ pub unsafe fn bsp_init() {
     let mut frame_allocator =
         unsafe { MemoryMapFrameAllocator::init(memory_map_response.entries()) };
 
+    use x86_64::registers::control::Cr3;
+    let (active_pml4_frame, _) = Cr3::read();
+    serial_println!(
+        "1 Active PML4 frame: {:#x}",
+        active_pml4_frame.start_address().as_u64()
+    );
+
     serial_println!("Initializing heap");
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
     serial_println!("Heap initialized");
 
     serial_println!("Installing guard pages for kernel stacks");
     {
+        use core::mem::{offset_of, size_of};
         serial_println!(
             "GuardedKernelStack size {} guard off {} stack off {}",
-            core::mem::size_of::<crate::gdt::GuardedKernelStack>(),
-            core::mem::offset_of!(crate::gdt::GuardedKernelStack, guard),
-            core::mem::offset_of!(crate::gdt::GuardedKernelStack, stack)
+            size_of::<crate::gdt::GuardedKernelStack>(),
+            offset_of!(crate::gdt::GuardedKernelStack, guard),
+            offset_of!(crate::gdt::GuardedKernelStack, stack)
         );
-        for i in 0..MAX_CORES {
+        for i in 0..4 {
             let guard = crate::gdt::rsp0_guard_page(i);
             let (bottom, top) = crate::gdt::rsp0_bounds(i);
             serial_println!(
@@ -137,9 +154,22 @@ pub unsafe fn bsp_init() {
                 top.as_u64()
             );
         }
+        for i in 0..4 {
+            let guard = crate::gdt::scheduler_guard_page(i);
+            let (bottom, top) = crate::gdt::scheduler_bounds(i);
+            serial_println!(
+                "SCHED core {} guard {:#x} bottom {:#x} top {:#x}",
+                i,
+                guard.as_u64(),
+                bottom.as_u64(),
+                top.as_u64()
+            );
+        }
     }
     crate::gdt::install_guard_pages(&mut frame_allocator);
     serial_println!("Guard pages installed");
+
+    init_input_event_buffer();
 
     unsafe {
         interrupts::init_acpi(
@@ -151,8 +181,13 @@ pub unsafe fn bsp_init() {
     };
 
     let mp_response = MP_REQUEST.response().expect("Failed to get MP response");
+
     serial_println!("MP Response received");
     serial_println!("BSP LAPIC ID: {}", mp_response.bsp_lapic_id);
+    serial_println!(
+        "uses 2xAPIC? {}",
+        mp_response.flags == MP_FLAG_X2APIC as u32
+    );
 
     let cpus = mp_response.cpus();
     let core_count = cpus.len();
@@ -170,8 +205,13 @@ pub unsafe fn bsp_init() {
             cpu.processor_id
         );
     }
-
     unsafe { init_core(0) };
+
+    serial_println!("Mapping lapic for core 0");
+    {
+        let mut core_pool = CORE_POOL.lock();
+        core_pool.init_with_core_count(core_count as u8, cpus);
+    }
 
     interrupts::disable_interrupts();
 
@@ -179,18 +219,19 @@ pub unsafe fn bsp_init() {
     let kernel_page_table_phys = kernel_page_table_frame.start_address();
     let user_memory_manager =
         memory::usermem::UserMemoryManager::new(kernel_page_table_phys, hhdm_offset);
-    memory::init_memory_globals(frame_allocator, user_memory_manager);
-    serial_println!("Global memory managers initialized");
+    serial_println_core!("Global memory managers initialized");
 
-    #[allow(clippy::needless_range_loop)]
-    for i in 1..core_count {
-        let core_id = i as u8;
+    memory::init_memory_globals(frame_allocator, user_memory_manager);
+
+    unsafe { interrupts::init_tsc_globals() };
+
+    for (core_id, cpu) in cpus.iter().enumerate().skip(1) {
         serial_println_core!("Bootstrapping AP core {}", core_id);
-        let ap_bootstrap_fn: MpGotoFunction = ap_core_entry_point;
-        cpus[i].bootstrap(ap_bootstrap_fn, 0);
+        let ap_bootstrap_fn: MpGotoFunction = cpuinfo::ap_core_from_limine_entry_point;
+        cpu.bootstrap(ap_bootstrap_fn, 0x12345678);
     }
 
-    serial_println_core!("BSP past AP core bootstraps");
-    serial_println_core!("Enabling interrupts");
+    serial_println_core!("BSP continued execution");
+    serial_println_core!("ENABLING INTERRUPTS");
     interrupts::enable_interrupts();
 }

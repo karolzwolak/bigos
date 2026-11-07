@@ -1,10 +1,11 @@
 use core::arch::asm;
 
 /// Write to a Model-Specific Register (MSR)
+///
 /// # Safety
 ///
-/// `msr` must be a valid, writable MSR address accessible at the current privilege level (CPL 0).
-/// Passing an invalid MSR will cause a general-protection fault.
+/// `msr` must exist on this CPU, `value` must be valid for it, and the new
+/// value must not break invariants the kernel relies on.
 pub unsafe fn msr_write(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;
@@ -19,10 +20,10 @@ pub unsafe fn msr_write(msr: u32, value: u64) {
     }
 }
 
+// Read from a Model-Specific Register (MSR)
 /// # Safety
 ///
-/// `msr` must be a valid, readable MSR address accessible at the current privilege level (CPL 0).
-/// Passing an invalid MSR will cause a general-protection fault.
+/// `msr` must exist on this CPU.
 pub unsafe fn msr_read(msr: u32) -> u64 {
     let low: u32;
     let high: u32;

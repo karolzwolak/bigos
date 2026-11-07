@@ -1,6 +1,9 @@
+use crate::events::event_buffer::EventBuffer;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::color::{Rgba8888UNORM, rgba_to_xrgb, xrgb_to_rgba};
 use crate::memory::paging::PAGE_SIZE;
+use crate::process::PID;
+use crate::process::PROCESS_EVENT_BUFFER_BASE;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
@@ -9,18 +12,37 @@ use embedded_graphics::Pixel;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::{Dimensions, DrawTarget, Point, Size};
 use embedded_graphics::primitives::Rectangle;
+use x86_64::PhysAddr;
 
 pub type WindowID = u32;
 pub const INVALID_WINDOW_ID: WindowID = u32::MAX;
 
+/// User virtual address at which the owner of a window sees its event buffer
+pub fn event_buffer_user_vaddr(window_id: WindowID) -> u64 {
+    debug_assert!(window_id != INVALID_WINDOW_ID);
+    PROCESS_EVENT_BUFFER_BASE + window_id as u64 * PAGE_SIZE as u64
+}
+
 pub struct Window {
     pub id: WindowID,
+    pub owner_pid: PID,
     pub x: i32,
     pub y: i32,
     pub z_index: u8,
     pub is_visible: bool,
 
     pub buffer: Arc<WindowBuffer>,
+    pub event_buffer: Option<&'static EventBuffer>,
+    pub event_buffer_phys: PhysAddr,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct WindowInfo {
+    pub width: u32,
+    pub height: u32,
+    pub event_buffer_vaddr: u64,
+    pub front_buffer_offset: u64,
 }
 
 #[repr(C)]
@@ -94,12 +116,6 @@ impl Rect {
         }
     }
 }
-
-// SAFETY: WindowBuffer manages two pixel buffers with access split between writer (back) and
-// reader (front). Concurrent access is coordinated via `needs_swap` (AtomicBool) and the
-// `try_swap` method. Raw pointer access must be externally synchronized by the caller.
-unsafe impl Send for WindowBuffer {}
-unsafe impl Sync for WindowBuffer {}
 
 pub struct WindowBuffer {
     pub width: u32,
@@ -175,26 +191,24 @@ impl WindowBuffer {
         unsafe { (*self.back_buffer.get()).as_ptr() }
     }
 
-    // Helper to get front buffer pointer
     pub fn front_buffer_ptr(&self) -> *const u32 {
         unsafe { (*self.front_buffer.get()).as_ptr() }
     }
 
-    pub fn draw_border(&self) {
-        const BORDER_COLOR: u32 = Rgba8888UNORM::PURPLE.to_u32_xrgb();
-        let w = self.width as usize;
-        let h = self.height as usize;
-        let ptr = unsafe { (*self.front_buffer.get()).as_ptr() };
-        unsafe {
-            for x in 0..w {
-                *ptr.add(x) = BORDER_COLOR;
-                *ptr.add((h - 1) * w + x) = BORDER_COLOR;
-            }
-            for y in 0..h {
-                *ptr.add(y * w) = BORDER_COLOR;
-                *ptr.add(y * w + w - 1) = BORDER_COLOR;
-            }
-        }
+    pub fn back_buffer_virt_addr(&self) -> u64 {
+        self.back_buffer_ptr() as u64
+    }
+
+    pub fn front_buffer_virt_addr(&self) -> u64 {
+        self.front_buffer_ptr() as u64
+    }
+
+    pub fn pixel_count(&self) -> usize {
+        (self.width * self.height) as usize
+    }
+
+    pub fn page_count(&self) -> usize {
+        (self.pixel_count() * FRAMEBUFFER_BYTES_PER_PIXEL as usize).div_ceil(PAGE_SIZE)
     }
 
     pub fn get_bounding_rect(&self) -> Rect {
@@ -224,8 +238,7 @@ impl<'a> WindowBackBuffer<'a> {
 
     /// # Safety
     ///
-    /// `x` must be less than `self.window.width` and `y` must be less than `self.window.height`.
-    /// No bounds checking is performed.
+    /// `x` and `y` must lie inside the window.
     pub unsafe fn write_pixel_unchecked(&mut self, x: u32, y: u32, color: Rgba8888UNORM) {
         let offset = (y * self.window.width + x) as usize;
         let xrgb = rgba_to_xrgb(color);
@@ -269,8 +282,7 @@ impl<'a> WindowPresentBuffer<'a> {
 
     /// # Safety
     ///
-    /// `x` must be less than `self.window.width` and `y` must be less than `self.window.height`.
-    /// No bounds checking is performed.
+    /// `x` and `y` must lie inside the window.
     pub unsafe fn read_pixel_unchecked(&self, x: u32, y: u32) -> Rgba8888UNORM {
         let offset = (y * self.window.width + x) as usize;
         let xrgb = unsafe { *self.window.front_buffer_ptr().add(offset) };
@@ -286,6 +298,9 @@ impl<'a> WindowPresentBuffer<'a> {
         }
     }
 }
+
+unsafe impl Send for WindowBuffer {}
+unsafe impl Sync for WindowBuffer {}
 
 impl Drop for WindowBuffer {
     fn drop(&mut self) {

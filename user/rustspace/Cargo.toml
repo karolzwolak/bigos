@@ -1,0 +1,66 @@
+[workspace]
+
+[package]
+name = "rustspace"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rustspace"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust_first"
+path = "src/bin/rust_first.rs"
+
+[[bin]]
+name = "window_app"
+path = "src/bin/window_app.rs"
+
+[[bin]]
+name = "theophe"
+path = "src/bin/theophe.rs"
+
+[[bin]]
+name = "memstress"
+path = "src/bin/memstress.rs"
+
+[[bin]]
+name = "regprobe"
+path = "src/bin/regprobe.rs"
+
+[[bin]]
+name = "spinner"
+path = "src/bin/spinner.rs"
+
+[[bin]]
+name = "busyloop"
+path = "src/bin/busyloop.rs"
+
+[[bin]]
+name = "yieldloop"
+path = "src/bin/yieldloop.rs"
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
+[[bin]]
+name = "sleeper"
+path = "src/bin/sleeper.rs"
+
+[[bin]]
+name = "pingpong"
+path = "src/bin/pingpong.rs"
+
+[dependencies.lazy_static]
+version = "1.5"
+features = ["spin_no_std"]
+
+[dependencies]
+x86_64 = "0.15.2"
+pc-keyboard = "0.8.0"
+spin = "0.10.0"
+embedded-graphics = "0.8.2"
+bitflags = "2.11.0"
+static_assertions = "1.1.0"

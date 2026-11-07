@@ -1,261 +1,386 @@
-use crate::{
-    data_structures::vector::Vec,
-    process::{elf_loader::ElfLoadInfo, process_mem::ProcessMemoryLayout},
-    serial_println,
+use crate::gdt::{self, USER_CODE_SELECTOR_VALUE, USER_DATA_SELECTOR_VALUE};
+use crate::process::scheduler;
+use crate::process::{INVALID_PID, PID, RFLAGS_DEFAULT};
+use crate::trap::{TRAP_FRAME_SIZE, TrapFrame, pop_all_gprs};
+use crate::util::cpuinfo::get_current_core_id;
+use core::arch::{asm, naked_asm};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
-use alloc::string::String;
-use x86_64::{
-    VirtAddr,
-    structures::paging::{PageTableFlags, Size4KiB, mapper::MapToError},
-};
 
-// Marks terminated children
-pub const INVALID_PID: usize = usize::MAX;
+pub const MAX_TASKS: usize = 64;
+pub const INVALID_SLOT: u16 = u16::MAX;
 
-pub const MAX_PRIORITY: u8 = 8;
-pub const RFLAGS_DEFAULT: u64 = 0x202;
-pub const DEFAULT_NEW_PROCESS_STACK_SIZE: u64 = 1024 * 1024;
+const FPU_STATE_SIZE_BYTES: usize = 512;
+const FXSAVE_FCW_OFFSET: usize = 0;
+const FXSAVE_MXCSR_OFFSET: usize = 24;
 
-pub type PID = usize;
+// reset values, every FP exception masked
+const FCW_DEFAULT: u16 = 0x37F;
+const MXCSR_DEFAULT: u32 = 0x1F80;
 
-//TODO: temporary until no scheduler
-static CURRENT_PROCESS: spin::Once<spin::Mutex<Option<Process>>> = spin::Once::new();
+const CALLEE_SAVED_REGISTER_COUNT: usize = 6;
+const CALLEE_SAVED_SIZE: u64 = (CALLEE_SAVED_REGISTER_COUNT * core::mem::size_of::<u64>()) as u64;
+const RETURN_ADDRESS_SIZE: u64 = core::mem::size_of::<u64>() as u64;
 
-pub fn set_current_process(process: Process) {
-    CURRENT_PROCESS.call_once(|| spin::Mutex::new(Some(process)));
+/// FXSAVE image: x87, xmm0-15 and MXCSR
+/// NOTE: Holds no ymm state because CR4.OSXSAVE is off, so AVX instructions #UD
+#[repr(C, align(16))]
+pub struct FpuState {
+    pub fxsave_area: [u8; FPU_STATE_SIZE_BYTES],
 }
 
-pub fn get_current_process() -> &'static spin::Mutex<Option<Process>> {
-    CURRENT_PROCESS
-        .get()
-        .expect("Current process not initialized")
+const _: () = assert!(core::mem::size_of::<FpuState>() == FPU_STATE_SIZE_BYTES);
+
+impl FpuState {
+    pub const fn new() -> Self {
+        let mut fxsave_area = [0u8; FPU_STATE_SIZE_BYTES];
+        let fcw_bytes = FCW_DEFAULT.to_le_bytes();
+        let mxcsr_bytes = MXCSR_DEFAULT.to_le_bytes();
+
+        fxsave_area[FXSAVE_FCW_OFFSET] = fcw_bytes[0];
+        fxsave_area[FXSAVE_FCW_OFFSET + 1] = fcw_bytes[1];
+
+        fxsave_area[FXSAVE_MXCSR_OFFSET] = mxcsr_bytes[0];
+        fxsave_area[FXSAVE_MXCSR_OFFSET + 1] = mxcsr_bytes[1];
+        fxsave_area[FXSAVE_MXCSR_OFFSET + 2] = mxcsr_bytes[2];
+        fxsave_area[FXSAVE_MXCSR_OFFSET + 3] = mxcsr_bytes[3];
+
+        Self { fxsave_area }
+    }
+
+    /// # Safety
+    ///
+    /// SSE must be enabled on this core.
+    pub unsafe fn save_from_cpu(&mut self) {
+        unsafe {
+            asm!(
+                "fxsave64 [{}]",
+                in(reg) self.fxsave_area.as_mut_ptr(),
+                options(nostack),
+            );
+        }
+    }
+
+    /// # Safety
+    ///
+    /// SSE must be enabled on this core, and `self` must hold a state saved by
+    /// `save_from_cpu` or a valid initial FXSAVE image.
+    pub unsafe fn restore_to_cpu(&self) {
+        unsafe {
+            asm!(
+                "fxrstor64 [{}]",
+                in(reg) self.fxsave_area.as_ptr(),
+                options(nostack, readonly),
+            );
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ProcessState {
+impl Default for FpuState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    Free = 0,
+    /// Slot reserved, stack and bookkeeping are being filled in
+    Creating,
     Ready,
     Running,
-    Waiting,
-    Terminated,
+    Blocked,
+    /// The task finished tearing itself down, the scheduler loop reaps the slot
+    Dead,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProcessResources {
-    pub memory_limit: usize,
-    pub memory_used: usize,
-    pub cpu_time_slice: usize,
+impl TaskState {
+    pub fn from_raw(raw: u8) -> Self {
+        debug_assert!(raw <= TaskState::Dead as u8);
+
+        // SAFETY: raw is only ever produced from a TaskState
+        unsafe { core::mem::transmute::<u8, TaskState>(raw) }
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ExecutionContext {
-    pub rax: u64,
-    pub rbx: u64,
-    pub rcx: u64,
-    pub rdx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub rbp: u64,
-    pub rsp: u64,
-    pub r8: u64,
-    pub r9: u64,
-    pub r10: u64,
-    pub r11: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-
-    //TODO: sse? maybe somewhere seperate because aint storing the whole avx
-    pub rip: u64,
-    pub rflags: u64,
-
-    pub page_table_base_phys: u64,
-}
-
-//TODO: when we have a fs/vfs
-pub struct FileDescriptor {
-    pub handle: usize,
-}
-
-pub struct Process {
+/// identifies a task for slot reuse, valid while the slot still holds the same pid
+/// PIDs are never reused
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskRef {
+    pub slot: u16,
     pub pid: PID,
-    pub parent_pid: PID,
-    pub priority: u8,
-    pub state: ProcessState,
-    pub name: String,
-    pub children: Vec<PID>,
-    pub file_descriptors: Vec<FileDescriptor>,
-
-    pub resources: ProcessResources,
-    pub exit_code: Option<i32>,
-    pub is_out: bool,
-
-    pub execution_context: ExecutionContext,
-    pub memory_layout: ProcessMemoryLayout,
 }
 
-unsafe impl Send for Process {}
+impl TaskRef {
+    pub fn is_alive(&self) -> bool {
+        slot(self.slot as usize).pid.load(Ordering::Acquire) == self.pid
+    }
+}
 
-impl ExecutionContext {
-    pub fn new(entry_point: u64, stack_top: u64, page_table_base_phys: u64) -> Self {
+pub struct TaskSlot {
+    pub pid: AtomicUsize,
+    pub state: AtomicU8,
+    pub priority: AtomicU8,
+    pub home_core: AtomicU8,
+    pub on_cpu: AtomicBool,
+    pub kill_pending: AtomicBool,
+    pub exit_code_request: AtomicI32,
+    pub cpu_ticks: AtomicU64,
+    pub core_migration_count: AtomicU32,
+    pub cr3: AtomicU64,
+    pub kernel_stack_top: AtomicU64,
+    /// Next slot in the run queue queue the task sits in
+    pub next: AtomicU16,
+    /// Written by switch_context while the task is switched out
+    pub saved_rsp: UnsafeCell<u64>,
+    pub fpu_state: UnsafeCell<FpuState>,
+}
+
+// SAFETY: saved_rsp and fpu_state are only touched by the core that owns the task
+// at that moment, handoffs between cores go through the on_cpu and state atomics
+unsafe impl Sync for TaskSlot {}
+
+impl TaskSlot {
+    const fn new() -> Self {
         Self {
-            rax: 0,
-            rbx: 0,
-            rcx: 0,
-            rdx: 0,
-            rsi: 0,
-            rdi: 0,
-            rbp: 0,
-            rsp: stack_top,
-            r8: 0,
-            r9: 0,
-            r10: 0,
-            r11: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            rip: entry_point,
-            rflags: RFLAGS_DEFAULT,
-            page_table_base_phys,
+            pid: AtomicUsize::new(INVALID_PID),
+            state: AtomicU8::new(TaskState::Free as u8),
+            priority: AtomicU8::new(0),
+            home_core: AtomicU8::new(0),
+            on_cpu: AtomicBool::new(false),
+            kill_pending: AtomicBool::new(false),
+            exit_code_request: AtomicI32::new(0),
+            cpu_ticks: AtomicU64::new(0),
+            core_migration_count: AtomicU32::new(0),
+            cr3: AtomicU64::new(0),
+            kernel_stack_top: AtomicU64::new(0),
+            next: AtomicU16::new(INVALID_SLOT),
+            saved_rsp: UnsafeCell::new(0),
+            fpu_state: UnsafeCell::new(FpuState::new()),
         }
+    }
+
+    pub fn state(&self) -> TaskState {
+        TaskState::from_raw(self.state.load(Ordering::Acquire))
+    }
+
+    pub fn set_state(&self, state: TaskState) {
+        self.state.store(state as u8, Ordering::Release);
+    }
+
+    /// Moves from one state to another, false when the task was not in `from`
+    pub fn transition(&self, from: TaskState, to: TaskState) -> bool {
+        self.state
+            .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 
-impl Process {
-    // pub fn new(
-    //     pid: usize,
-    //     parent_pid: usize,
-    //     priority: u8,
-    //     name: String,
-    //     is_out: bool,
-    //     resources: ProcessResources,
-    //     entry_point: u64,
-    //     stack_top: u64,
-    //     page_table_base_phys: u64,
-    // ) -> Self {
-    //     Self {
-    //         pid,
-    //         parent_pid,
-    //         priority,
-    //         state: ProcessState::Ready,
-    //         name,
-    //         children: Vec::new(),
-    //         file_descriptors: Vec::new(),
-    //         resources,
-    //         exit_code: None,
-    //         is_out,
-    //         execution_context: ExecutionContext::new(entry_point, stack_top, page_table_base_phys),
-    //         memory_layout: ProcessMemoryLayout::empty()
-    //     }
-    // }
+pub static TASKS: [TaskSlot; MAX_TASKS] = [const { TaskSlot::new() }; MAX_TASKS];
 
-    pub fn create_with_elf(
-        elf_info: &ElfLoadInfo,
-        name: &str,
-        pid: PID,
-        parent_pid: PID,
-    ) -> Result<Self, MapToError<Size4KiB>> {
-        serial_println!("Process::create_with_elf()");
-        //TODO: safer
-        let address_space_manager = &crate::memory::get_user_mem_mgr();
-        let mut frame_allocator = crate::memory::get_frame_allocator();
+pub fn slot(slot_index: usize) -> &'static TaskSlot {
+    debug_assert!(slot_index < MAX_TASKS);
 
-        let mut memory_layout =
-            ProcessMemoryLayout::new(address_space_manager, &mut frame_allocator)?;
+    &TASKS[slot_index]
+}
 
-        for segment in &elf_info.segments {
-            let vaddr = VirtAddr::new(segment.vaddr);
-            let in_memory_size = segment.in_memory_size;
+pub fn find_slot_by_pid(pid: PID) -> Option<usize> {
+    TASKS
+        .iter()
+        .position(|task| task.pid.load(Ordering::Acquire) == pid)
+}
 
-            // TODO: Parse actual segment flags from ELF
-            let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-            flags |= PageTableFlags::WRITABLE;
-
-            serial_println!(
-                "  Mapping ELF segment: vaddr={:#x}, size={:#x}",
-                vaddr.as_u64(),
-                in_memory_size
-            );
-
-            address_space_manager.map_virt_mem_region(
-                memory_layout.top_page_table_phys,
-                vaddr,
-                in_memory_size,
-                flags,
-                &mut frame_allocator,
-            )?;
-
-            let phys_addr = address_space_manager
-                .translate_user_virt_to_phys(memory_layout.top_page_table_phys, vaddr)
-                .expect("Failed to translate user virtual address to physical");
-            let hhdm_vaddr = phys_addr.as_u64() + address_space_manager.phys_offset;
-
-            // copy segment data
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    segment.data.as_ptr(),
-                    hhdm_vaddr as *mut u8,
-                    segment.in_file_size as usize,
-                );
-            }
-            serial_println!(
-                "  Copied {} bytes to {:#x}",
-                segment.in_file_size,
-                vaddr.as_u64()
-            );
-
-            // zero-fill the bss section
-            if segment.in_memory_size > segment.in_file_size {
-                let bss_start = vaddr + segment.in_file_size;
-                let bss_size = segment.in_memory_size - segment.in_file_size;
-                unsafe {
-                    core::ptr::write_bytes(bss_start.as_mut_ptr::<u8>(), 0u8, bss_size as usize);
-                }
-                serial_println!(
-                    "  Zeroed BSS: {:#x} bytes at {:#x}",
-                    bss_size,
-                    bss_start.as_u64()
-                );
-            }
-
-            // track mapped region
-            memory_layout
-                .mapped_regions
-                .push(crate::process::process_mem::MappedMemoryRegion {
-                    start_virt: vaddr,
-                    size_bytes: in_memory_size,
-                    page_flags: flags,
-                });
+/// Reserves a free slot, None when all MAX_TASKS are in use
+/// The slot stays Creating until the caller makes it Ready
+pub fn allocate_task_slot(pid: PID, priority: u8, home_core: u8, cr3: u64) -> Option<usize> {
+    for (slot_index, task) in TASKS.iter().enumerate() {
+        if !task.transition(TaskState::Free, TaskState::Creating) {
+            continue;
         }
 
-        let stack_size = DEFAULT_NEW_PROCESS_STACK_SIZE;
-        let stack_top = address_space_manager.create_main_stack(
-            memory_layout.top_page_table_phys,
-            stack_size,
-            &mut frame_allocator,
-        )?;
-        memory_layout.stack_top = stack_top;
+        task.priority.store(priority, Ordering::Relaxed);
+        task.home_core.store(home_core, Ordering::Relaxed);
+        task.on_cpu.store(false, Ordering::Relaxed);
+        task.kill_pending.store(false, Ordering::Relaxed);
+        task.exit_code_request.store(0, Ordering::Relaxed);
+        task.cpu_ticks.store(0, Ordering::Relaxed);
+        task.core_migration_count.store(0, Ordering::Relaxed);
+        task.cr3.store(cr3, Ordering::Relaxed);
+        task.next.store(INVALID_SLOT, Ordering::Relaxed);
+        task.kernel_stack_top
+            .store(gdt::task_stack_top(slot_index), Ordering::Relaxed);
 
-        let context = ExecutionContext::new(
-            elf_info.entry_point,
-            stack_top.as_u64(),
-            memory_layout.top_page_table_phys.as_u64(),
-        );
+        // SAFETY: the slot is Creating, nobody else touches the fpu image
+        unsafe { *task.fpu_state.get() = FpuState::new() };
 
-        Ok(Self {
-            pid,
-            parent_pid,
-            priority: 1,
-            state: ProcessState::Ready,
-            name: String::from(name),
-            children: Vec::new(),
-            file_descriptors: Vec::new(),
-            resources: ProcessResources::default(),
-            exit_code: None,
-            is_out: true,
-            execution_context: context,
-            memory_layout,
-        })
+        task.pid.store(pid, Ordering::Release);
+
+        return Some(slot_index);
     }
+
+    None
+}
+
+pub fn core_current_task_ref(core_id: u8) -> TaskRef {
+    let slot_index = scheduler::get_current_slot_for_core(core_id);
+    debug_assert!(slot_index != INVALID_SLOT as usize);
+
+    TaskRef {
+        slot: slot_index as u16,
+        pid: scheduler::get_current_process_for_core(core_id),
+    }
+}
+
+pub fn core_current_task_kill_pending(core_id: u8) -> bool {
+    slot(core_current_task_ref(core_id).slot as usize)
+        .kill_pending
+        .load(Ordering::Acquire)
+}
+
+pub fn release_task_slot(slot_index: usize) {
+    let task = slot(slot_index);
+
+    task.pid.store(INVALID_PID, Ordering::Release);
+    task.set_state(TaskState::Free);
+}
+
+/// Builds the stack of a task that has never run
+/// The first switch_context into it returns to task_first_entry, which leaves
+/// for ring 3 through the trap frame above it
+pub fn init_task_stack(slot_index: usize, user_rip: u64, user_rsp: u64) {
+    let task = slot(slot_index);
+    let stack_top = task.kernel_stack_top.load(Ordering::Relaxed);
+    debug_assert!(stack_top % 16 == 0);
+
+    let trap_frame_addr = stack_top - TRAP_FRAME_SIZE as u64;
+    let return_address_slot = trap_frame_addr - RETURN_ADDRESS_SIZE;
+    let saved_rsp = return_address_slot - CALLEE_SAVED_SIZE;
+
+    let mut frame = TrapFrame::zeroed();
+    frame.rip = user_rip;
+    frame.cs = USER_CODE_SELECTOR_VALUE as u64;
+    frame.rflags = RFLAGS_DEFAULT;
+    frame.rsp = user_rsp;
+    frame.ss = USER_DATA_SELECTOR_VALUE as u64;
+
+    // SAFETY: the addresses lie inside the stack of this slot, which nobody runs on yet
+    unsafe {
+        core::ptr::write(trap_frame_addr as *mut TrapFrame, frame);
+        core::ptr::write(
+            return_address_slot as *mut u64,
+            task_first_entry as *const () as usize as u64,
+        );
+        core::ptr::write_bytes(saved_rsp as *mut u64, 0, CALLEE_SAVED_REGISTER_COUNT);
+        *task.saved_rsp.get() = saved_rsp;
+    }
+}
+
+/// Reached by the first switch_context into a task, with rsp at its trap frame
+#[unsafe(naked)]
+unsafe extern "C" fn task_first_entry() -> ! {
+    naked_asm!(
+        "mov rdi, rsp",
+        "call {check}",
+
+        "mov ax, {user_data_selector}",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        "mov gs, ax",
+
+        pop_all_gprs!(),
+        "iretq",
+
+        check = sym task_first_entry_check,
+        user_data_selector = const USER_DATA_SELECTOR_VALUE,
+    )
+}
+
+extern "C" fn task_first_entry_check(frame: *const TrapFrame) {
+    debug_assert!(frame as usize % 16 == 0);
+    debug_assert!(unsafe { (*frame).cs } == USER_CODE_SELECTOR_VALUE as u64);
+
+    // killed before it ever ran, so it never enters ring 3
+    exit_if_kill_pending();
+}
+
+/// Called on the way to ring 3, where the task holds no kernel resources
+pub fn exit_if_kill_pending() {
+    let core_id = get_current_core_id();
+    let slot_index = scheduler::get_current_slot_for_core(core_id);
+    debug_assert!(slot_index != INVALID_SLOT as usize);
+
+    let task = slot(slot_index);
+    if task.kill_pending.load(Ordering::Acquire) {
+        exit_current(task.exit_code_request.load(Ordering::Acquire));
+    }
+}
+
+/// Asks a task to exit, the task tears itself down at its next return to ring 3
+/// Returns false when no such task exists
+pub fn request_kill(pid: PID, exit_code: i32) -> bool {
+    let Some(slot_index) = find_slot_by_pid(pid) else {
+        return false;
+    };
+
+    let task = slot(slot_index);
+    task.exit_code_request.store(exit_code, Ordering::Release);
+    task.kill_pending.store(true, Ordering::Release);
+
+    scheduler::wake_task(TaskRef {
+        slot: slot_index as u16,
+        pid,
+    });
+
+    // a task running in ring 3 only notices when something takes it into the kernel
+    if task.state() == TaskState::Running {
+        let running_core = task.home_core.load(Ordering::Relaxed);
+        if running_core == get_current_core_id() {
+            scheduler::mark_core_for_reschedule(running_core);
+        } else {
+            crate::interrupts::send_reschedule_ipi(running_core);
+        }
+    }
+
+    true
+}
+
+/// Tears the running task down on its own kernel stack, never returns
+/// The scheduler loop frees the slot once it has switched away from the dead task
+pub fn exit_current(exit_code: i32) -> ! {
+    let core_id = get_current_core_id();
+    let slot_index = scheduler::get_current_slot_for_core(core_id);
+    let pid = scheduler::get_current_process_for_core(core_id);
+    debug_assert!(slot_index != INVALID_SLOT as usize);
+
+    // user page tables are freed below, so leave them first
+    unsafe {
+        let kernel_phys = crate::memory::get_user_mem_mgr().kernel_page_table_phys;
+        let kernel_frame = x86_64::structures::paging::PhysFrame::<
+            x86_64::structures::paging::Size4KiB,
+        >::containing_address(kernel_phys);
+        x86_64::registers::control::Cr3::write(
+            kernel_frame,
+            x86_64::registers::control::Cr3Flags::empty(),
+        );
+    }
+
+    // window cleanup takes the process manager lock itself, so it runs first
+    crate::graphics::compositor::destroy_windows_of_process(pid);
+    {
+        let mut process_manager = crate::process::process_manager::PROCESS_MANAGER.lock();
+        let result = process_manager.terminate_process(pid, exit_code, false);
+        debug_assert!(result.is_ok());
+    }
+
+    x86_64::instructions::interrupts::disable();
+    let task = slot(slot_index);
+    task.set_state(TaskState::Dead);
+    scheduler::core_task_leave_run_queue(task.home_core.load(Ordering::Relaxed));
+    scheduler::core_run_scheduling(get_current_core_id());
+
+    unreachable!("dead task {} was scheduled again", pid);
 }
