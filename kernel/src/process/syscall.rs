@@ -5,7 +5,6 @@ use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::memory::get_frame_allocator;
 use crate::memory::paging::PAGE_SIZE;
 use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
-use crate::process::FileDescriptor;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
 use crate::process::process_mem::FrameOwnership;
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
@@ -42,6 +41,7 @@ pub enum SyscallError {
     ProcessNotFound = 4,
     InvalidFd = 5,
     NotImplemented = 6,
+    InvalidArgument = 7,
     SyscallNotFound = 999,
 }
 
@@ -250,7 +250,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
 
             if target_pid == INVALID_PID || target_pid == ARCHE_PID {
                 serial_println_core!("TerminateProcess: invalid target pid {}", target_pid);
-                return u64::MAX;
+                return SyscallError::InvalidArgument.as_return();
             }
 
             let target_parent = {
@@ -262,7 +262,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                             "TerminateProcess: target pid {} not found",
                             target_pid
                         );
-                        return u64::MAX;
+                        return SyscallError::ProcessNotFound.as_return();
                     }
                 }
             };
@@ -276,7 +276,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                     target_pid,
                     target_parent
                 );
-                return u64::MAX;
+                return SyscallError::PermissionDenied.as_return();
             }
 
             if target_pid == caller_pid {
@@ -286,7 +286,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
             // the target tears itself down once it is back at the edge of ring 3
             if !crate::process::task::request_kill(target_pid, exit_code) {
                 serial_println_core!("TerminateProcess: target {} has no task", target_pid);
-                return u64::MAX;
+                return SyscallError::ProcessNotFound.as_return();
             }
 
             serial_println_core!(
@@ -335,7 +335,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                     compositor.framebuffer_width(),
                     compositor.framebuffer_height()
                 );
-                return u64::MAX;
+                return SyscallError::InvalidArgument.as_return();
             }
 
             let (window_id, _buffer, _event_buffer) =
@@ -407,12 +407,12 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                             size,
                             e
                         );
-                        u64::MAX
+                        SyscallError::OutOfMemory.as_return()
                     }
                 },
                 Err(_) => {
                     serial_println_core!("sys_allocate: pid={} not found", pid);
-                    u64::MAX
+                    SyscallError::ProcessNotFound.as_return()
                 }
             }
         }
@@ -438,7 +438,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                             "sys_map_window_buffer: window_id={} not found",
                             window_id
                         );
-                        return u64::MAX;
+                        return SyscallError::InvalidArgument.as_return();
                     }
                 }
             };
@@ -453,7 +453,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                     byte_count,
                     max_window_buffer_size
                 );
-                return u64::MAX;
+                return SyscallError::InvalidArgument.as_return();
             }
             let page_count = buffer_arc.page_count();
 
@@ -482,7 +482,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                 let mut frame_allocator = get_frame_allocator();
                 let Ok(proc) = pm.get_process_mut(pid) else {
                     serial_println_core!("sys_map_window_buffer: pid={} not found", pid);
-                    return u64::MAX;
+                    return SyscallError::ProcessNotFound.as_return();
                 };
                 let layout = &mut proc.memory_layout;
 
@@ -505,7 +505,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                         "sys_map_window_buffer: mapping back buffer failed: {:?}",
                         e
                     );
-                    return u64::MAX;
+                    return SyscallError::OutOfMemory.as_return();
                 }
                 if let Err(e) = layout.map_frames(
                     front_user_virt,
@@ -520,7 +520,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                         e
                     );
                     layout.unmap_region(back_user_virt, buffer_bytes, umm, &mut frame_allocator);
-                    return u64::MAX;
+                    return SyscallError::OutOfMemory.as_return();
                 }
             }
 
@@ -556,7 +556,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                     let height = w.buffer.height as u64;
                     (width << 32) | height
                 }
-                _ => u64::MAX,
+                _ => SyscallError::InvalidArgument.as_return(),
             }
         }
         SyscallNumber::GetWindowInfo => {
@@ -566,7 +566,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
             serial_println_core!("syscall: GetWindowInfo: window_id={}", window_id);
 
             if !validate_user_ptr(info_ptr, core::mem::size_of::<WindowInfo>()) {
-                return FileDescriptor::INVALID_FD;
+                return SyscallError::InvalidPtr.as_return();
             }
 
             let compositor = crate::graphics::compositor::get_compositor();
@@ -583,7 +583,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                     out.front_buffer_offset = compositor.max_window_buffer_bytes();
                 }
                 _ => {
-                    return u64::MAX;
+                    return SyscallError::InvalidArgument.as_return();
                 }
             }
 
@@ -625,7 +625,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                 core::mem::size_of::<CircularBufferInfo>(),
             ) {
                 serial_println_core!("CreateCircularBuffer: invalid buffer_info_out pointer");
-                return u64::MAX;
+                return SyscallError::InvalidPtr.as_return();
             }
 
             let core_id = get_current_core_id();
@@ -656,12 +656,12 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
                     }
                     None => {
                         serial_println_core!("CreateCircularBuffer: cant create the buffer");
-                        return u64::MAX;
+                        return SyscallError::OutOfMemory.as_return();
                     }
                 }
             }
 
-            u64::MAX
+            SyscallError::ProcessNotFound.as_return()
         }
 
         SyscallNumber::GetCpuInfo => {
@@ -706,7 +706,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
             let word_ptr = frame.arg1 as usize;
             let expected = frame.arg2 as u32;
             if !validate_user_ptr(word_ptr, core::mem::size_of::<u32>()) {
-                return u64::MAX;
+                return SyscallError::InvalidPtr.as_return();
             }
 
             // blocks while the word still holds the expected value
@@ -721,7 +721,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> u64 {
             0
         }
 
-        _ => u64::MAX,
+        _ => SyscallError::SyscallNotFound.as_return(),
     }
 }
 

@@ -53,8 +53,10 @@ pub const SYS_ECHO: u64 = 997;
 /// Mirrors the kernel's `SyscallError::NotImplemented.as_return()`.
 pub const SYSCALL_NOT_IMPLEMENTED: u64 = 6u64.wrapping_neg();
 
-fn syscall_failed(ret: u64) -> bool {
-    ret == u64::MAX || ret == SYSCALL_NOT_IMPLEMENTED
+/// The kernel returns errors as negated `SyscallError` codes, which all fall in
+/// the top 4095 values, as on Linux.
+pub fn syscall_failed(ret: u64) -> bool {
+    ret > 4095u64.wrapping_neg()
 }
 
 pub const FD_FLAG_READ: u8 = 0x01;
@@ -317,10 +319,15 @@ pub unsafe fn sys_echo(val: u64) -> u64 {
     unsafe { syscall1(SYS_ECHO, val) }
 }
 
-/// Returns the base address of the allocated region, or u64::MAX on failure
+/// Returns the base address of the allocated region, or `INVALID_ALLOC` on failure
 #[inline(always)]
 pub unsafe fn sys_allocate(size: usize) -> u64 {
-    unsafe { syscall1(SYS_ALLOCATE, size as u64) }
+    let ret = unsafe { syscall1(SYS_ALLOCATE, size as u64) };
+    if syscall_failed(ret) {
+        INVALID_ALLOC
+    } else {
+        ret
+    }
 }
 
 #[inline(always)]
@@ -339,8 +346,9 @@ pub unsafe fn sys_create_process(elf_path: &[char], name: &[char], args_buffer: 
 }
 
 #[inline(always)]
+/// Returns the window id, or `u32::MAX` on failure.
 pub unsafe fn sys_create_window(width: u32, height: u32, x: i32, y: i32) -> u32 {
-    unsafe {
+    let ret = unsafe {
         syscall6(
             SYS_CREATE_WINDOW,
             width as u64,
@@ -349,7 +357,12 @@ pub unsafe fn sys_create_window(width: u32, height: u32, x: i32, y: i32) -> u32 
             y as u64,
             0,
             0,
-        ) as u32
+        )
+    };
+    if syscall_failed(ret) {
+        u32::MAX
+    } else {
+        ret as u32
     }
 }
 
@@ -363,7 +376,7 @@ pub unsafe fn sys_destroy_window(window_id: u32) {
 #[inline(always)]
 pub unsafe fn sys_map_window_buffer(window_id: u32) -> *mut u32 {
     let addr = unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) };
-    if addr == u64::MAX {
+    if syscall_failed(addr) {
         core::ptr::null_mut()
     } else {
         addr as *mut u32
@@ -380,7 +393,7 @@ pub unsafe fn sys_present_window(window_id: u32) {
 #[inline(always)]
 pub unsafe fn sys_get_window_size(window_id: u32) -> (u32, u32) {
     let packed = unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) };
-    if packed == u64::MAX {
+    if syscall_failed(packed) {
         (0, 0)
     } else {
         ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32)
@@ -504,7 +517,7 @@ pub unsafe fn sys_create_circular_buffer(
             out_buffer_info as *mut CircularBufferInfo as u64,
         )
     };
-    ret != u64::MAX
+    !syscall_failed(ret)
 }
 
 #[inline(always)]
@@ -516,7 +529,7 @@ pub unsafe fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> 
             out_info as *mut WindowInfo as u64,
         )
     };
-    ret != u64::MAX
+    !syscall_failed(ret)
 }
 
 /// List the contents of a directory into out_entries.
