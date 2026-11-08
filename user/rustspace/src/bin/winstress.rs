@@ -13,7 +13,6 @@ const CIRCULAR_BUFFER_SIZE: usize = 64 * 1024;
 const CIRCULAR_BUFFER_COUNT: usize = 2;
 const HEAP_ALLOC_COUNT: usize = 100;
 const HEAP_ALLOC_SIZE: usize = 16 * 1024;
-const INVALID_ALLOC: u64 = u64::MAX;
 const WINDOW_WIDTH: u32 = 100;
 const WINDOW_HEIGHT: u32 = 100;
 const WINDOW_X: i32 = 10;
@@ -84,15 +83,15 @@ fn check_circular_buffer() {
 }
 
 fn create_and_map_window() -> (u32, *mut u32, WindowInfo) {
-    let window_id = unsafe { sys_create_window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_X, WINDOW_Y) };
-    if window_id == u32::MAX {
+    let Ok(window_id) =
+        (unsafe { sys_create_window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_X, WINDOW_Y) })
+    else {
         fail(b"winstress: create_window failed\n", EXIT_WINDOW_CREATE);
-    }
+    };
 
-    let pixels = unsafe { sys_map_window_buffer(window_id) };
-    if pixels.is_null() {
+    let Ok(pixels) = (unsafe { sys_map_window_buffer(window_id) }) else {
         fail(b"winstress: map_window_buffer failed\n", EXIT_WINDOW_MAP);
-    }
+    };
 
     let mut info = WindowInfo::zeroed();
     if !unsafe { sys_get_window_info(window_id, &mut info) } || info.event_buffer_vaddr == 0 {
@@ -124,8 +123,7 @@ pub extern "C" fn _start() -> ! {
     write_str(b"winstress: circular buffers ok\n");
 
     for _ in 0..HEAP_ALLOC_COUNT {
-        let ptr = unsafe { sys_allocate(HEAP_ALLOC_SIZE) };
-        if ptr == INVALID_ALLOC || ptr == 0 {
+        if !matches!(unsafe { sys_allocate(HEAP_ALLOC_SIZE) }, Ok(1..)) {
             fail(b"winstress: alloc failed\n", EXIT_HEAP);
         }
     }

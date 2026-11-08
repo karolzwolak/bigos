@@ -20,17 +20,15 @@ global_asm!(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main() -> ! {
-    let window_id = unsafe { rustspace::sys_create_window(320, 240, 100, 100) };
-    if window_id == u32::MAX {
+    let Ok(window_id) = (unsafe { rustspace::sys_create_window(320, 240, 100, 100) }) else {
         rustspace::println!("game: create_window failed");
         unsafe { rustspace::sys_exit(1) }
-    }
+    };
 
-    let pixels = unsafe { rustspace::sys_map_window_buffer(window_id) };
-    if pixels.is_null() {
+    let Ok(pixels) = (unsafe { rustspace::sys_map_window_buffer(window_id) }) else {
         rustspace::println!("game: map_window_buffer failed");
         unsafe { rustspace::sys_exit(1) }
-    }
+    };
     let mut window_info = rustspace::WindowInfo::zeroed();
     if !unsafe { rustspace::sys_get_window_info(window_id, &mut window_info) } {
         rustspace::println!("game: get_window_info failed");
@@ -38,7 +36,7 @@ pub extern "C" fn rust_main() -> ! {
     }
     let pixels_second = ((pixels as u64) + window_info.front_buffer_offset) as *mut u32;
 
-    let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
+    let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) }.unwrap_or((0, 0));
     rustspace::println!(
         "game: window {}x{} id={} mapped at {:p}",
         width,
