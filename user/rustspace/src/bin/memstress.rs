@@ -9,7 +9,6 @@ const PROCESS_HEAP_SIZE_BYTES: usize = 2 * 1024 * 1024;
 const ALLOC_COUNT: usize = 4;
 const ALLOC_SIZE: usize = PROCESS_HEAP_SIZE_BYTES / ALLOC_COUNT + 4096;
 const PATTERN: u8 = 0xAA;
-const INVALID_ALLOC: u64 = u64::MAX;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -28,11 +27,10 @@ pub extern "C" fn _start() -> ! {
     let mut ptrs: [u64; ALLOC_COUNT] = [0; ALLOC_COUNT];
 
     for i in 0..ALLOC_COUNT {
-        let ptr = unsafe { sys_allocate(ALLOC_SIZE) };
-        if ptr == INVALID_ALLOC || ptr == 0 {
+        let Ok(ptr @ 1..) = (unsafe { sys_allocate(ALLOC_SIZE) }) else {
             write_str(b"memstress: alloc failed\n");
             unsafe { sys_exit(2) }
-        }
+        };
         ptrs[i] = ptr;
         let slice = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, ALLOC_SIZE) };
         for b in slice.iter_mut() {

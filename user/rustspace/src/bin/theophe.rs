@@ -23,18 +23,16 @@ global_asm!(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
-    let window_id = unsafe { rustspace::sys_create_window(600, 400, 50, 50) };
-    if window_id == u32::MAX {
+    let Ok(window_id) = (unsafe { rustspace::sys_create_window(600, 400, 50, 50) }) else {
         rustspace::println!("theophe: create_window failed");
         unsafe { rustspace::sys_exit(1) }
-    }
+    };
     rustspace::println!("theophe: window id={}", window_id);
 
-    let pixels = unsafe { rustspace::sys_map_window_buffer(window_id) };
-    if pixels.is_null() {
+    let Ok(pixels) = (unsafe { rustspace::sys_map_window_buffer(window_id) }) else {
         rustspace::println!("theophe: map_window_buffer failed");
         unsafe { rustspace::sys_exit(1) }
-    }
+    };
     let mut window_info = WindowInfo::zeroed();
     if !unsafe { sys_get_window_info(window_id, &mut window_info) } {
         rustspace::println!("theophe: get_window_info failed");
@@ -42,7 +40,7 @@ pub extern "C" fn main() -> ! {
     }
     let pixels_second = ((pixels as u64) + window_info.front_buffer_offset) as *mut u32;
 
-    let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) };
+    let (width, height) = unsafe { rustspace::sys_get_window_size(window_id) }.unwrap_or((0, 0));
     if width == 0 || height == 0 {
         rustspace::println!("theophe: get_window_size failed");
         unsafe { rustspace::sys_exit(1) }

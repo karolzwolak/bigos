@@ -53,8 +53,17 @@ pub const SYS_ECHO: u64 = 997;
 /// Mirrors the kernel's `SyscallError::NotImplemented.as_return()`.
 pub const SYSCALL_NOT_IMPLEMENTED: u64 = 6u64.wrapping_neg();
 
-fn syscall_failed(ret: u64) -> bool {
-    ret == u64::MAX || ret == SYSCALL_NOT_IMPLEMENTED
+/// A kernel `SyscallError` code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyscallError(pub u64);
+
+// No successful return (address, id, count, packed size) sets the top bit.
+fn check(ret: u64) -> Result<u64, SyscallError> {
+    if (ret as i64) < 0 {
+        Err(SyscallError(ret.wrapping_neg()))
+    } else {
+        Ok(ret)
+    }
 }
 
 pub const FD_FLAG_READ: u8 = 0x01;
@@ -218,8 +227,6 @@ impl CpuInfoFlat {
     }
 }
 
-pub const INVALID_ALLOC: u64 = u64::MAX;
-
 #[inline(always)]
 pub unsafe fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
     let ret: u64;
@@ -317,10 +324,10 @@ pub unsafe fn sys_echo(val: u64) -> u64 {
     unsafe { syscall1(SYS_ECHO, val) }
 }
 
-/// Returns the base address of the allocated region, or u64::MAX on failure
+/// Returns the base address of the allocated region.
 #[inline(always)]
-pub unsafe fn sys_allocate(size: usize) -> u64 {
-    unsafe { syscall1(SYS_ALLOCATE, size as u64) }
+pub unsafe fn sys_allocate(size: usize) -> Result<u64, SyscallError> {
+    check(unsafe { syscall1(SYS_ALLOCATE, size as u64) })
 }
 
 #[inline(always)]
@@ -339,8 +346,14 @@ pub unsafe fn sys_create_process(elf_path: &[char], name: &[char], args_buffer: 
 }
 
 #[inline(always)]
-pub unsafe fn sys_create_window(width: u32, height: u32, x: i32, y: i32) -> u32 {
-    unsafe {
+/// Returns the window id.
+pub unsafe fn sys_create_window(
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+) -> Result<u32, SyscallError> {
+    let ret = unsafe {
         syscall6(
             SYS_CREATE_WINDOW,
             width as u64,
@@ -349,8 +362,9 @@ pub unsafe fn sys_create_window(width: u32, height: u32, x: i32, y: i32) -> u32 
             y as u64,
             0,
             0,
-        ) as u32
-    }
+        )
+    };
+    check(ret).map(|id| id as u32)
 }
 
 #[inline(always)]
@@ -359,15 +373,10 @@ pub unsafe fn sys_destroy_window(window_id: u32) {
 }
 
 /// Map the back buffer of a kernel window into this process's address space.
-/// Returns a pointer to the first pixel (XRGB8888 u32 array), or null on failure.
+/// Returns a pointer to the first pixel (XRGB8888 u32 array).
 #[inline(always)]
-pub unsafe fn sys_map_window_buffer(window_id: u32) -> *mut u32 {
-    let addr = unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) };
-    if addr == u64::MAX {
-        core::ptr::null_mut()
-    } else {
-        addr as *mut u32
-    }
+pub unsafe fn sys_map_window_buffer(window_id: u32) -> Result<*mut u32, SyscallError> {
+    check(unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) }).map(|addr| addr as *mut u32)
 }
 
 /// Signal the kernel that the back buffer is ready to be presented.
@@ -376,24 +385,20 @@ pub unsafe fn sys_present_window(window_id: u32) {
     unsafe { syscall1(SYS_PRESENT_WINDOW, window_id as u64) };
 }
 
-/// Returns (width, height) of the window, or (0, 0) on failure.
+/// Returns (width, height) of the window.
 #[inline(always)]
-pub unsafe fn sys_get_window_size(window_id: u32) -> (u32, u32) {
-    let packed = unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) };
-    if packed == u64::MAX {
-        (0, 0)
-    } else {
-        ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32)
-    }
+pub unsafe fn sys_get_window_size(window_id: u32) -> Result<(u32, u32), SyscallError> {
+    check(unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) })
+        .map(|packed| ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32))
 }
 
 // --- Filesystem wrappers ---
 
 /// Open a file or directory by path.
 /// flags: FD_FLAG_READ | FD_FLAG_WRITE
-/// Returns a file descriptor index, or usize::MAX on failure.
+/// Returns a file descriptor index.
 #[inline(always)]
-pub unsafe fn sys_open_file(path: &str, flags: u8) -> usize {
+pub unsafe fn sys_open_file(path: &str, flags: u8) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall3(
             SYS_OPEN_FILE,
@@ -402,24 +407,20 @@ pub unsafe fn sys_open_file(path: &str, flags: u8) -> usize {
             flags as u64,
         )
     };
-    if syscall_failed(ret) {
-        usize::MAX
-    } else {
-        ret as usize
-    }
+    check(ret).map(|n| n as usize)
 }
 
 /// Close a file descriptor.
 /// Returns true on success.
 #[inline(always)]
 pub unsafe fn sys_close_file(fd: usize) -> bool {
-    !syscall_failed(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) })
+    check(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) }).is_ok()
 }
 
 /// Read up to buf.len() bytes from an open fd
-/// Returns the number of bytes read, or usize::MAX on failure.
+/// Returns the number of bytes read.
 #[inline(always)]
-pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> usize {
+pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_READ_FILE,
@@ -429,17 +430,17 @@ pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> usize {
             buf.len() as u64,
         )
     };
-    if syscall_failed(ret) {
-        usize::MAX
-    } else {
-        ret as usize
-    }
+    check(ret).map(|n| n as usize)
 }
 
 /// Read up to buf.len() bytes from an open fd at the current offset.
-/// Returns the number of bytes read, or usize::MAX on failure.
+/// Returns the number of bytes read.
 #[inline(always)]
-pub unsafe fn sys_read_file_at(fd: usize, offset: usize, buf: &mut [u8]) -> usize {
+pub unsafe fn sys_read_file_at(
+    fd: usize,
+    offset: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_READ_FILE,
@@ -449,17 +450,13 @@ pub unsafe fn sys_read_file_at(fd: usize, offset: usize, buf: &mut [u8]) -> usiz
             buf.len() as u64,
         )
     };
-    if syscall_failed(ret) {
-        usize::MAX
-    } else {
-        ret as usize
-    }
+    check(ret).map(|n| n as usize)
 }
 
 /// Write buf to an open fd at the current offset.
-/// Returns the number of bytes written, or usize::MAX on failure.
+/// Returns the number of bytes written.
 #[inline(always)]
-pub unsafe fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> usize {
+pub unsafe fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_WRITE_FILE,
@@ -469,11 +466,7 @@ pub unsafe fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> usize {
             buf.len() as u64,
         )
     };
-    if syscall_failed(ret) {
-        usize::MAX
-    } else {
-        ret as usize
-    }
+    check(ret).map(|n| n as usize)
 }
 
 /// Stat a path. Fills out_stat on success. Returns true on success.
@@ -487,7 +480,7 @@ pub unsafe fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
             out_stat as *mut StatFlat as u64,
         )
     };
-    !syscall_failed(ret)
+    check(ret).is_ok()
 }
 
 #[inline(always)]
@@ -504,7 +497,7 @@ pub unsafe fn sys_create_circular_buffer(
             out_buffer_info as *mut CircularBufferInfo as u64,
         )
     };
-    ret != u64::MAX
+    check(ret).is_ok()
 }
 
 #[inline(always)]
@@ -516,13 +509,16 @@ pub unsafe fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> 
             out_info as *mut WindowInfo as u64,
         )
     };
-    ret != u64::MAX
+    check(ret).is_ok()
 }
 
 /// List the contents of a directory into out_entries.
-/// Returns the number of entries written, or usize::MAX on failure.
+/// Returns the number of entries written.
 #[inline(always)]
-pub unsafe fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> usize {
+pub unsafe fn sys_list_dir(
+    path: &str,
+    out_entries: &mut [DirEntryFlat],
+) -> Result<usize, SyscallError> {
     let byte_len = out_entries.len() * core::mem::size_of::<DirEntryFlat>();
     let ret = unsafe {
         syscall6(
@@ -535,32 +531,28 @@ pub unsafe fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> usiz
             0,
         )
     };
-    if syscall_failed(ret) {
-        usize::MAX
-    } else {
-        ret as usize
-    }
+    check(ret).map(|n| n as usize)
 }
 
 /// Create a new file at the given path. Returns true on success.
 #[inline(always)]
 pub unsafe fn sys_create_file(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_CREATE_FILE, path.as_ptr() as u64, path.len() as u64, 0) };
-    !syscall_failed(ret)
+    check(ret).is_ok()
 }
 
 /// Create a new directory at the given path. Returns true on success.
 #[inline(always)]
 pub unsafe fn sys_create_dir(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_CREATE_DIR, path.as_ptr() as u64, path.len() as u64, 0) };
-    !syscall_failed(ret)
+    check(ret).is_ok()
 }
 
 /// Delete a file or directory at the given path. Returns true on success.
 #[inline(always)]
 pub unsafe fn sys_delete(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0) };
-    !syscall_failed(ret)
+    check(ret).is_ok()
 }
 
 #[inline(always)]
@@ -635,8 +627,7 @@ impl Arena {
     }
 
     pub fn preallocate(&self, prealloc_size: usize) {
-        let base = unsafe { sys_allocate(prealloc_size) };
-        if base != INVALID_ALLOC {
+        if let Ok(base) = unsafe { sys_allocate(prealloc_size) } {
             self.cursor
                 .store(base as usize, core::sync::atomic::Ordering::Release);
             self.end.store(
@@ -647,8 +638,7 @@ impl Arena {
     }
 
     unsafe fn grow(&self) -> bool {
-        let base = unsafe { sys_allocate(SLAB_SIZE) };
-        if base != INVALID_ALLOC {
+        if let Ok(base) = unsafe { sys_allocate(SLAB_SIZE) } {
             self.cursor
                 .store(base as usize, core::sync::atomic::Ordering::Release);
             self.end.store(
@@ -771,12 +761,8 @@ unsafe impl GlobalAlloc for Arena {
                 }
 
                 if size > SLAB_SIZE {
-                    let base = unsafe { sys_allocate(size) };
-                    if base == INVALID_ALLOC {
-                        return core::ptr::null_mut();
-                    }
-
-                    return base as *mut u8;
+                    return unsafe { sys_allocate(size) }
+                        .map_or(core::ptr::null_mut(), |base| base as *mut u8);
                 }
 
                 if !unsafe { self.grow() } {
