@@ -13,7 +13,7 @@ const EXIT_CODE_PANIC: i32 = 255;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { sys_exit(EXIT_CODE_PANIC) }
+    sys_exit(EXIT_CODE_PANIC)
 }
 
 // the kernel enters with a 16 byte aligned rsp, the ABI wants it 8 off at function entry
@@ -34,9 +34,9 @@ extern "C" fn yield_main() -> ! {
     counters[COUNTER_RUNNING].fetch_add(1, Ordering::AcqRel);
 
     while counters[COUNTER_STOP].load(Ordering::Acquire) == 0 {
-        unsafe { sys_yield() };
+        sys_yield();
         counters[COUNTER_YIELDS].fetch_add(1, Ordering::AcqRel);
     }
 
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }

@@ -16,7 +16,7 @@ const EXIT_CODE_PANIC: i32 = 255;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { sys_exit(EXIT_CODE_PANIC) }
+    sys_exit(EXIT_CODE_PANIC)
 }
 
 // the kernel enters with a 16 byte aligned rsp, the ABI wants it 8 off at function entry
@@ -54,8 +54,8 @@ extern "C" fn ping_main() -> ! {
         counters[COUNTER_PING_ROUNDS_BASE + role as usize].fetch_add(1, Ordering::AcqRel);
 
         turn.store(ROLE_COUNT - 1 - role, Ordering::Release);
-        unsafe { sys_futex_wake() };
+        sys_futex_wake();
     }
 
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }

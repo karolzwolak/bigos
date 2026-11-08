@@ -72,7 +72,7 @@ impl RegisterSet {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { sys_exit(EXIT_CODE_PANIC) }
+    sys_exit(EXIT_CODE_PANIC)
 }
 
 /// Loads a sentinel into every preserved register, issues the syscall and records
@@ -216,12 +216,12 @@ pub extern "C" fn _start() -> ! {
     for _ in 0..PROBE_ROUNDS {
         unsafe { probe(SYS_ECHO) };
         if count_lost_registers(b"sysret") != 0 {
-            unsafe { sys_exit(EXIT_CODE_LOST_REGISTER_ON_SYSRET) }
+            sys_exit(EXIT_CODE_LOST_REGISTER_ON_SYSRET)
         }
 
         unsafe { probe(SYS_YIELD) };
         if count_lost_registers(b"yield") != 0 {
-            unsafe { sys_exit(EXIT_CODE_LOST_REGISTER_ON_YIELD) }
+            sys_exit(EXIT_CODE_LOST_REGISTER_ON_YIELD)
         }
 
         let yield_result = unsafe { core::ptr::addr_of!(OBSERVED).read() }.rax;
@@ -229,10 +229,10 @@ pub extern "C" fn _start() -> ! {
             write_bytes(b"regprobe: yield returned ");
             write_hex(yield_result);
             write_bytes(b"\n");
-            unsafe { sys_exit(EXIT_CODE_YIELD_RETURNED_NONZERO) }
+            sys_exit(EXIT_CODE_YIELD_RETURNED_NONZERO)
         }
     }
 
     write_bytes(b"regprobe: ok\n");
-    unsafe { sys_exit(0) }
+    sys_exit(0)
 }

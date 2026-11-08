@@ -227,6 +227,10 @@ impl CpuInfoFlat {
     }
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid call of that syscall, and every
+/// pointer among them must be valid for the accesses the syscall makes.
 #[inline(always)]
 pub unsafe fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
     let ret: u64;
@@ -250,88 +254,115 @@ pub unsafe fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6
     ret
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid call of that syscall, and every
+/// pointer among them must be valid for the accesses the syscall makes.
 #[inline(always)]
 pub unsafe fn syscall1(num: u64, a1: u64) -> u64 {
     unsafe { syscall6(num, a1, 0, 0, 0, 0, 0) }
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid call of that syscall, and every
+/// pointer among them must be valid for the accesses the syscall makes.
 #[inline(always)]
 pub unsafe fn syscall2(num: u64, a1: u64, a2: u64) -> u64 {
     unsafe { syscall6(num, a1, a2, 0, 0, 0, 0) }
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid call of that syscall, and every
+/// pointer among them must be valid for the accesses the syscall makes.
 #[inline(always)]
 pub unsafe fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     unsafe { syscall6(num, a1, a2, a3, 0, 0, 0) }
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid call of that syscall, and every
+/// pointer among them must be valid for the accesses the syscall makes.
 #[inline(always)]
 pub unsafe fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     unsafe { syscall6(num, a1, a2, a3, a4, 0, 0) }
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid call of that syscall, and every
+/// pointer among them must be valid for the accesses the syscall makes.
 #[inline(always)]
 pub unsafe fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
     unsafe { syscall6(num, a1, a2, a3, a4, a5, 0) }
 }
 
+/// # Safety
+///
+/// `buf` must be valid for reads of `count` bytes.
 #[inline(always)]
 pub unsafe fn sys_write(fd: u64, buf: *const u8, count: usize) -> i64 {
     unsafe { syscall3(SYS_WRITE, fd, buf as u64, count as u64) as i64 }
 }
 
 #[inline(always)]
-pub unsafe fn sys_exit(code: i32) -> ! {
+pub fn sys_exit(code: i32) -> ! {
     unsafe { syscall1(SYS_EXIT, code as u64) };
-    loop {}
+    unreachable!("SYS_EXIT returned")
 }
 
 #[inline(always)]
-pub unsafe fn sys_terminate_process(pid: usize, exit_code: i32) -> bool {
+pub fn sys_terminate_process(pid: usize, exit_code: i32) -> bool {
     unsafe { syscall2(SYS_TERMINATE_PROCESS, pid as u64, exit_code as u64) == 0 }
 }
 
 #[inline(always)]
-pub unsafe fn sys_yield() {
+pub fn sys_yield() {
     unsafe { syscall1(SYS_YIELD, 0) };
 }
 
 /// Blocks the calling process for at least `duration_ms`, it uses no cpu meanwhile
 #[inline(always)]
-pub unsafe fn sys_sleep_ms(duration_ms: u64) {
+pub fn sys_sleep_ms(duration_ms: u64) {
     unsafe { syscall1(SYS_SLEEP_MS, duration_ms) };
 }
 
 /// Blocks until one of the windows of the calling process has an input event waiting
 #[inline(always)]
-pub unsafe fn sys_wait_for_input() {
+pub fn sys_wait_for_input() {
     unsafe { syscall1(SYS_WAIT_FOR_INPUT, 0) };
 }
 
 /// Blocks while `*word == expected`, returns when a FutexWake happened and the word differs
+///
+/// # Safety
+///
+/// `word` must be valid for reads.
 #[inline(always)]
 pub unsafe fn sys_futex_wait(word: *const u32, expected: u32) {
     unsafe { syscall2(SYS_FUTEX_WAIT, word as u64, expected as u64) };
 }
 
 #[inline(always)]
-pub unsafe fn sys_futex_wake() {
+pub fn sys_futex_wake() {
     unsafe { syscall1(SYS_FUTEX_WAKE, 0) };
 }
 
 #[inline(always)]
-pub unsafe fn sys_echo(val: u64) -> u64 {
+pub fn sys_echo(val: u64) -> u64 {
     unsafe { syscall1(SYS_ECHO, val) }
 }
 
 /// Returns the base address of the allocated region.
 #[inline(always)]
-pub unsafe fn sys_allocate(size: usize) -> Result<u64, SyscallError> {
+pub fn sys_allocate(size: usize) -> Result<u64, SyscallError> {
     check(unsafe { syscall1(SYS_ALLOCATE, size as u64) })
 }
 
 #[inline(always)]
-pub unsafe fn sys_create_process(elf_path: &[char], name: &[char], args_buffer: &[u8]) -> u32 {
+pub fn sys_create_process(elf_path: &[char], name: &[char], args_buffer: &[u8]) -> u32 {
     unsafe {
         syscall6(
             SYS_CREATE_PROCESS,
@@ -347,12 +378,7 @@ pub unsafe fn sys_create_process(elf_path: &[char], name: &[char], args_buffer: 
 
 #[inline(always)]
 /// Returns the window id.
-pub unsafe fn sys_create_window(
-    width: u32,
-    height: u32,
-    x: i32,
-    y: i32,
-) -> Result<u32, SyscallError> {
+pub fn sys_create_window(width: u32, height: u32, x: i32, y: i32) -> Result<u32, SyscallError> {
     let ret = unsafe {
         syscall6(
             SYS_CREATE_WINDOW,
@@ -367,6 +393,10 @@ pub unsafe fn sys_create_window(
     check(ret).map(|id| id as u32)
 }
 
+/// # Safety
+///
+/// Nothing may use the window's mapped buffers afterwards: the kernel unmaps
+/// them.
 #[inline(always)]
 pub unsafe fn sys_destroy_window(window_id: u32) {
     unsafe { syscall1(SYS_DESTROY_WINDOW, window_id as u64) };
@@ -375,19 +405,19 @@ pub unsafe fn sys_destroy_window(window_id: u32) {
 /// Map the back buffer of a kernel window into this process's address space.
 /// Returns a pointer to the first pixel (XRGB8888 u32 array).
 #[inline(always)]
-pub unsafe fn sys_map_window_buffer(window_id: u32) -> Result<*mut u32, SyscallError> {
+pub fn sys_map_window_buffer(window_id: u32) -> Result<*mut u32, SyscallError> {
     check(unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) }).map(|addr| addr as *mut u32)
 }
 
 /// Signal the kernel that the back buffer is ready to be presented.
 #[inline(always)]
-pub unsafe fn sys_present_window(window_id: u32) {
+pub fn sys_present_window(window_id: u32) {
     unsafe { syscall1(SYS_PRESENT_WINDOW, window_id as u64) };
 }
 
 /// Returns (width, height) of the window.
 #[inline(always)]
-pub unsafe fn sys_get_window_size(window_id: u32) -> Result<(u32, u32), SyscallError> {
+pub fn sys_get_window_size(window_id: u32) -> Result<(u32, u32), SyscallError> {
     check(unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) })
         .map(|packed| ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32))
 }
@@ -398,7 +428,7 @@ pub unsafe fn sys_get_window_size(window_id: u32) -> Result<(u32, u32), SyscallE
 /// flags: FD_FLAG_READ | FD_FLAG_WRITE
 /// Returns a file descriptor index.
 #[inline(always)]
-pub unsafe fn sys_open_file(path: &str, flags: u8) -> Result<usize, SyscallError> {
+pub fn sys_open_file(path: &str, flags: u8) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall3(
             SYS_OPEN_FILE,
@@ -413,14 +443,14 @@ pub unsafe fn sys_open_file(path: &str, flags: u8) -> Result<usize, SyscallError
 /// Close a file descriptor.
 /// Returns true on success.
 #[inline(always)]
-pub unsafe fn sys_close_file(fd: usize) -> bool {
+pub fn sys_close_file(fd: usize) -> bool {
     check(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) }).is_ok()
 }
 
 /// Read up to buf.len() bytes from an open fd
 /// Returns the number of bytes read.
 #[inline(always)]
-pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
+pub fn sys_read_file(fd: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_READ_FILE,
@@ -436,11 +466,7 @@ pub unsafe fn sys_read_file(fd: usize, buf: &mut [u8]) -> Result<usize, SyscallE
 /// Read up to buf.len() bytes from an open fd at the current offset.
 /// Returns the number of bytes read.
 #[inline(always)]
-pub unsafe fn sys_read_file_at(
-    fd: usize,
-    offset: usize,
-    buf: &mut [u8],
-) -> Result<usize, SyscallError> {
+pub fn sys_read_file_at(fd: usize, offset: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_READ_FILE,
@@ -456,7 +482,7 @@ pub unsafe fn sys_read_file_at(
 /// Write buf to an open fd at the current offset.
 /// Returns the number of bytes written.
 #[inline(always)]
-pub unsafe fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallError> {
+pub fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_WRITE_FILE,
@@ -471,7 +497,7 @@ pub unsafe fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> Result<usi
 
 /// Stat a path. Fills out_stat on success. Returns true on success.
 #[inline(always)]
-pub unsafe fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
+pub fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
     let ret = unsafe {
         syscall3(
             SYS_STAT_FILE,
@@ -484,7 +510,7 @@ pub unsafe fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
 }
 
 #[inline(always)]
-pub unsafe fn sys_create_circular_buffer(
+pub fn sys_create_circular_buffer(
     size: usize,
     page_flags: PageTableFlags,
     out_buffer_info: &mut CircularBufferInfo,
@@ -501,7 +527,7 @@ pub unsafe fn sys_create_circular_buffer(
 }
 
 #[inline(always)]
-pub unsafe fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> bool {
+pub fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> bool {
     let ret = unsafe {
         syscall2(
             SYS_GET_WINDOW_INFO,
@@ -515,11 +541,8 @@ pub unsafe fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> 
 /// List the contents of a directory into out_entries.
 /// Returns the number of entries written.
 #[inline(always)]
-pub unsafe fn sys_list_dir(
-    path: &str,
-    out_entries: &mut [DirEntryFlat],
-) -> Result<usize, SyscallError> {
-    let byte_len = out_entries.len() * core::mem::size_of::<DirEntryFlat>();
+pub fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> Result<usize, SyscallError> {
+    let byte_len = core::mem::size_of_val(out_entries);
     let ret = unsafe {
         syscall6(
             SYS_LIST_DIR,
@@ -536,27 +559,27 @@ pub unsafe fn sys_list_dir(
 
 /// Create a new file at the given path. Returns true on success.
 #[inline(always)]
-pub unsafe fn sys_create_file(path: &str) -> bool {
+pub fn sys_create_file(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_CREATE_FILE, path.as_ptr() as u64, path.len() as u64, 0) };
     check(ret).is_ok()
 }
 
 /// Create a new directory at the given path. Returns true on success.
 #[inline(always)]
-pub unsafe fn sys_create_dir(path: &str) -> bool {
+pub fn sys_create_dir(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_CREATE_DIR, path.as_ptr() as u64, path.len() as u64, 0) };
     check(ret).is_ok()
 }
 
 /// Delete a file or directory at the given path. Returns true on success.
 #[inline(always)]
-pub unsafe fn sys_delete(path: &str) -> bool {
+pub fn sys_delete(path: &str) -> bool {
     let ret = unsafe { syscall3(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0) };
     check(ret).is_ok()
 }
 
 #[inline(always)]
-pub unsafe fn sys_get_cpu_info(out_info: &mut CpuInfoFlat) -> bool {
+pub fn sys_get_cpu_info(out_info: &mut CpuInfoFlat) -> bool {
     let ret = unsafe {
         syscall2(
             SYS_GET_CPU_INFO,
@@ -627,7 +650,7 @@ impl Arena {
     }
 
     pub fn preallocate(&self, prealloc_size: usize) {
-        if let Ok(base) = unsafe { sys_allocate(prealloc_size) } {
+        if let Ok(base) = sys_allocate(prealloc_size) {
             self.cursor
                 .store(base as usize, core::sync::atomic::Ordering::Release);
             self.end.store(
@@ -638,7 +661,7 @@ impl Arena {
     }
 
     unsafe fn grow(&self) -> bool {
-        if let Ok(base) = unsafe { sys_allocate(SLAB_SIZE) } {
+        if let Ok(base) = sys_allocate(SLAB_SIZE) {
             self.cursor
                 .store(base as usize, core::sync::atomic::Ordering::Release);
             self.end.store(
@@ -667,38 +690,38 @@ unsafe impl GlobalAlloc for Arena {
             return core::ptr::NonNull::dangling().as_ptr();
         }
 
-        if align <= 8 {
-            if let Some(idx) = list_index(size) {
-                let block_size = BLOCK_SIZES[idx];
-                if let Some(ptr) = {
-                    let mut heads = self.small_heads.lock();
-                    let node = heads[idx].take();
-                    if let Some(n) = node {
-                        let next = unsafe { n.as_ref().next };
-                        heads[idx] = next;
-                        Some(n.as_ptr() as *mut u8)
-                    } else {
-                        None
+        if align <= 8
+            && let Some(idx) = list_index(size)
+        {
+            let block_size = BLOCK_SIZES[idx];
+            if let Some(ptr) = {
+                let mut heads = self.small_heads.lock();
+                let node = heads[idx].take();
+                if let Some(n) = node {
+                    let next = unsafe { n.as_ref().next };
+                    heads[idx] = next;
+                    Some(n.as_ptr() as *mut u8)
+                } else {
+                    None
+                }
+            } {
+                return ptr;
+            }
+
+            loop {
+                let cursor = self.cursor.load(Acquire);
+                let end = self.end.load(Acquire);
+                let aligned = (cursor + block_size - 1) & !(block_size - 1);
+                let next = aligned + block_size;
+                if next <= end {
+                    match self.cursor.compare_exchange(cursor, next, AcqRel, Acquire) {
+                        Ok(_) => return aligned as *mut u8,
+                        Err(_) => continue,
                     }
-                } {
-                    return ptr;
                 }
 
-                loop {
-                    let cursor = self.cursor.load(Acquire);
-                    let end = self.end.load(Acquire);
-                    let aligned = (cursor + block_size - 1) & !(block_size - 1);
-                    let next = aligned + block_size;
-                    if next <= end {
-                        match self.cursor.compare_exchange(cursor, next, AcqRel, Acquire) {
-                            Ok(_) => return aligned as *mut u8,
-                            Err(_) => continue,
-                        }
-                    }
-
-                    if !unsafe { self.grow() } {
-                        return core::ptr::null_mut();
-                    }
+                if !unsafe { self.grow() } {
+                    return core::ptr::null_mut();
                 }
             }
         }
@@ -761,7 +784,7 @@ unsafe impl GlobalAlloc for Arena {
                 }
 
                 if size > SLAB_SIZE {
-                    return unsafe { sys_allocate(size) }
+                    return sys_allocate(size)
                         .map_or(core::ptr::null_mut(), |base| base as *mut u8);
                 }
 
@@ -797,19 +820,19 @@ unsafe impl GlobalAlloc for Arena {
         let size = layout.size();
         let align = layout.align();
 
-        if align <= 8 {
-            if let Some(idx) = list_index(size) {
-                let node = ptr as *mut FreeNode;
-                let mut heads = self.small_heads.lock();
-                unsafe {
-                    (*node).next = heads[idx];
-                }
-                heads[idx] = core::ptr::NonNull::new(node);
-                return;
+        if align <= 8
+            && let Some(idx) = list_index(size)
+        {
+            let node = ptr as *mut FreeNode;
+            let mut heads = self.small_heads.lock();
+            unsafe {
+                (*node).next = heads[idx];
             }
+            heads[idx] = core::ptr::NonNull::new(node);
+            return;
         }
 
-        debug_assert!(ptr as usize % LARGE_NODE_ALIGN == 0);
+        debug_assert!((ptr as usize).is_multiple_of(LARGE_NODE_ALIGN));
         let mut large = self.large_head.lock();
         let node = ptr as *mut LargeNode;
         unsafe {
@@ -823,7 +846,7 @@ unsafe impl GlobalAlloc for Arena {
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
     unsafe { sys_write(2, b"alloc error\n".as_ptr(), 12) };
-    unsafe { sys_exit(1) }
+    sys_exit(1)
 }
 
 use core::arch::asm;
@@ -847,7 +870,7 @@ impl InputEvent {
 
     pub fn decode_mouse(&self) -> MouseEvent {
         let x_delta = self.value as i32 as i16;
-        let y_delta = (self.extra & 0xFFFF) as i16 as i16;
+        let y_delta = (self.extra & 0xFFFF) as i16;
         let buttons = MouseButtons::from_bits_truncate(((self.extra >> 16) as u16) & 0x07);
 
         let overflow_bits = (self.extra >> 19) & 0x03;
@@ -972,7 +995,10 @@ pub const PROGRAM_SHARED_DATA_ADDR: usize = EVENT_BUFFER_ADDR + PAGE_SIZE;
 
 impl EventReader {
     /// Create a new event reader for the buffer at the given address
-    /// The address must point to a valid, kernel-mapped EventBuffer
+    ///
+    /// # Safety
+    ///
+    /// `buffer_addr` must point to a valid, kernel-mapped `EventBuffer`.
     pub unsafe fn new(buffer_addr: usize) -> Self {
         let buffer = unsafe { &*(buffer_addr as *const EventBuffer) };
         Self { buffer }
@@ -1026,7 +1052,7 @@ impl EventReader {
             if let Some(event) = self.try_read(0) {
                 return event;
             }
-            unsafe { sys_wait_for_input() }
+            sys_wait_for_input()
         }
     }
 }
@@ -1045,7 +1071,7 @@ pub fn program_shared_data() -> &'static ProgramSharedDataBuffer {
     unsafe { &*(PROGRAM_SHARED_DATA_ADDR as *const ProgramSharedDataBuffer) }
 }
 
-pub unsafe fn tsc_read() -> (u64, u32) {
+pub fn tsc_read() -> (u64, u32) {
     let low: u32;
     let high: u32;
     let core: u32;
@@ -1145,59 +1171,69 @@ pub enum CacheImportance {
 }
 
 // Cache syscall wrappers
-pub unsafe fn sys_pin_file(path: &str) -> u64 {
-    let path_bytes = path.as_bytes();
-    syscall4(
-        30,
-        path_bytes.as_ptr() as u64,
-        path_bytes.len() as u64,
-        0,
-        0,
-    )
+pub fn sys_pin_file(path: &str) -> u64 {
+    unsafe {
+        let path_bytes = path.as_bytes();
+        syscall4(
+            30,
+            path_bytes.as_ptr() as u64,
+            path_bytes.len() as u64,
+            0,
+            0,
+        )
+    }
 }
 
-pub unsafe fn sys_unpin_file(path: &str) -> u64 {
-    let path_bytes = path.as_bytes();
-    syscall4(
-        31,
-        path_bytes.as_ptr() as u64,
-        path_bytes.len() as u64,
-        0,
-        0,
-    )
+pub fn sys_unpin_file(path: &str) -> u64 {
+    unsafe {
+        let path_bytes = path.as_bytes();
+        syscall4(
+            31,
+            path_bytes.as_ptr() as u64,
+            path_bytes.len() as u64,
+            0,
+            0,
+        )
+    }
 }
 
-pub unsafe fn sys_reserve_cache(path: &str, importance: u8) -> u64 {
-    let path_bytes = path.as_bytes();
-    syscall4(
-        32,
-        path_bytes.as_ptr() as u64,
-        path_bytes.len() as u64,
-        importance as u64,
-        0,
-    )
+pub fn sys_reserve_cache(path: &str, importance: u8) -> u64 {
+    unsafe {
+        let path_bytes = path.as_bytes();
+        syscall4(
+            32,
+            path_bytes.as_ptr() as u64,
+            path_bytes.len() as u64,
+            importance as u64,
+            0,
+        )
+    }
 }
 
-pub unsafe fn sys_evict_directory(path: &str) -> u64 {
-    let path_bytes = path.as_bytes();
-    syscall4(
-        33,
-        path_bytes.as_ptr() as u64,
-        path_bytes.len() as u64,
-        0,
-        0,
-    )
+pub fn sys_evict_directory(path: &str) -> u64 {
+    unsafe {
+        let path_bytes = path.as_bytes();
+        syscall4(
+            33,
+            path_bytes.as_ptr() as u64,
+            path_bytes.len() as u64,
+            0,
+            0,
+        )
+    }
 }
 
-pub unsafe fn sys_get_cache_stats(stats: &mut CacheStatsFlat) -> bool {
-    let ret = syscall4(34, stats as *mut CacheStatsFlat as u64, 0, 0, 0);
-    ret == 0
+pub fn sys_get_cache_stats(stats: &mut CacheStatsFlat) -> bool {
+    unsafe {
+        let ret = syscall4(34, stats as *mut CacheStatsFlat as u64, 0, 0, 0);
+        ret == 0
+    }
 }
 
 /// Flush all dirty cached files belonging to the calling process's open fds.
 /// Returns true on success.
-pub unsafe fn sys_flush_file_cache() -> bool {
-    syscall1(35, 0) == 0
+pub fn sys_flush_file_cache() -> bool {
+    unsafe { syscall1(35, 0) == 0 }
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, PartialOrd, Ord)]
