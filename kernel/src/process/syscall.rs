@@ -129,6 +129,7 @@ pub enum SyscallNumber {
     Read = 3,
     GetLine = 4,
     Allocate = 5,
+    ListProcesses = 6,
     LoadFile = 8,
     UnloadFile = 9,
     CreateWindow = 10,
@@ -313,6 +314,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
 
     match syscall {
         SyscallNumber::CreateProcess => process_syscalls::create_process(frame),
+        SyscallNumber::ListProcesses => process_syscalls::list_processes(frame),
         SyscallNumber::TerminateProcess => {
             let target_pid = frame.arg1 as usize;
             let exit_code = frame.arg2 as i32;
@@ -385,7 +387,12 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             let pid = scheduler::get_current_process_for_core(get_current_core_id());
 
             if is_stdout {
-                let stdout_channel = PROCESS_MANAGER.lock().get_process(pid)?.stdout_channel();
+                let stdout_channel = {
+                    let mut process_manager = PROCESS_MANAGER.lock();
+                    let process = process_manager.get_process_mut(pid)?;
+                    process.stdout_write_syscall_count += 1;
+                    process.stdout_channel()
+                };
                 if stdout_channel.is_mapped() {
                     return channel::write_stdout(&stdout_channel, slice).map(|n| n as u64);
                 }

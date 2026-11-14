@@ -33,6 +33,7 @@ use crate::{
 };
 use alloc::string::String;
 use core::cmp::min;
+use static_assertions::const_assert;
 use x86_64::{
     VirtAddr,
     structures::paging::{PageTableFlags, Size4KiB, mapper::MapToError},
@@ -92,6 +93,30 @@ impl ArgSlice {
         bytes
     }
 }
+
+const STARTUP_INFO_SIZE_BYTES: usize = core::mem::size_of::<ProcessStartupInfo>();
+
+/// Per process values the kernel leaves at the very top of the user stack above the arguments. 
+/// Layout shared with rustspace `ProcessStartupInfo`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessStartupInfo {
+    /// PROCESS_STDOUT_CHANNEL_BASE when the process writes its stdout into a channel, 0 otherwise
+    pub stdout_header_vaddr: u64,
+    pub stdout_data_size_bytes: u64,
+}
+
+impl ProcessStartupInfo {
+    fn as_bytes(&self) -> [u8; STARTUP_INFO_SIZE_BYTES] {
+        let mut bytes = [0u8; STARTUP_INFO_SIZE_BYTES];
+        bytes[..8].copy_from_slice(&self.stdout_header_vaddr.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.stdout_data_size_bytes.to_le_bytes());
+        bytes
+    }
+}
+
+pub const PROCESS_STARTUP_INFO_VADDR: u64 = USER_STACK_TOP - STARTUP_INFO_SIZE_BYTES as u64;
+const_assert!(PROCESS_STARTUP_INFO_VADDR.is_multiple_of(USER_STACK_ALIGNMENT));
 
 /// What happens to the children of a terminating process
 /// The raw values are the syscall ABI, 0 is the default so callers that pass nothing kill the subtree
@@ -177,6 +202,8 @@ pub struct Process {
     pub file_descriptors: [FileDescriptor; MAX_OPEN_FILES],
     /// Channels mapped into this process, free slots hold ChannelMapping::NONE
     pub channels: [ChannelMapping; MAX_CHANNELS_PER_PROCESS],
+    /// Write syscalls on fd 1 and 2, prints that go straight into a channel never count
+    pub stdout_write_syscall_count: u32,
 
     pub resources: ProcessResources,
     pub exit_code: Option<i32>,
@@ -247,14 +274,29 @@ impl Process {
         }
     }
 
-    /// Puts the packed arguments at the top of the user stack and the ArgSlice array below them
+    /// Puts the ProcessStartupInfo at the top of the user stack, the packed arguments below it
+    /// and the ArgSlice array below them. Call it after the stdout channel is attached
     /// Returns the registers of the first entry, rsp points at the array
     pub fn place_arguments(&self, entry_point: u64, argc: u32, packed_args: &[u8]) -> UserEntry {
         let argc = argc as usize;
         debug_assert!(argc <= MAX_ARGC && packed_args.len() <= MAX_ARGV_BYTES);
         debug_assert!(packed_args.iter().filter(|&&byte| byte == 0).count() == argc);
 
-        let strings_base = USER_STACK_TOP - packed_args.len() as u64;
+        let stdout_channel = self.stdout_channel();
+        let startup_info = if stdout_channel.is_mapped() {
+            ProcessStartupInfo {
+                stdout_header_vaddr: stdout_channel.header_vaddr,
+                stdout_data_size_bytes: stdout_channel.data_size_bytes as u64,
+            }
+        } else {
+            ProcessStartupInfo {
+                stdout_header_vaddr: 0,
+                stdout_data_size_bytes: 0,
+            }
+        };
+        self.write_user_bytes(PROCESS_STARTUP_INFO_VADDR, &startup_info.as_bytes());
+
+        let strings_base = PROCESS_STARTUP_INFO_VADDR - packed_args.len() as u64;
         let array_bytes = (argc * ARG_SLICE_SIZE_BYTES) as u64;
         let array_base = (strings_base - array_bytes) & !(USER_STACK_ALIGNMENT - 1);
 
@@ -317,6 +359,7 @@ impl Process {
             children: Vec::new(),
             file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
             channels: [ChannelMapping::NONE; MAX_CHANNELS_PER_PROCESS],
+            stdout_write_syscall_count: 0,
             resources,
             exit_code: None,
             is_out,
@@ -465,6 +508,7 @@ impl Process {
             children: Vec::new(),
             file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
             channels: [ChannelMapping::NONE; MAX_CHANNELS_PER_PROCESS],
+            stdout_write_syscall_count: 0,
             resources: ProcessResources::default(),
             exit_code: None,
             is_out: true,

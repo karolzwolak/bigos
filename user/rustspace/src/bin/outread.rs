@@ -19,11 +19,13 @@ const COUNTER_BASIC_PID: usize = 3;
 const COUNTER_FLOOD_PID: usize = 4;
 const COUNTER_ORPHAN_PID: usize = 5;
 const COUNTER_READER_EXITING: usize = 6;
+const COUNTER_FLOOD_SYSCALL_PID: usize = 8;
 
 const OUTWRITE_PATH: &str = "/BIN/outwrite";
 const WRITER_PRIORITY: u8 = 5;
 const MODE_BASIC: &[u8] = b"basic\0";
 const MODE_FLOOD: &[u8] = b"flood\0";
+const MODE_FLOOD_SYSCALL: &[u8] = b"floodsys\0";
 const MODE_ORPHAN: &[u8] = b"orphan\0";
 const MODE_ARG_COUNT: u32 = 1;
 
@@ -31,7 +33,7 @@ const MODE_ARG_COUNT: u32 = 1;
 const EXPECTED_BASIC_OUTPUT: &[u8] = b"outwrite: hello\noutwrite: line 1\noutwrite: stderr too\n";
 const BASIC_CAPTURE_BYTES: usize = 256;
 
-// outwrite MODE_FLOOD sends this many pattern bytes
+// outwrite MODE_FLOOD and MODE_FLOOD_SYSCALL send this many pattern bytes
 const FLOOD_TOTAL_BYTES: usize = 48 * 1024;
 const FLOOD_PATTERN_PERIOD: usize = 251;
 // odd and small, so reads keep landing across the ring end
@@ -212,14 +214,15 @@ fn check_basic_output() {
 }
 
 /// A one page ring and slow reads: the writer has to block on a full ring many times
-fn check_flood_backpressure() {
+/// mode picks whether outwrite writes the ring itself or through the Write syscall
+fn check_flood_backpressure(mode: &'static [u8], pid_counter: usize) {
     let Ok(mut reader) = ChannelReader::create(PAGE_SIZE) else {
         check("create the flood channel", false);
         return;
     };
 
     let spawned = sys_create_process(
-        &writer_info(MODE_FLOOD)
+        &writer_info(mode)
             .with_flags(ProcessCreateFlags::INHERIT_PRIORITY)
             .with_stdout_channel(reader.channel_id()),
     );
@@ -227,7 +230,7 @@ fn check_flood_backpressure() {
     let Ok(writer_pid) = spawned else {
         return;
     };
-    program_shared_data().test_counters[COUNTER_FLOOD_PID].store(writer_pid, Ordering::Release);
+    program_shared_data().test_counters[pid_counter].store(writer_pid, Ordering::Release);
 
     let mut received = 0;
     let mut mismatches = 0;
@@ -269,7 +272,8 @@ extern "C" fn outread_main() -> ! {
     check_invalid_requests();
     check_stale_id();
     check_basic_output();
-    check_flood_backpressure();
+    check_flood_backpressure(MODE_FLOOD, COUNTER_FLOOD_PID);
+    check_flood_backpressure(MODE_FLOOD_SYSCALL, COUNTER_FLOOD_SYSCALL_PID);
     start_orphan_writer();
 
     // never attached to a writer, the exit has to free it as well

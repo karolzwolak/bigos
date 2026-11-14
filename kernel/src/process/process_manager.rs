@@ -166,8 +166,6 @@ impl ProcessManager {
         process.priority = priority;
         process.state = ProcessState::Ready;
         process.file_descriptors = spawn.file_descriptors;
-        let user_entry =
-            process.place_arguments(elf_info.entry_point, spawn.argc, spawn.packed_args);
 
         // mapped before the task exists, so the child's first write already lands in the ring
         if spawn.stdout_channel != NO_CHANNEL
@@ -184,6 +182,10 @@ impl ProcessManager {
                 .free_address_space(user_mgr, &mut frame_allocator);
             return Err(ProcessError::Channel(error));
         }
+
+        // after the attach, the startup info tells the child where its stdout channel is
+        let user_entry =
+            process.place_arguments(elf_info.entry_point, spawn.argc, spawn.packed_args);
 
         let cr3 = process.memory_layout.top_page_table_phys.as_u64();
         let Some(slot_index) = task::allocate_task_slot(new_pid, priority, core_id, cr3) else {

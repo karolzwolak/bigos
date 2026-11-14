@@ -5,11 +5,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
+use core::cmp::min;
 use spin::Mutex;
 use x86_64::structures::paging::PageTableFlags;
 
 pub mod channel;
 pub mod gfx;
+pub mod job;
 pub mod terminal;
 
 pub const SYS_CREATE_PROCESS: u64 = 0;
@@ -18,6 +20,7 @@ pub const SYS_WRITE: u64 = 2;
 pub const SYS_READ: u64 = 3;
 pub const SYS_GET_LINE: u64 = 4;
 pub const SYS_ALLOCATE: u64 = 5;
+pub const SYS_LIST_PROCESSES: u64 = 6;
 pub const SYS_LOAD_FILE: u64 = 8;
 pub const SYS_UNLOAD_FILE: u64 = 9;
 pub const SYS_CREATE_WINDOW: u64 = 10;
@@ -91,6 +94,9 @@ fn syscall_ret_check(ret: u64) -> Result<u64, SyscallError> {
 
 /// Mirrors the kernel's `BIGPROC_PID`
 pub const BIGPROC_PID: usize = 1;
+
+/// Mirrors the kernel's `USER_STACK_TOP`
+const USER_STACK_TOP: usize = 0x7FFF_FFFF_F000;
 
 /// What happens to the children of a terminating process, mirrors the kernel's `ChildPolicy`
 #[repr(u64)]
@@ -535,6 +541,56 @@ pub fn sys_create_process(info: &ProcessCreateInfo) -> Result<u32, SyscallError>
     let ret = unsafe { syscall1(SYS_CREATE_PROCESS, info as *const ProcessCreateInfo as u64) };
 
     syscall_ret_check(ret).map(|pid| pid as u32)
+}
+
+const PROCESS_INFO_RESERVED_BYTES: usize = 7;
+
+/// One sys_list_processes entry, layout shared with the kernel's `ProcessInfoFlat`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessInfoFlat {
+    pub pid: u64,
+    pub name_len: u8,
+    pub reserved: [u8; PROCESS_INFO_RESERVED_BYTES],
+    /// not NUL-terminated, name_len bytes are valid
+    pub name: [u8; MAX_PROCESS_NAME_LEN],
+}
+
+static_assertions::const_assert!(core::mem::size_of::<ProcessInfoFlat>() == 48);
+
+impl ProcessInfoFlat {
+    pub const EMPTY: Self = Self {
+        pid: 0,
+        name_len: 0,
+        reserved: [0; PROCESS_INFO_RESERVED_BYTES],
+        name: [0; MAX_PROCESS_NAME_LEN],
+    };
+
+    /// Names come from CreateProcess, which only accepts UTF-8
+    pub fn name(&self) -> &str {
+        let name_len = min(self.name_len as usize, MAX_PROCESS_NAME_LEN);
+        core::str::from_utf8(&self.name[..name_len]).unwrap_or("?")
+    }
+}
+
+/// Lists the processes that have not terminated, starting at entry start_index
+/// Returns the number of entries written, fewer than out_entries.len() means the end
+#[inline(always)]
+pub fn sys_list_processes(
+    start_index: usize,
+    out_entries: &mut [ProcessInfoFlat],
+) -> Result<usize, SyscallError> {
+    let byte_len = core::mem::size_of_val(out_entries);
+    let ret = unsafe {
+        syscall3(
+            SYS_LIST_PROCESSES,
+            out_entries.as_mut_ptr() as u64,
+            byte_len as u64,
+            start_index as u64,
+        )
+    };
+
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
 /// One argument as the kernel lays it out on the stack, the string excludes its NUL
@@ -1353,11 +1409,12 @@ impl core::fmt::Write for Serial {
     }
 }
 
+/// Straight into the stdout channel when the process has one, a Write syscall otherwise
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = core::fmt::write(&mut $crate::Serial, core::format_args!($($arg)*));
+        let mut stdout = $crate::channel::StdoutWriter::begin();
+        let _ = core::fmt::Write::write_fmt(&mut stdout, core::format_args!($($arg)*));
     }};
 }
 
@@ -1365,9 +1422,9 @@ macro_rules! print {
 macro_rules! println {
     () => { $crate::print!("\n") };
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = core::fmt::write(&mut $crate::Serial, core::format_args!($($arg)*));
-        unsafe { $crate::sys_write(1, b"\n".as_ptr(), 1) };
+        let mut stdout = $crate::channel::StdoutWriter::begin();
+        let _ = core::fmt::Write::write_fmt(&mut stdout, core::format_args!($($arg)*));
+        stdout.write_bytes(b"\n");
     }};
 }
 

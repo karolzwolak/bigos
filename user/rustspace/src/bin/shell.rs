@@ -82,6 +82,7 @@ pub extern "C" fn main() -> ! {
 
     shell.write_line("Welcome to bigOS");
     shell.write_line("=======================");
+    shell.write_prompt();
 
     rustspace::println!("shell: starting loop");
 
@@ -105,6 +106,7 @@ pub extern "C" fn main() -> ! {
                 None => break,
             }
         }
+        shell.poll_job();
 
         let backbuffer_redraw_required = shell.needs_redraw;
         if shell.needs_redraw {

@@ -22,13 +22,24 @@ const COUNTER_FLOOD_PID: usize = 4;
 const COUNTER_ORPHAN_PID: usize = 5;
 const COUNTER_READER_EXITING: usize = 6;
 const COUNTER_ORPHAN_WRITES_DONE: usize = 7;
-const USED_COUNTER_COUNT: usize = 8;
+const COUNTER_FLOOD_SYSCALL_PID: usize = 8;
+const USED_COUNTER_COUNT: usize = 9;
 
 const OUTREAD_PATH: &str = "/BIN/outread";
 const OUTREAD_NAME: &str = "outread";
 const PROGRAM_PRIORITY: u8 = 5;
 const DEADLINE_US: u64 = 20_000_000;
-const EXPECTED_PASSED_CHECKS: u32 = 26;
+const EXPECTED_PASSED_CHECKS: u32 = 30;
+
+// Write syscalls on fd 1 and 2 each outwrite mode makes, prints go straight into the ring
+// basic: only the stderr line goes through the syscall
+const BASIC_WRITE_SYSCALLS: u32 = 1;
+// flood and orphan: every byte goes straight into the ring
+const DIRECT_WRITE_SYSCALLS: u32 = 0;
+// floodsys: outwrite FLOOD_TOTAL_BYTES in FLOOD_CHUNK_BYTES chunks, one syscall each
+const FLOOD_TOTAL_BYTES: usize = 48 * 1024;
+const FLOOD_CHUNK_BYTES: usize = 1000;
+const FLOOD_SYSCALL_WRITE_SYSCALLS: u32 = FLOOD_TOTAL_BYTES.div_ceil(FLOOD_CHUNK_BYTES) as u32;
 const ROUND_COUNT: usize = 2;
 
 #[panic_handler]
@@ -75,7 +86,7 @@ fn is_gone(pid: PID) -> bool {
     task::find_slot_by_pid(pid).is_none()
 }
 
-fn check_clean_exit(pid: PID, what: &str) {
+fn check_clean_exit(pid: PID, what: &str, expected_write_syscalls: u32) {
     let process_manager = PROCESS_MANAGER.lock();
     let Ok(process) = process_manager.get_process(pid) else {
         serial_println_core!("{} (pid {}) is missing", what, pid);
@@ -93,6 +104,15 @@ fn check_clean_exit(pid: PID, what: &str) {
     }
     if process.channels.iter().any(|mapping| mapping.is_mapped()) {
         fail("a terminated process still lists a channel");
+    }
+    if process.stdout_write_syscall_count != expected_write_syscalls {
+        serial_println_core!(
+            "{} made {} stdout Write syscalls, expected {}",
+            what,
+            process.stdout_write_syscall_count,
+            expected_write_syscalls
+        );
+        fail("stdout Write syscall count is off, prints still trap or writes went missing");
     }
 }
 
@@ -135,6 +155,7 @@ fn run_round(round: usize, elf_info: &ElfLoadInfo) {
 
     let basic_pid = reported_pid(COUNTER_BASIC_PID, "basic writer");
     let flood_pid = reported_pid(COUNTER_FLOOD_PID, "flood writer");
+    let flood_syscall_pid = reported_pid(COUNTER_FLOOD_SYSCALL_PID, "flood syscall writer");
     let orphan_pid = reported_pid(COUNTER_ORPHAN_PID, "orphan writer");
     wait_until("the orphan writer to exit", || is_gone(orphan_pid));
     if counter(COUNTER_ORPHAN_WRITES_DONE).load(Ordering::Acquire) != 1 {
@@ -159,13 +180,19 @@ fn run_round(round: usize, elf_info: &ElfLoadInfo) {
         fail("outread did not signal its exit");
     }
 
-    for (pid, what) in [
-        (outread_pid, OUTREAD_NAME),
-        (basic_pid, "basic writer"),
-        (flood_pid, "flood writer"),
-        (orphan_pid, "orphan writer"),
+    // outread prints only on a failed check and has no channel, so it makes no Write either
+    for (pid, what, expected_write_syscalls) in [
+        (outread_pid, OUTREAD_NAME, DIRECT_WRITE_SYSCALLS),
+        (basic_pid, "basic writer", BASIC_WRITE_SYSCALLS),
+        (flood_pid, "flood writer", DIRECT_WRITE_SYSCALLS),
+        (
+            flood_syscall_pid,
+            "flood syscall writer",
+            FLOOD_SYSCALL_WRITE_SYSCALLS,
+        ),
+        (orphan_pid, "orphan writer", DIRECT_WRITE_SYSCALLS),
     ] {
-        check_clean_exit(pid, what);
+        check_clean_exit(pid, what, expected_write_syscalls);
     }
 
     let live_channels = live_channel_count();

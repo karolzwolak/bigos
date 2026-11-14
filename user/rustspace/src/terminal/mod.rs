@@ -12,6 +12,7 @@ use embedded_graphics::{
 };
 
 use crate::gfx::{color::Rgba8888UNORM, surface::UserSurface};
+use crate::job::{JobPoll, ShellJob};
 use line_index::LineIndex;
 use scrollback::Scrollback;
 
@@ -26,6 +27,24 @@ const TEXT_STYLE: TextStyle = TextStyleBuilder::new()
     .build();
 
 const DEFAULT_MAX_LINES: usize = 4096;
+
+const PROMPT: &str = "> ";
+const JOB_DRAIN_CHUNK_BYTES: usize = 1024;
+/// a frame takes at most one ring of job output, so a chatty program cannot stall the window
+const JOB_DRAIN_MAX_BYTES_PER_FRAME: usize = crate::channel::STDOUT_CHANNEL_DATA_SIZE_BYTES;
+const UNPRINTABLE_REPLACEMENT: u8 = b'?';
+
+/// Job output is untrusted and the renderer expects ASCII: keep printable ASCII and line
+/// breaks, turn tabs into spaces and everything else into UNPRINTABLE_REPLACEMENT
+fn sanitize_job_output(bytes: &mut [u8]) {
+    for byte in bytes {
+        *byte = match *byte {
+            b' '..=b'~' | b'\n' | b'\r' => *byte,
+            b'\t' => b' ',
+            _ => UNPRINTABLE_REPLACEMENT,
+        };
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct FontMetrics {
@@ -64,6 +83,9 @@ pub struct Terminal<D: DrawTarget<Color = Rgb888>> {
     pub last_command_buf: Vec<u8>,
     pub input_state: input::InputState,
     pub scroll_offset: usize,
+    /// scrollback position right after the last prompt, typed input starts here
+    pub input_start_abs: u64,
+    pub job: ShellJob,
 }
 
 impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
@@ -97,6 +119,8 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             last_command_buf: Vec::new(),
             input_state: input::InputState::new(),
             scroll_offset: 0,
+            input_start_abs: start_abs,
+            job: ShellJob::Idle,
         }
     }
 
@@ -108,6 +132,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         let abs = scrollback.current_absolute();
         self.scrollback = scrollback;
         self.lines.clear(abs);
+        self.input_start_abs = abs;
         self.needs_redraw = true;
     }
 
@@ -293,7 +318,8 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
 
     pub fn backspace(&mut self) {
         let cur = *self.lines.current_ref();
-        if cur.is_empty() {
+        // never eat into the prompt
+        if cur.is_empty() || self.scrollback.current_absolute() <= self.input_start_abs {
             return;
         }
         let new_end = cur.one_past_last_pos - 1;
@@ -302,19 +328,66 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         self.needs_redraw = true;
     }
 
+    /// Everything typed since the prompt, wrapped lines included
     fn capture_last_command(&mut self) {
-        let cur = *self.lines.current_ref();
-        if cur.is_empty() {
+        let end_abs = self.scrollback.current_absolute();
+        if end_abs <= self.input_start_abs {
             self.last_command_abs = None;
             self.last_command_buf.clear();
             return;
         }
 
-        let len = cur.len();
-        let bytes = self.scrollback.read_at(cur.first_pos, len);
+        let len = (end_abs - self.input_start_abs) as usize;
+        let bytes = self.scrollback.read_at(self.input_start_abs, len);
         self.last_command_buf.clear();
         self.last_command_buf.extend_from_slice(bytes);
-        self.last_command_abs = Some((cur.first_pos, cur.one_past_last_pos));
+        self.last_command_abs = Some((self.input_start_abs, end_abs));
+    }
+
+    /// Starts a new line when the current one has text, then prints the prompt
+    pub fn write_prompt(&mut self) {
+        if !self.lines.current_ref().is_empty() {
+            self.newline();
+        }
+        self.write_str(PROMPT);
+        self.input_start_abs = self.scrollback.current_absolute();
+    }
+
+    /// Moves the output of the running job into the scrollback
+    /// Prints the prompt again once the job is gone and its output is drained
+    pub fn poll_job(&mut self) {
+        let mut chunk = [0u8; JOB_DRAIN_CHUNK_BYTES];
+        let mut drained_bytes = 0;
+
+        while drained_bytes < JOB_DRAIN_MAX_BYTES_PER_FRAME {
+            match self.job.poll(&mut chunk) {
+                JobPoll::Output(read_len) => {
+                    sanitize_job_output(&mut chunk[..read_len]);
+                    self.write_bytes_internal(&chunk[..read_len]);
+                    drained_bytes += read_len;
+                }
+                JobPoll::NothingYet | JobPoll::NoJob => return,
+                JobPoll::Finished => {
+                    self.write_prompt();
+                    return;
+                }
+            }
+        }
+    }
+
+    fn run_job(&mut self, command_line: &str) {
+        if command_line.is_empty() {
+            self.write_line("run: usage: run <program> [args]");
+            return;
+        }
+
+        if let Err(error) = self.job.start(command_line) {
+            let _ = core::fmt::Write::write_fmt(
+                self,
+                format_args!("run: cannot start {}: error {}", command_line, error.0),
+            );
+            self.newline();
+        }
     }
 
     fn recall_last_command(&mut self) {
@@ -535,7 +608,12 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 };
                 self.det_flow_demo(count);
             }
-            _ => {}
+            "run" => self.run_job(args),
+            _ => {
+                let _ =
+                    core::fmt::Write::write_fmt(self, format_args!("{}: command not found", cmd));
+                self.newline();
+            }
         }
     }
 
@@ -554,21 +632,19 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 (input::ScrollDir::Up, input::ScrollAmount::Line) => self.scroll_up_lines(1),
                 (input::ScrollDir::Down, input::ScrollAmount::Line) => self.scroll_down_lines(1),
             },
+            // no stdin yet: while a job runs typed input is dropped, scrolling still works
+            input::InputAction::Backspace
+            | input::InputAction::Enter
+            | input::InputAction::Char(_)
+            | input::InputAction::ArrowUp
+                if self.job.is_running() => {}
             input::InputAction::Backspace => self.backspace(),
             input::InputAction::Enter => {
                 self.capture_last_command();
-                let last = self.last_command_buf.clone();
                 self.newline();
-                if !last.is_empty() {
-                    let s_trimmed = core::str::from_utf8(&last).unwrap_or("").trim();
-                    let (cmd, _) = match s_trimmed.find(' ') {
-                        Some(i) => s_trimmed.split_at(i),
-                        None => (s_trimmed, ""),
-                    };
-                    match cmd {
-                        "deb" | "flow" | "abc" | "clear" => self.execute_command(),
-                        _ => {}
-                    }
+                self.execute_command();
+                if !self.job.is_running() {
+                    self.write_prompt();
                 }
                 self.clamp_scroll();
             }

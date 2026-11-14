@@ -3,9 +3,10 @@ use crate::process::elf_loader::load_elf_from_path;
 use crate::process::process_manager::{BIGPROC_PID, PROCESS_MANAGER, ProcessSpawn};
 use crate::process::scheduler::{self, MAX_PRIORITY};
 use crate::process::syscall::{SyscallError, SyscallFrame};
-use crate::process::user_access::{copy_from_user, copy_user_path};
+use crate::process::user_access::{UserAccess, copy_from_user, copy_user_path, validate_user_ptr};
 use crate::process::{
-    FileDescriptor, MAX_ARGC, MAX_ARGV_BYTES, MAX_OPEN_FILES, MAX_PROCESS_NAME_LEN,
+    FileDescriptor, MAX_ARGC, MAX_ARGV_BYTES, MAX_OPEN_FILES, MAX_PROCESS_NAME_LEN, Process,
+    ProcessState,
 };
 use crate::util::cpuinfo::get_current_core_id;
 use bitflags::bitflags;
@@ -181,4 +182,72 @@ pub fn create_process(frame: &SyscallFrame) -> Result<u64, SyscallError> {
     let pid = process_manager.spawn(&spawn, &elf_info)?;
 
     Ok(pid as u64)
+}
+
+const NAME_RESERVED_BYTES: usize = 7;
+
+/// One ListProcesses entry, layout shared with rustspace `ProcessInfoFlat`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessInfoFlat {
+    pub pid: u64,
+    pub name_len: u8,
+    pub reserved: [u8; NAME_RESERVED_BYTES],
+    /// not NUL-terminated, name_len bytes are valid
+    pub name: [u8; MAX_PROCESS_NAME_LEN],
+}
+
+const PROCESS_INFO_FLAT_SIZE_BYTES: usize = core::mem::size_of::<ProcessInfoFlat>();
+const_assert!(PROCESS_INFO_FLAT_SIZE_BYTES == 48);
+
+impl ProcessInfoFlat {
+    fn from_process(process: &Process) -> Self {
+        debug_assert!(process.name.len() <= MAX_PROCESS_NAME_LEN);
+
+        let name_len = process.name.len();
+        let mut entry = Self {
+            pid: process.pid as u64,
+            name_len: name_len as u8,
+            reserved: [0; NAME_RESERVED_BYTES],
+            name: [0; MAX_PROCESS_NAME_LEN],
+        };
+        entry.name[..name_len].copy_from_slice(process.name.as_bytes());
+        entry
+    }
+}
+
+/// ListProcesses(out_ptr, out_size_bytes, start_index) -> entries written
+/// Lists the processes that have not terminated yet, start_index pages through them
+pub fn list_processes(frame: &SyscallFrame) -> Result<u64, SyscallError> {
+    let out_ptr = frame.arg1 as usize;
+    let capacity = frame.arg2 as usize / PROCESS_INFO_FLAT_SIZE_BYTES;
+    let start_index = frame.arg3 as usize;
+    if !validate_user_ptr(
+        out_ptr,
+        capacity * PROCESS_INFO_FLAT_SIZE_BYTES,
+        UserAccess::Write,
+    ) {
+        return Err(SyscallError::InvalidPtr);
+    }
+
+    let process_manager = PROCESS_MANAGER.lock();
+    let page = process_manager
+        .get_process_list()
+        .iter()
+        .filter(|process| process.state != ProcessState::Terminated)
+        .skip(start_index)
+        .take(capacity);
+
+    let mut written = 0;
+    for process in page {
+        // SAFETY: slot written is below capacity, inside the validated range
+        unsafe {
+            (out_ptr as *mut ProcessInfoFlat)
+                .byte_add(written * PROCESS_INFO_FLAT_SIZE_BYTES)
+                .write_unaligned(ProcessInfoFlat::from_process(process));
+        }
+        written += 1;
+    }
+
+    Ok(written as u64)
 }
