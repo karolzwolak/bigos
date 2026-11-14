@@ -2,8 +2,8 @@ use core::cmp::min;
 use core::sync::atomic::{AtomicU32, Ordering, fence};
 
 use crate::{
-    SYS_CLOSE_CHANNEL, SYS_CREATE_CHANNEL, USER_STACK_TOP, SyscallError, sys_futex_wait, sys_futex_wake, sys_write,
-    syscall_ret_check, syscall1, syscall2,
+    SYS_CLOSE_CHANNEL, SYS_CREATE_CHANNEL, SyscallError, USER_STACK_TOP, sys_futex_wait,
+    sys_futex_wake, sys_write, syscall_ret_check, syscall1, syscall2,
 };
 
 pub const PAGE_SIZE: usize = 4096;

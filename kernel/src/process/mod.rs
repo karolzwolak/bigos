@@ -96,7 +96,7 @@ impl ArgSlice {
 
 const STARTUP_INFO_SIZE_BYTES: usize = core::mem::size_of::<ProcessStartupInfo>();
 
-/// Per process values the kernel leaves at the very top of the user stack above the arguments. 
+/// Per process values the kernel leaves at the very top of the user stack above the arguments.
 /// Layout shared with rustspace `ProcessStartupInfo`
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
