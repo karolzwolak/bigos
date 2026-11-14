@@ -1,12 +1,14 @@
 use crate::data_structures::circular_buffer::{CircularBuffer, CircularBufferInfo};
+use crate::filesystem::vfs::FileSystemError;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::window::{WindowInfo, event_buffer_user_vaddr};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::memory::get_frame_allocator;
 use crate::memory::paging::PAGE_SIZE;
-use crate::memory::usermem::USER_MEM_MAX_ADDRESS;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
+use crate::process::file_syscalls;
 use crate::process::process_mem::FrameOwnership;
+use crate::process::user_access::{UserAccess, validate_user_ptr};
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
 use crate::util::msr::msr_write;
 use crate::{
@@ -25,12 +27,6 @@ use x86_64::structures::paging::PageTableFlags;
 
 const SYSCALL_DEBUG_PRINT: bool = false;
 
-#[inline]
-fn validate_user_ptr(ptr: usize, len: usize) -> bool {
-    let end = ptr.saturating_add(len);
-    ptr != 0 && end <= USER_MEM_MAX_ADDRESS && end >= ptr
-}
-
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallError {
@@ -41,7 +37,36 @@ pub enum SyscallError {
     InvalidFd = 5,
     NotImplemented = 6,
     InvalidArgument = 7,
+    NotFound = 8,
+    AlreadyExists = 9,
+    NotADirectory = 10,
+    IsADirectory = 11,
+    DirectoryNotEmpty = 12,
+    NoSpace = 13,
+    InvalidPath = 14,
+    IoError = 15,
+    TooManyOpenFiles = 16,
     SyscallNotFound = 999,
+}
+
+impl From<FileSystemError> for SyscallError {
+    fn from(error: FileSystemError) -> Self {
+        match error {
+            FileSystemError::NotFound => Self::NotFound,
+            FileSystemError::PermissionDenied => Self::PermissionDenied,
+            FileSystemError::FileExists => Self::AlreadyExists,
+            FileSystemError::IsDirectory => Self::IsADirectory,
+            FileSystemError::NotDirectory => Self::NotADirectory,
+            FileSystemError::DirectoryNotEmpty => Self::DirectoryNotEmpty,
+            FileSystemError::NoSpace | FileSystemError::DirectoryFull => Self::NoSpace,
+            FileSystemError::InvalidPath | FileSystemError::InvalidFilename => Self::InvalidPath,
+            FileSystemError::FileSizeExceeded | FileSystemError::OffsetPastEnd => {
+                Self::InvalidArgument
+            }
+            FileSystemError::DiskOpError | FileSystemError::IoError => Self::IoError,
+            FileSystemError::NotSupported => Self::NotImplemented,
+        }
+    }
 }
 
 impl SyscallError {
@@ -79,12 +104,6 @@ pub enum SyscallNumber {
     CreateFile = 26,
     CreateDir = 27,
     Delete = 28,
-    PinFile = 30,
-    UnpinFile = 31,
-    ReserveCache = 32,
-    EvictDirectory = 33,
-    GetCacheStats = 34,
-    FlushFileCache = 35,
 
     CreateCircularBuffer = 600,
 
@@ -309,6 +328,9 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             let fd = frame.arg1;
             let buf = frame.arg2 as *const u8;
             let count = frame.arg3 as usize;
+            if !validate_user_ptr(buf as usize, count, UserAccess::Read) {
+                return Err(SyscallError::InvalidPtr);
+            }
             let slice = unsafe { core::slice::from_raw_parts(buf, count) };
             if let Ok(s) = core::str::from_utf8(slice) {
                 if fd == 1 || fd == 2 {
@@ -573,7 +595,11 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
 
             serial_println_core!("syscall: GetWindowInfo: window_id={}", window_id);
 
-            if !validate_user_ptr(info_ptr, core::mem::size_of::<WindowInfo>()) {
+            if !validate_user_ptr(
+                info_ptr,
+                core::mem::size_of::<WindowInfo>(),
+                UserAccess::Write,
+            ) {
                 return Err(SyscallError::InvalidPtr);
             }
 
@@ -604,24 +630,16 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             Ok(0)
         }
 
-        file_syscall @ (SyscallNumber::OpenFile
-        | SyscallNumber::CloseFile
-        | SyscallNumber::ReadFile
-        | SyscallNumber::WriteFile
-        | SyscallNumber::StatFile
-        | SyscallNumber::ListDir
-        | SyscallNumber::CreateFile
-        | SyscallNumber::CreateDir
-        | SyscallNumber::Delete
-        | SyscallNumber::PinFile
-        | SyscallNumber::UnpinFile
-        | SyscallNumber::ReserveCache
-        | SyscallNumber::EvictDirectory
-        | SyscallNumber::GetCacheStats
-        | SyscallNumber::FlushFileCache) => {
-            serial_println_core!("{:?}: not implemented", file_syscall);
-            Err(SyscallError::NotImplemented)
-        }
+        SyscallNumber::OpenFile => file_syscalls::open_file(frame),
+        SyscallNumber::CloseFile => file_syscalls::close_file(frame),
+        SyscallNumber::ReadFile => file_syscalls::read_file(frame),
+        SyscallNumber::WriteFile => file_syscalls::write_file(frame),
+        SyscallNumber::CreateFile => file_syscalls::create_file(frame),
+        SyscallNumber::Delete => file_syscalls::delete(frame),
+
+        SyscallNumber::StatFile => file_syscalls::stat_file(frame),
+        SyscallNumber::ListDir => file_syscalls::list_dir(frame),
+        SyscallNumber::CreateDir => file_syscalls::create_dir(frame),
 
         SyscallNumber::CreateCircularBuffer => {
             let size_bytes = frame.arg1 as usize;
@@ -631,6 +649,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             if !validate_user_ptr(
                 buffer_info_out as usize,
                 core::mem::size_of::<CircularBufferInfo>(),
+                UserAccess::Write,
             ) {
                 serial_println_core!("CreateCircularBuffer: invalid buffer_info_out pointer");
                 return Err(SyscallError::InvalidPtr);
@@ -676,7 +695,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             let buffer_ptr = frame.arg1 as usize;
             let buffer_len = frame.arg2 as usize;
 
-            if !validate_user_ptr(buffer_ptr, buffer_len) {
+            if !validate_user_ptr(buffer_ptr, buffer_len, UserAccess::Write) {
                 serial_println_core!("sys_get_cpu_info: invalid pointer");
                 return Err(SyscallError::InvalidPtr);
             }
@@ -713,7 +732,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
         SyscallNumber::FutexWait => {
             let word_ptr = frame.arg1 as usize;
             let expected = frame.arg2 as u32;
-            if !validate_user_ptr(word_ptr, core::mem::size_of::<u32>()) {
+            if !validate_user_ptr(word_ptr, core::mem::size_of::<u32>(), UserAccess::Read) {
                 return Err(SyscallError::InvalidPtr);
             }
 

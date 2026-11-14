@@ -174,6 +174,7 @@ impl ProcessManager {
             children = process.children.clone();
             process.state = ProcessState::Terminated;
             process.exit_code = Some(exit_code);
+            process.close_all_fds();
 
             if process.memory_layout.top_page_table_phys.as_u64() != 0 {
                 let user_mgr = crate::memory::get_user_mem_mgr();

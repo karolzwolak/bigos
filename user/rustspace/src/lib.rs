@@ -27,7 +27,6 @@ pub const SYS_GET_WINDOW_SIZE: u64 = 14;
 pub const SYS_FOCUS_WINDOW: u64 = 15;
 pub const SYS_GET_WINDOW_INFO: u64 = 16;
 
-// Filesystem syscalls
 pub const SYS_OPEN_FILE: u64 = 20;
 pub const SYS_CLOSE_FILE: u64 = 21;
 pub const SYS_READ_FILE: u64 = 22;
@@ -48,17 +47,36 @@ pub const SYS_FUTEX_WAIT: u64 = 992;
 pub const SYS_FUTEX_WAKE: u64 = 993;
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
-pub const SYS_ECHO: u64 = 997;
+pub const SYS_GET_PID: u64 = 997;
+pub const SYS_ECHO: u64 = SYS_GET_PID;
 
-/// Mirrors the kernel's `SyscallError::NotImplemented.as_return()`.
 pub const SYSCALL_NOT_IMPLEMENTED: u64 = 6u64.wrapping_neg();
 
-/// A kernel `SyscallError` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyscallError(pub u64);
 
+impl SyscallError {
+    pub const INVALID_PTR: Self = Self(1);
+    pub const PERMISSION_DENIED: Self = Self(2);
+    pub const OUT_OF_MEMORY: Self = Self(3);
+    pub const PROCESS_NOT_FOUND: Self = Self(4);
+    pub const INVALID_FD: Self = Self(5);
+    pub const NOT_IMPLEMENTED: Self = Self(6);
+    pub const INVALID_ARGUMENT: Self = Self(7);
+    pub const NOT_FOUND: Self = Self(8);
+    pub const ALREADY_EXISTS: Self = Self(9);
+    pub const NOT_A_DIRECTORY: Self = Self(10);
+    pub const IS_A_DIRECTORY: Self = Self(11);
+    pub const DIRECTORY_NOT_EMPTY: Self = Self(12);
+    pub const NO_SPACE: Self = Self(13);
+    pub const INVALID_PATH: Self = Self(14);
+    pub const IO_ERROR: Self = Self(15);
+    pub const TOO_MANY_OPEN_FILES: Self = Self(16);
+    pub const SYSCALL_NOT_FOUND: Self = Self(999);
+}
+
 // No successful return (address, id, count, packed size) sets the top bit.
-fn check(ret: u64) -> Result<u64, SyscallError> {
+fn syscall_ret_check(ret: u64) -> Result<u64, SyscallError> {
     if (ret as i64) < 0 {
         Err(SyscallError(ret.wrapping_neg()))
     } else {
@@ -68,6 +86,9 @@ fn check(ret: u64) -> Result<u64, SyscallError> {
 
 pub const FD_FLAG_READ: u8 = 0x01;
 pub const FD_FLAG_WRITE: u8 = 0x02;
+
+/// Mirrors the kernel's `MAX_OPEN_FILES`
+pub const MAX_OPEN_FILES: usize = 32;
 
 pub const FS_NAME_LEN: usize = 16;
 
@@ -351,6 +372,11 @@ pub fn sys_futex_wake() {
 }
 
 #[inline(always)]
+pub fn sys_get_pid() -> usize {
+    unsafe { syscall1(SYS_GET_PID, 0) as usize }
+}
+
+#[inline(always)]
 pub fn sys_echo(val: u64) -> u64 {
     unsafe { syscall1(SYS_ECHO, val) }
 }
@@ -358,7 +384,7 @@ pub fn sys_echo(val: u64) -> u64 {
 /// Returns the base address of the allocated region.
 #[inline(always)]
 pub fn sys_allocate(size: usize) -> Result<u64, SyscallError> {
-    check(unsafe { syscall1(SYS_ALLOCATE, size as u64) })
+    syscall_ret_check(unsafe { syscall1(SYS_ALLOCATE, size as u64) })
 }
 
 #[inline(always)]
@@ -390,7 +416,7 @@ pub fn sys_create_window(width: u32, height: u32, x: i32, y: i32) -> Result<u32,
             0,
         )
     };
-    check(ret).map(|id| id as u32)
+    syscall_ret_check(ret).map(|id| id as u32)
 }
 
 /// # Safety
@@ -406,7 +432,8 @@ pub unsafe fn sys_destroy_window(window_id: u32) {
 /// Returns a pointer to the first pixel (XRGB8888 u32 array).
 #[inline(always)]
 pub fn sys_map_window_buffer(window_id: u32) -> Result<*mut u32, SyscallError> {
-    check(unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) }).map(|addr| addr as *mut u32)
+    syscall_ret_check(unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) })
+        .map(|addr| addr as *mut u32)
 }
 
 /// Signal the kernel that the back buffer is ready to be presented.
@@ -418,13 +445,13 @@ pub fn sys_present_window(window_id: u32) {
 /// Returns (width, height) of the window.
 #[inline(always)]
 pub fn sys_get_window_size(window_id: u32) -> Result<(u32, u32), SyscallError> {
-    check(unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) })
+    syscall_ret_check(unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) })
         .map(|packed| ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32))
 }
 
 // --- Filesystem wrappers ---
 
-/// Open a file or directory by path.
+/// Open a file by path.
 /// flags: FD_FLAG_READ | FD_FLAG_WRITE
 /// Returns a file descriptor index.
 #[inline(always)]
@@ -437,67 +464,101 @@ pub fn sys_open_file(path: &str, flags: u8) -> Result<usize, SyscallError> {
             flags as u64,
         )
     };
-    check(ret).map(|n| n as usize)
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Close a file descriptor.
-/// Returns true on success.
+/// Close a file descriptor
 #[inline(always)]
-pub fn sys_close_file(fd: usize) -> bool {
-    check(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) }).is_ok()
+pub fn sys_close_file(fd: usize) -> Result<(), SyscallError> {
+    syscall_ret_check(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) }).map(|_| ())
 }
 
-/// Read up to buf.len() bytes from an open fd
-/// Returns the number of bytes read.
+/// Reads up to buf.len() bytes from an open fd starting at offset_bytes, the kernel keeps
+/// no position per fd. Returns the number of bytes read, 0 at the end of the file
 #[inline(always)]
-pub fn sys_read_file(fd: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
+pub fn sys_read_file_at(
+    fd: usize,
+    offset_bytes: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_READ_FILE,
             fd as u64,
-            0,
+            offset_bytes as u64,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
         )
     };
-    check(ret).map(|n| n as usize)
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Read up to buf.len() bytes from an open fd at the current offset.
-/// Returns the number of bytes read.
+/// Writes buf to an open fd starting at offset_bytes, which may be at most the file size
+/// Returns the number of bytes written
 #[inline(always)]
-pub fn sys_read_file_at(fd: usize, offset: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
-    let ret = unsafe {
-        syscall4(
-            SYS_READ_FILE,
-            fd as u64,
-            offset as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    check(ret).map(|n| n as usize)
-}
-
-/// Write buf to an open fd at the current offset.
-/// Returns the number of bytes written.
-#[inline(always)]
-pub fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallError> {
+pub fn sys_write_file(fd: usize, offset_bytes: usize, buf: &[u8]) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_WRITE_FILE,
             fd as u64,
-            offset as u64,
+            offset_bytes as u64,
             buf.as_ptr() as u64,
             buf.len() as u64,
         )
     };
-    check(ret).map(|n| n as usize)
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Stat a path. Fills out_stat on success. Returns true on success.
+/// An open file with a position kept in userspace, closed on drop
+pub struct File {
+    pub fd: usize,
+    pub offset_bytes: usize,
+}
+
+impl File {
+    pub fn open(path: &str, flags: u8) -> Result<Self, SyscallError> {
+        let fd = sys_open_file(path, flags)?;
+
+        Ok(Self {
+            fd,
+            offset_bytes: 0,
+        })
+    }
+
+    /// Reads at the current position and advances it by the bytes read
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        let read = sys_read_file_at(self.fd, self.offset_bytes, buf)?;
+        self.offset_bytes += read;
+
+        Ok(read)
+    }
+
+    /// Writes at the current position and advances it by the bytes written
+    pub fn write(&mut self, buf: &[u8]) -> Result<usize, SyscallError> {
+        let written = sys_write_file(self.fd, self.offset_bytes, buf)?;
+        self.offset_bytes += written;
+
+        Ok(written)
+    }
+
+    pub fn read_at(&self, offset_bytes: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        sys_read_file_at(self.fd, offset_bytes, buf)
+    }
+
+    pub fn write_at(&self, offset_bytes: usize, buf: &[u8]) -> Result<usize, SyscallError> {
+        sys_write_file(self.fd, offset_bytes, buf)
+    }
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        let _ = sys_close_file(self.fd);
+    }
+}
+
+/// Stat a path, fills out_stat on success
 #[inline(always)]
-pub fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
+pub fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> Result<(), SyscallError> {
     let ret = unsafe {
         syscall3(
             SYS_STAT_FILE,
@@ -506,7 +567,7 @@ pub fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
             out_stat as *mut StatFlat as u64,
         )
     };
-    check(ret).is_ok()
+    syscall_ret_check(ret).map(|_| ())
 }
 
 #[inline(always)]
@@ -523,7 +584,7 @@ pub fn sys_create_circular_buffer(
             out_buffer_info as *mut CircularBufferInfo as u64,
         )
     };
-    check(ret).is_ok()
+    syscall_ret_check(ret).is_ok()
 }
 
 #[inline(always)]
@@ -535,13 +596,17 @@ pub fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> bool {
             out_info as *mut WindowInfo as u64,
         )
     };
-    check(ret).is_ok()
+    syscall_ret_check(ret).is_ok()
 }
 
-/// List the contents of a directory into out_entries.
-/// Returns the number of entries written.
+/// List the contents of a directory into out_entries, starting at entry start_index.
+/// Returns the number of entries written, fewer than out_entries.len() means the end
 #[inline(always)]
-pub fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> Result<usize, SyscallError> {
+pub fn sys_list_dir(
+    path: &str,
+    start_index: usize,
+    out_entries: &mut [DirEntryFlat],
+) -> Result<usize, SyscallError> {
     let byte_len = core::mem::size_of_val(out_entries);
     let ret = unsafe {
         syscall6(
@@ -550,32 +615,32 @@ pub fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> Result<usiz
             path.len() as u64,
             out_entries.as_mut_ptr() as u64,
             byte_len as u64,
-            0,
+            start_index as u64,
             0,
         )
     };
-    check(ret).map(|n| n as usize)
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Create a new file at the given path. Returns true on success.
+/// Create a new empty file at the given path
 #[inline(always)]
-pub fn sys_create_file(path: &str) -> bool {
+pub fn sys_create_file(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_CREATE_FILE, path.as_ptr() as u64, path.len() as u64, 0) };
-    check(ret).is_ok()
+    syscall_ret_check(ret).map(|_| ())
 }
 
-/// Create a new directory at the given path. Returns true on success.
+/// Create a new directory at the given path
 #[inline(always)]
-pub fn sys_create_dir(path: &str) -> bool {
+pub fn sys_create_dir(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_CREATE_DIR, path.as_ptr() as u64, path.len() as u64, 0) };
-    check(ret).is_ok()
+    syscall_ret_check(ret).map(|_| ())
 }
 
-/// Delete a file or directory at the given path. Returns true on success.
+/// Delete a file or directory at the given path
 #[inline(always)]
-pub fn sys_delete(path: &str) -> bool {
+pub fn sys_delete(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0) };
-    check(ret).is_ok()
+    syscall_ret_check(ret).map(|_| ())
 }
 
 #[inline(always)]
@@ -1004,8 +1069,6 @@ impl EventReader {
         Self { buffer }
     }
 
-    /// Current state, not the state at the event being processed. For that use
-    /// InputEvent::key_modifiers. All keys read as up while the window is unfocused
     pub fn is_key_down(&self, key: KeyCode) -> bool {
         let index = key as usize;
         let word = self.buffer.key_down[index / BITS_PER_WORD].load(Ordering::Acquire);
@@ -1136,104 +1199,6 @@ impl WindowInfo {
             front_buffer_offset: 0,
         }
     }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct CacheStatsFlat {
-    pub total_files: u64,
-    pub total_bytes: u64,
-    pub max_bytes: u64,
-    pub dirty_files: u64,
-}
-
-impl CacheStatsFlat {
-    pub const fn zeroed() -> Self {
-        Self {
-            total_files: 0,
-            total_bytes: 0,
-            max_bytes: 0,
-            dirty_files: 0,
-        }
-    }
-}
-
-// Cache importance enum
-#[repr(u8)]
-pub enum CacheImportance {
-    Minimal = 0,
-    Low = 1,
-    Normal = 2,
-    High = 3,
-    VeryHigh = 4,
-    Critical = 5,
-    Resident = 6,
-}
-
-// Cache syscall wrappers
-pub fn sys_pin_file(path: &str) -> u64 {
-    unsafe {
-        let path_bytes = path.as_bytes();
-        syscall4(
-            30,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            0,
-            0,
-        )
-    }
-}
-
-pub fn sys_unpin_file(path: &str) -> u64 {
-    unsafe {
-        let path_bytes = path.as_bytes();
-        syscall4(
-            31,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            0,
-            0,
-        )
-    }
-}
-
-pub fn sys_reserve_cache(path: &str, importance: u8) -> u64 {
-    unsafe {
-        let path_bytes = path.as_bytes();
-        syscall4(
-            32,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            importance as u64,
-            0,
-        )
-    }
-}
-
-pub fn sys_evict_directory(path: &str) -> u64 {
-    unsafe {
-        let path_bytes = path.as_bytes();
-        syscall4(
-            33,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            0,
-            0,
-        )
-    }
-}
-
-pub fn sys_get_cache_stats(stats: &mut CacheStatsFlat) -> bool {
-    unsafe {
-        let ret = syscall4(34, stats as *mut CacheStatsFlat as u64, 0, 0, 0);
-        ret == 0
-    }
-}
-
-/// Flush all dirty cached files belonging to the calling process's open fds.
-/// Returns true on success.
-pub fn sys_flush_file_cache() -> bool {
-    unsafe { syscall1(35, 0) == 0 }
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, PartialOrd, Ord)]

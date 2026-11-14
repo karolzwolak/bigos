@@ -119,7 +119,7 @@ impl Vfs {
     ) -> FileSystemResult<usize> {
         let node = self.open_file(path)?;
 
-        self.driver.read_file(node.node_id, offset, buffer)
+        self.read_node(node.node_id, offset, buffer)
     }
 
     pub fn write_file(
@@ -130,7 +130,26 @@ impl Vfs {
     ) -> FileSystemResult<usize> {
         let node = self.open_file(path)?;
 
-        let written = self.driver.write_file(node.node_id, offset, data)?;
+        self.write_node(node.node_id, offset, data)
+    }
+
+    /// Read through a node handle, as kept by an open file descriptor
+    pub fn read_node(
+        &mut self,
+        node_id: FileNodeHandle,
+        offset: usize,
+        buffer: &mut [u8],
+    ) -> FileSystemResult<usize> {
+        self.driver.read_file(node_id, offset, buffer)
+    }
+
+    pub fn write_node(
+        &mut self,
+        node_id: FileNodeHandle,
+        offset: usize,
+        data: &[u8],
+    ) -> FileSystemResult<usize> {
+        let written = self.driver.write_file(node_id, offset, data)?;
         self.driver.device.flush()?;
 
         Ok(written)

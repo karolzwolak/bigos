@@ -522,6 +522,11 @@ fn run_test(root: &Path, name: &str, iso: &Path, ovmf_code: &Path, ovmf_vars: &P
         result.serial.push_str(&report);
     }
 
+    // a failed test keeps its image for debugging
+    if result.passed {
+        let _ = fs::remove_file(&disk_image);
+    }
+
     result
 }
 

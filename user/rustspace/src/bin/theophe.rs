@@ -80,7 +80,7 @@ pub extern "C" fn main() -> ! {
 
     rustspace::println!("theophe: writing");
 
-    theophe.write_line("Theophe");
+    theophe.write_line("Welcome to bigOS");
     theophe.write_line("=======================");
 
     rustspace::println!("theophe: starting loop");

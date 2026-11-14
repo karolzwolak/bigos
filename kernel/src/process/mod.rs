@@ -3,19 +3,23 @@ pub const PROCESS_DEBUG_PRINT: bool = false;
 
 pub mod core_pool;
 pub mod elf_loader;
+pub mod file_syscalls;
 pub mod process_manager;
 pub mod process_mem;
 pub mod scheduler;
 pub mod shared_state;
 pub mod syscall;
 pub mod task;
+pub mod user_access;
 pub mod wait;
 
 pub use core_pool::{CORE_POOL, CorePool};
 pub use elf_loader::{ElfLoadError, ElfLoadInfo};
 pub use process_manager::ProcessManager;
 
+use crate::filesystem::fat32::{FileNodeHandle, INVALID_NODE_HANDLE};
 use crate::memory::usermem::USER_STACK_TOP;
+use crate::process::syscall::SyscallError;
 use crate::{
     data_structures::vector::Vec,
     process::{
@@ -71,12 +75,25 @@ pub struct ProcessResources {
 
 pub const FD_FLAG_READ: u8 = 0x01;
 pub const FD_FLAG_WRITE: u8 = 0x02;
+pub const FD_FLAGS_VALID_MASK: u8 = FD_FLAG_READ | FD_FLAG_WRITE;
+pub const MAX_OPEN_FILES: usize = 32;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileDescriptor {
-    pub node_id: usize,
-    //pub offset: usize,
+    pub node_id: FileNodeHandle,
     pub flags: u8,
+}
+
+impl FileDescriptor {
+    /// Placeholder of a free slot, no real file has this node id
+    pub const CLOSED: Self = Self {
+        node_id: INVALID_NODE_HANDLE,
+        flags: 0,
+    };
+
+    pub const fn is_open(&self) -> bool {
+        self.node_id != INVALID_NODE_HANDLE
+    }
 }
 
 pub struct Process {
@@ -86,7 +103,7 @@ pub struct Process {
     pub state: ProcessState,
     pub name: String,
     pub children: Vec<PID>,
-    pub file_descriptors: Vec<FileDescriptor>,
+    pub file_descriptors: [FileDescriptor; MAX_OPEN_FILES],
 
     pub resources: ProcessResources,
     pub exit_code: Option<i32>,
@@ -98,6 +115,41 @@ pub struct Process {
 unsafe impl Send for Process {}
 
 impl Process {
+    /// Takes the lowest free slot, so a closed number is reused first
+    pub fn open_fd(&mut self, node_id: FileNodeHandle, flags: u8) -> Result<usize, SyscallError> {
+        debug_assert!(node_id != INVALID_NODE_HANDLE);
+        debug_assert!(flags & !FD_FLAGS_VALID_MASK == 0);
+
+        let Some(fd) = self
+            .file_descriptors
+            .iter()
+            .position(|slot| !slot.is_open())
+        else {
+            return Err(SyscallError::TooManyOpenFiles);
+        };
+        self.file_descriptors[fd] = FileDescriptor { node_id, flags };
+
+        Ok(fd)
+    }
+
+    pub fn get_fd(&self, fd: usize) -> Result<FileDescriptor, SyscallError> {
+        match self.file_descriptors.get(fd) {
+            Some(descriptor) if descriptor.is_open() => Ok(*descriptor),
+            _ => Err(SyscallError::InvalidFd),
+        }
+    }
+
+    pub fn close_fd(&mut self, fd: usize) -> Result<(), SyscallError> {
+        self.get_fd(fd)?;
+        self.file_descriptors[fd] = FileDescriptor::CLOSED;
+
+        Ok(())
+    }
+
+    pub fn close_all_fds(&mut self) {
+        self.file_descriptors = [FileDescriptor::CLOSED; MAX_OPEN_FILES];
+    }
+
     pub fn new(
         pid: usize,
         parent_pid: usize,
@@ -117,7 +169,7 @@ impl Process {
             state: ProcessState::Ready,
             name,
             children: Vec::new(),
-            file_descriptors: Vec::new(),
+            file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
             resources,
             exit_code: None,
             is_out,
@@ -264,7 +316,7 @@ impl Process {
             state: ProcessState::Ready,
             name: String::from(name),
             children: Vec::new(),
-            file_descriptors: Vec::new(),
+            file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
             resources: ProcessResources::default(),
             exit_code: None,
             is_out: true,

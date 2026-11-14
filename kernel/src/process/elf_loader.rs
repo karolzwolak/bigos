@@ -22,6 +22,10 @@ pub const WORKER_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/worker");
 pub const SLEEPER_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/sleeper");
+pub const FS_TEST_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_test");
+pub const FS_WORKER_ELF: &[u8] =
+    include_bytes!("../../../user/rustspace/target/x86_64-user/debug/fs_worker");
 pub const PINGPONG_ELF: &[u8] =
     include_bytes!("../../../user/rustspace/target/x86_64-user/debug/pingpong");
 pub const FPUSTRESS_ELF: &[u8] =
