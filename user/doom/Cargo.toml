@@ -1,0 +1,19 @@
+# GPL-2.0: holds the vendored doomgeneric C sources, see LICENSE
+[workspace]
+
+[package]
+name = "doom"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "doom"
+path = "src/main.rs"
+
+[[bin]]
+name = "libctest"
+path = "src/bin/libctest.rs"
+
+[dependencies]
+rustspace = { path = "../rustspace" }

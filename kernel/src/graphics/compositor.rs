@@ -335,6 +335,7 @@ impl Compositor {
             return;
         }
 
+        let was_focused = self.currently_focused_window.load(Ordering::Acquire) == window_id;
         let (owner_pid, event_buffer_phys, buffer_page_count) = {
             let mut windows = self.windows.write();
             let Some(window) = windows.get_mut(window_id as usize) else {
@@ -357,6 +358,11 @@ impl Compositor {
             )
         };
         self.free_window_ids.lock().push(window_id);
+
+        // the dead window kept the focus, without this no window would get keys again
+        if was_focused {
+            self.focus_topmost_visible_window();
+        }
 
         let user_memory_manager = crate::memory::get_user_mem_mgr();
         let mut pm = crate::process::process_manager::PROCESS_MANAGER.lock();
@@ -389,6 +395,30 @@ impl Compositor {
         if !event_buffer_phys.is_null() {
             frame_allocator.deallocate_frame(PhysFrame::containing_address(event_buffer_phys));
         }
+    }
+
+    fn focus_topmost_visible_window(&self) {
+        let topmost_window_id = self
+            .windows
+            .read()
+            .iter()
+            .filter(|window| window.is_visible)
+            .max_by_key(|window| window.z_index)
+            .map_or(INVALID_WINDOW_ID, |window| window.id);
+
+        if topmost_window_id != INVALID_WINDOW_ID {
+            self.focus_window(topmost_window_id);
+            return;
+        }
+
+        self.currently_focused_window
+            .store(INVALID_WINDOW_ID, Ordering::Release);
+        // SAFETY: a window existed, so userspace and the shared state are initialized, and the
+        // reference ends with this function like the one in focus_window
+        let shared_program_data = unsafe { get_shared_program_data_buffer_mut() };
+        shared_program_data
+            .focused_window_id
+            .store(INVALID_WINDOW_ID, Ordering::Release);
     }
 
     /// Run before the process manager lock is taken, window cleanup locks it itself

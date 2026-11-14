@@ -138,7 +138,8 @@ fn newest_modification_time(path: &Path) -> std::time::SystemTime {
 }
 
 const USER_BINS_DIR: &str = "target/user_bins";
-const USER_BUILD_DIR: &str = "user/rustspace/target/x86_64-user/debug";
+const DOOM_WAD_SOURCE: &str = "storage/doom1.wad";
+const DOOM_WAD_DISK_NAME: &str = "DOOM1.WAD";
 const DISK_STAGING_DIR: &str = "target/disk_staging";
 const DISK_BIN_DIR: &str = "BIN";
 const HEADER_ONLY_ELF_NAME: &str = "HDRONLY.ELF";
@@ -225,6 +226,13 @@ fn stage_disk_contents(root: &Path, template_dir: &Path, staging_dir: &Path, is_
             .unwrap_or_else(|e| panic!("stripped program {name} is missing: {e}"));
     }
 
+    // the WAD is user supplied
+    let wad_source = root.join(DOOM_WAD_SOURCE);
+    if wad_source.exists() {
+        fs::copy(&wad_source, staging_dir.join(DOOM_WAD_DISK_NAME))
+            .unwrap_or_else(|e| panic!("can't copy {}: {e}", wad_source.display()));
+    }
+
     if is_test {
         let source = fs::read(stripped_dir.join(TRUNCATION_SOURCE_BIN)).unwrap();
         fs::write(
@@ -251,16 +259,21 @@ fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u
     let script_time = newest_modification_time(&script);
     let template_time = newest_modification_time(&template_dir)
         .max(script_time)
-        .max(newest_modification_time(&root.join(USER_BINS_DIR)));
-    if image_time.is_ok_and(|image_time| image_time >= template_time) {
-        return;
-    }
+        .max(newest_modification_time(&root.join(USER_BINS_DIR)))
+        .max(newest_modification_time(&root.join(DOOM_WAD_SOURCE)));
 
     let image_stem = output_path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .expect("disk image path has a file name");
     let staging_dir = root.join(DISK_STAGING_DIR).join(image_stem);
+    // a removed WAD leaves no newer file behind, compare against the last staging instead
+    let wad_changed =
+        staging_dir.join(DOOM_WAD_DISK_NAME).exists() != root.join(DOOM_WAD_SOURCE).exists();
+    if !wad_changed && image_time.is_ok_and(|image_time| image_time >= template_time) {
+        return;
+    }
+
     stage_disk_contents(root, &template_dir, &staging_dir, pattern_bytes > 0);
 
     let mut cmd = Command::new(&script);
@@ -336,6 +349,9 @@ const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
+
+/// Tests that need storage/doom1.wad on the test image, reported as skipped without it
+const TESTS_NEEDING_WAD: [&str; 1] = ["test_user_doom"];
 
 const TEST_SUCCESS_EXIT: i32 = 33;
 const TEST_FAILED_EXIT: i32 = 35;
@@ -662,6 +678,10 @@ fn run_tests(root: &Path, args: &[String]) {
         eprintln!("No tests matched the given filter(s).");
         std::process::exit(1);
     }
+    let has_wad = root.join(DOOM_WAD_SOURCE).exists();
+    let (bins, skipped_names): (Vec<String>, Vec<String>) = bins
+        .into_iter()
+        .partition(|name| has_wad || !TESTS_NEEDING_WAD.contains(&name.as_str()));
     ensure_limine(root);
     build_user(root);
     build_disk_images(root);
@@ -677,6 +697,9 @@ fn run_tests(root: &Path, args: &[String]) {
         kernel_max_cores(root)
     );
     println!("{BOLD}QEMU smp:{RESET} {}", smp);
+    for name in &skipped_names {
+        println!("  {BOLD}{name}{RESET} ... {YELLOW}skipped{RESET} (no {DOOM_WAD_SOURCE})");
+    }
     for name in &bins {
         print!("  {BOLD}{name}{RESET} ... ");
         std::io::stdout().flush().unwrap();
@@ -720,13 +743,17 @@ fn run_tests(root: &Path, args: &[String]) {
     println!();
     if failed_names.is_empty() {
         println!(
-            "{GREEN}{BOLD}test result: ok.{RESET} {} passed; 0 failed (logs in test_logs/)",
-            passed_names.len()
+            "{GREEN}{BOLD}test result: ok.{RESET} {} passed; 0 failed; {} skipped (logs in test_logs/)",
+            passed_names.len(),
+            skipped_names.len()
         );
     } else {
         println!("{BOLD}tests:{RESET}");
         for name in &passed_names {
             println!("  {GREEN}ok{RESET}    {name}");
+        }
+        for name in &skipped_names {
+            println!("  {YELLOW}skipped{RESET} {name}");
         }
         for (name, exit_code) in &failed_names {
             let code_str = match exit_code {
@@ -739,32 +766,79 @@ fn run_tests(root: &Path, args: &[String]) {
         }
         println!();
         println!(
-            "{RED}{BOLD}test result: FAILED.{RESET} {} passed; {} failed",
+            "{RED}{BOLD}test result: FAILED.{RESET} {} passed; {} failed; {} skipped",
             passed_names.len(),
-            failed_names.len()
+            failed_names.len(),
+            skipped_names.len()
         );
         std::process::exit(1);
     }
 }
 
-const RUSTSPACE_TARGET_ARGS: [&str; 6] = [
-    "-Z",
-    "build-std=core,alloc",
-    "-Z",
-    "json-target-spec",
-    "--target",
-    "x86_64-user.json",
+/// A standalone userspace cargo package built for the x86_64-user target
+struct UserCrate {
+    dir: &'static str,
+    /// relative to dir
+    target_spec: &'static str,
+    /// its build script compiles C
+    needs_clang: bool,
+}
+
+impl UserCrate {
+    /// cargo subcommand in the crate directory with the userspace target flags
+    fn cargo(&self, root: &Path, subcommand: &str) -> Command {
+        let mut cmd = Command::new("cargo");
+        cmd.arg(subcommand)
+            .args(USER_TARGET_ARGS)
+            .args(["--target", self.target_spec])
+            .current_dir(root.join(self.dir));
+
+        cmd
+    }
+
+    fn manifest(&self) -> String {
+        format!("{}/{CARGO_MANIFEST}", self.dir)
+    }
+
+    fn bin_source_dir(&self) -> String {
+        format!("{}/{USER_BIN_SOURCE_SUBDIR}", self.dir)
+    }
+}
+
+// rustspace first, doom depends on it
+const USER_CRATES: [UserCrate; 2] = [
+    UserCrate {
+        dir: "user/rustspace",
+        target_spec: "x86_64-user.json",
+        needs_clang: false,
+    },
+    UserCrate {
+        dir: "user/doom",
+        target_spec: "../rustspace/x86_64-user.json",
+        needs_clang: true,
+    },
 ];
 
+const USER_TARGET_ARGS: [&str; 4] = ["-Z", "build-std=core,alloc", "-Z", "json-target-spec"];
+const USER_BUILD_SUBDIR: &str = "target/x86_64-user/debug";
+const USER_BIN_SOURCE_SUBDIR: &str = "src/bin";
+const CARGO_MANIFEST: &str = "Cargo.toml";
+
 const MAX_BIN_NAME_LENGTH: usize = 8;
-const USER_BIN_MANIFEST: &str = "user/rustspace/Cargo.toml";
-const USER_BIN_SOURCE_DIR: &str = "user/rustspace/src/bin";
 const BIN_SECTION_HEADER: &str = "[[bin]]";
 const NAME_KEY: &str = "name";
 
-/// Names of every userspace program, from the [[bin]] tables of the rustspace manifest
+/// Names of every userspace program, over all user crates
 fn user_bin_names(root: &Path) -> Vec<String> {
-    let path = root.join(USER_BIN_MANIFEST);
+    USER_CRATES
+        .iter()
+        .flat_map(|user_crate| crate_bin_names(root, user_crate))
+        .collect()
+}
+
+/// Names of the programs of one user crate, from the [[bin]] tables of its manifest
+fn crate_bin_names(root: &Path, user_crate: &UserCrate) -> Vec<String> {
+    let path = root.join(user_crate.manifest());
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
 
@@ -803,19 +877,32 @@ fn is_valid_bin_name(name: &str) -> bool {
 /// a source file in src/bin has no [[bin]] entry (cargo would build it under its file name and
 /// it would miss the disk image)
 fn check_user_bin_names(root: &Path) {
-    let declared = user_bin_names(root);
-    let source_dir = root.join(USER_BIN_SOURCE_DIR);
-    for entry in fs::read_dir(&source_dir)
-        .unwrap_or_else(|e| panic!("can't read {}: {e}", source_dir.display()))
-        .flatten()
-    {
-        let file_name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(stem) = file_name.strip_suffix(".rs")
-            && !declared.iter().any(|name| name == stem)
+    for user_crate in &USER_CRATES {
+        let declared = crate_bin_names(root, user_crate);
+        let source_dir_name = user_crate.bin_source_dir();
+        let source_dir = root.join(&source_dir_name);
+        for entry in fs::read_dir(&source_dir)
+            .unwrap_or_else(|e| panic!("can't read {}: {e}", source_dir.display()))
+            .flatten()
         {
-            eprintln!(
-                "error: {USER_BIN_SOURCE_DIR}/{file_name} has no [[bin]] entry named '{stem}' in {USER_BIN_MANIFEST}"
-            );
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = file_name.strip_suffix(".rs")
+                && !declared.iter().any(|name| name == stem)
+            {
+                eprintln!(
+                    "error: {source_dir_name}/{file_name} has no [[bin]] entry named '{stem}' in {}",
+                    user_crate.manifest()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let declared = user_bin_names(root);
+    for (index, name) in declared.iter().enumerate() {
+        // all programs share /BIN on the disk image
+        if declared[..index].contains(name) {
+            eprintln!("error: userspace program name '{name}' is declared by two user crates");
             std::process::exit(1);
         }
     }
@@ -858,41 +945,57 @@ fn strip_user_bins(root: &Path) {
     let output_dir = root.join(USER_BINS_DIR);
     fs::create_dir_all(&output_dir).unwrap();
 
-    for name in user_bin_names(root) {
-        let input = root.join(USER_BUILD_DIR).join(&name);
-        let output = output_dir.join(&name);
-        let input_time = fs::metadata(&input)
-            .and_then(|meta| meta.modified())
-            .unwrap_or_else(|e| panic!("{} was not built: {e}", input.display()));
-        let output_time = fs::metadata(&output).and_then(|meta| meta.modified());
-        if output_time.is_ok_and(|output_time| output_time >= input_time) {
-            continue;
-        }
+    for user_crate in &USER_CRATES {
+        let build_dir = root.join(user_crate.dir).join(USER_BUILD_SUBDIR);
+        for name in crate_bin_names(root, user_crate) {
+            let input = build_dir.join(&name);
+            let output = output_dir.join(&name);
+            let input_time = fs::metadata(&input)
+                .and_then(|meta| meta.modified())
+                .unwrap_or_else(|e| panic!("{} was not built: {e}", input.display()));
+            let output_time = fs::metadata(&output).and_then(|meta| meta.modified());
+            if output_time.is_ok_and(|output_time| output_time >= input_time) {
+                continue;
+            }
 
-        run_quiet(
-            Command::new(&objcopy)
-                .arg("--strip-debug")
-                .arg(&input)
-                .arg(&output),
+            run_quiet(
+                Command::new(&objcopy)
+                    .arg("--strip-debug")
+                    .arg(&input)
+                    .arg(&output),
+            );
+        }
+    }
+}
+
+/// Stops the build with a clear message when clang is not on PATH
+fn ensure_clang(user_crate: &UserCrate) {
+    let found = Command::new("clang")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !found {
+        eprintln!(
+            "error: {} compiles C and needs clang on PATH (apt install clang)",
+            user_crate.dir
         );
+        std::process::exit(1);
     }
 }
 
 fn build_user(root: &Path) {
     check_user_bin_names(root);
     println!("Building user programs…");
-    let user_dir = root.join("user");
-    let rustspace_dir = user_dir.join("rustspace");
-    if rustspace_dir.join("Cargo.toml").exists() {
-        println!("Building Rust userspace…");
+    for user_crate in &USER_CRATES {
+        println!("Building {}…", user_crate.dir);
+        if user_crate.needs_clang {
+            ensure_clang(user_crate);
+        }
         let _ = Command::new("cargo")
             .args(["fmt"])
-            .current_dir(&rustspace_dir)
+            .current_dir(root.join(user_crate.dir))
             .status();
-        run(Command::new("cargo")
-            .arg("build")
-            .args(RUSTSPACE_TARGET_ARGS)
-            .current_dir(&rustspace_dir));
+        run(&mut user_crate.cargo(root, "build"));
     }
     strip_user_bins(root);
 }
@@ -1238,13 +1341,12 @@ fn fmt(root: &Path, extra: &[String]) {
             .args(extra)
             .current_dir(dir));
     }
-    // Also fmt rustspace separately (outside workspace)
-    let rustspace = root.join("user/rustspace");
-    if rustspace.join("Cargo.toml").exists() {
+    // the user crates are standalone workspaces
+    for user_crate in &USER_CRATES {
         run(Command::new("cargo")
             .args(["fmt", "--all"])
             .args(extra)
-            .current_dir(&rustspace));
+            .current_dir(root.join(user_crate.dir)));
     }
 }
 
@@ -1268,19 +1370,19 @@ fn clippy(root: &Path, extra: &[String]) {
             .args(lint_args)
             .current_dir(dir));
     }
-    run(Command::new("cargo")
-        .arg("clippy")
-        .args(RUSTSPACE_TARGET_ARGS)
-        .args(cargo_args)
-        .arg("--")
-        .args(["-D", "warnings"])
-        .args(lint_args)
-        .current_dir(root.join("user/rustspace")));
+    for user_crate in &USER_CRATES {
+        run(user_crate
+            .cargo(root, "clippy")
+            .args(cargo_args)
+            .arg("--")
+            .args(["-D", "warnings"])
+            .args(lint_args));
+    }
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  disk         Build the user programs and the FAT32 disk images in storage/ when out of date\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + rustspace)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  disk         Build the user programs and the FAT32 disk images in storage/ when out of date\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + user crates)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + user crates)  [cargo args | -- lint flags]\n\nUser crates: user/rustspace, user/doom (needs clang). Put the shareware DOOM1.WAD at\n{DOOM_WAD_SOURCE} to stage it as /{DOOM_WAD_DISK_NAME} on the disk images\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 
