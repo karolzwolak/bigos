@@ -45,6 +45,7 @@ pub const SYS_SLEEP_MS: u64 = 990;
 pub const SYS_WAIT_FOR_INPUT: u64 = 991;
 pub const SYS_FUTEX_WAIT: u64 = 992;
 pub const SYS_FUTEX_WAKE: u64 = 993;
+pub const SYS_GET_HANDOFF_COUNT: u64 = 995;
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 pub const SYS_GET_PID: u64 = 997;
@@ -408,6 +409,13 @@ pub fn sys_futex_wake() {
 #[inline(always)]
 pub fn sys_get_pid() -> usize {
     unsafe { syscall1(SYS_GET_PID, 0) as usize }
+}
+
+/// Returns how many runs of the calling task began right after another task ran on that
+/// core, a growing count proves its registers and fpu state went through the save areas
+#[inline(always)]
+pub fn sys_get_handoff_count() -> u64 {
+    unsafe { syscall1(SYS_GET_HANDOFF_COUNT, 0) }
 }
 
 #[inline(always)]

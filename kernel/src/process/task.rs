@@ -133,6 +133,9 @@ pub struct TaskSlot {
     pub child_policy_request: AtomicU8,
     pub cpu_ticks: AtomicU64,
     pub core_migration_count: AtomicU32,
+    /// Runs that began on a core where a different task ran last, so the registers
+    /// and the fpu state really came back from the save areas
+    pub handoff_count: AtomicU32,
     pub cr3: AtomicU64,
     pub kernel_stack_top: AtomicU64,
     /// Next slot in the run queue queue the task sits in
@@ -159,6 +162,7 @@ impl TaskSlot {
             child_policy_request: AtomicU8::new(ChildPolicy::KillChildren as u8),
             cpu_ticks: AtomicU64::new(0),
             core_migration_count: AtomicU32::new(0),
+            handoff_count: AtomicU32::new(0),
             cr3: AtomicU64::new(0),
             kernel_stack_top: AtomicU64::new(0),
             next: AtomicU16::new(INVALID_SLOT),
@@ -214,6 +218,7 @@ pub fn allocate_task_slot(pid: PID, priority: u8, home_core: u8, cr3: u64) -> Op
             .store(ChildPolicy::KillChildren as u8, Ordering::Relaxed);
         task.cpu_ticks.store(0, Ordering::Relaxed);
         task.core_migration_count.store(0, Ordering::Relaxed);
+        task.handoff_count.store(0, Ordering::Relaxed);
         task.cr3.store(cr3, Ordering::Relaxed);
         task.next.store(INVALID_SLOT, Ordering::Relaxed);
         task.kernel_stack_top

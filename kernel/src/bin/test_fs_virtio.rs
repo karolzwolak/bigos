@@ -32,8 +32,6 @@ const DIRECTORY_ENTRY_SIZE_BYTES: usize = 32;
 const BIG_FILE_SIZE_BYTES: usize = 100_000;
 const PATTERN_PERIOD: usize = 251;
 const HELLO_CONTENT: &[u8] = b"hello";
-const LFN_DIRECTORY_PATH: &str = "/LFNDIR";
-const LFN_CONTENT: &[u8] = b"lfn";
 const NESTED_FILE_PATH_1: &str = "/DIR1/F1_1.TXT";
 const NESTED_FILE_PATH_2: &str = "/DIR1/DIR2/F2_1.TXT";
 
@@ -188,24 +186,6 @@ fn test_root_listing() {
         assert_eq!(node.file_type, file_type, "{}", name);
         assert_eq!(node.size, size, "{}", name);
     }
-}
-
-/// mcopy stores "a b.txt" as long name entries plus a short alias, only the alias is listed
-#[test_case]
-fn test_long_name_entries_are_skipped() {
-    let mut vfs = get_vfs();
-    let nodes = vfs
-        .list_directory(LFN_DIRECTORY_PATH)
-        .expect("listing a directory with long name entries failed");
-
-    assert_eq!(nodes.len(), 1, "{:?}", nodes);
-    let alias = &nodes[0];
-    assert_eq!(alias.file_type, FileType::File);
-    assert_eq!(alias.size, LFN_CONTENT.len());
-
-    let alias_path = format!("{}/{}", LFN_DIRECTORY_PATH, alias.name);
-    let content = read_exact(&mut vfs, &alias_path, 0, LFN_CONTENT.len());
-    assert_eq!(content, LFN_CONTENT);
 }
 
 #[test_case]

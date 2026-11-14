@@ -799,7 +799,7 @@ fn is_valid_bin_name(name: &str) -> bool {
     length_ok && chars_ok
 }
 
-/// Stops the build when a program name cannot be a FAT 8.3 short name (no LFN support), or when
+/// Stops the build when a program name cannot be a FAT 8.3 short name or when
 /// a source file in src/bin has no [[bin]] entry (cargo would build it under its file name and
 /// it would miss the disk image)
 fn check_user_bin_names(root: &Path) {

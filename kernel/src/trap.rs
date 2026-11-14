@@ -130,6 +130,8 @@ pub fn is_user_frame(frame: &TrapFrame) -> bool {
 
 /// Defines a naked interrupt entry: pushes every general register, calls
 /// `handler(&mut TrapFrame)`, runs the common return path and returns with iretq
+/// An interrupt keeps the DF of the interrupted code, so the entry clears it for the
+/// Rust handler and iretq brings the user value back
 macro_rules! interrupt_stub {
     ($stub_name:ident, $handler:path) => {
         /// # Safety
@@ -138,6 +140,7 @@ macro_rules! interrupt_stub {
         #[unsafe(naked)]
         pub unsafe extern "C" fn $stub_name() {
             core::arch::naked_asm!(
+                "cld",
                 $crate::trap::push_all_gprs!(),
                 "mov rdi, rsp",
                 "call {handler}",

@@ -3,28 +3,126 @@
 
 use core::arch::asm;
 use core::arch::x86_64::_rdtsc;
-use rustspace::{SYS_YIELD, sys_exit, sys_write};
+use core::mem::offset_of;
+use rustspace::{
+    CpuInfoFlat, SYS_YIELD, sys_exit, sys_get_cpu_info, sys_get_handoff_count, sys_get_pid,
+    sys_write, sys_yield,
+};
 
 const XMM_REGISTER_COUNT: usize = 16;
-const YIELD_ROUNDS: u64 = 10;
+
+// reset values, every FP exception masked
 const MXCSR_DEFAULT: u32 = 0x1F80;
+const FCW_DEFAULT: u16 = 0x37F;
+
+const MXCSR_ROUNDING_SHIFT: u32 = 13;
+const MXCSR_FLUSH_TO_ZERO: u32 = 1 << 15;
+const FCW_ROUNDING_SHIFT: u32 = 10;
+const FCW_PRECISION_MASK: u16 = 0b11 << 8;
+const FCW_PRECISION_DOUBLE: u16 = 0b10 << 8;
+const ROUNDING_MODE_MASK: usize = 0b11;
+
+const MS_PER_SECOND: u64 = 1000;
+/// Longer than a scheduler slice, so a waiting task preempts the spin
+const SPIN_DURATION_MS: u64 = 150;
+const HANDOFF_TIMEOUT_MS: u64 = 5000;
+/// Keeps the core busy once the probes are done, an idle core would steal the partner
+/// of a task that still probes and leave it alone on its core
+const LINGER_MS: u64 = 3000;
+/// Probes that must see another task run on the core while the state is loaded
+const REQUIRED_HANDOFFS: u32 = 3;
 
 const EXIT_CODE_PANIC: i32 = 1;
 const EXIT_CODE_DIRTY_INITIAL_XMM: i32 = 2;
 const EXIT_CODE_BAD_INITIAL_MXCSR: i32 = 3;
-const EXIT_CODE_XMM_LOST_ACROSS_YIELD: i32 = 4;
-const EXIT_CODE_GPR_LOST_ACROSS_YIELD: i32 = 5;
+const EXIT_CODE_FPU_LOST_ACROSS_YIELD: i32 = 4;
+const EXIT_CODE_BAD_INITIAL_FCW: i32 = 5;
+const EXIT_CODE_FPU_LOST_ACROSS_PREEMPTION: i32 = 6;
+const EXIT_CODE_NO_HANDOFF: i32 = 7;
 
-const GPR_PROBE_COUNT: usize = 4;
-const GPR_PROBE_ROUND_STRIDE: u64 = 0x0101_0101_0101_0101;
-
+/// xmm0-15 plus the SSE and x87 control words, the layout the asm macros store
 #[repr(C, align(16))]
 #[derive(Clone, Copy, PartialEq)]
-struct XmmBank {
-    registers: [u128; XMM_REGISTER_COUNT],
+struct FpuBank {
+    xmm: [u128; XMM_REGISTER_COUNT],
+    mxcsr: u32,
+    fcw: u16,
 }
 
-macro_rules! store_xmm_bank {
+impl FpuBank {
+    const fn zeroed() -> Self {
+        Self {
+            xmm: [0; XMM_REGISTER_COUNT],
+            mxcsr: 0,
+            fcw: 0,
+        }
+    }
+
+    /// Unique per process and round, the register index sits in the low bits so a
+    /// swapped or stale register shows
+    fn for_round(process_seed: u128, round: u32, mxcsr: u32, fcw: u16) -> Self {
+        let mut bank = Self {
+            xmm: [0; XMM_REGISTER_COUNT],
+            mxcsr,
+            fcw,
+        };
+
+        for (register_index, value) in bank.xmm.iter_mut().enumerate() {
+            *value = (process_seed << 64) | ((round as u128) << 32) | register_index as u128;
+        }
+
+        bank
+    }
+}
+
+const MXCSR_OFFSET: usize = offset_of!(FpuBank, mxcsr);
+const FCW_OFFSET: usize = offset_of!(FpuBank, fcw);
+
+/// What a new task must start with, the asm also loads its control words back after a probe
+static DEFAULT_FPU_BANK: FpuBank = FpuBank {
+    xmm: [0; XMM_REGISTER_COUNT],
+    mxcsr: MXCSR_DEFAULT,
+    fcw: FCW_DEFAULT,
+};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PhaseResult {
+    Passed,
+    StateLost,
+    NoHandoff,
+}
+
+#[derive(Clone, Copy)]
+enum Phase {
+    Yield,
+    Preemption,
+}
+
+// every message goes out in one write, so the lines of parallel instances do not interleave
+impl Phase {
+    fn state_lost_message(self) -> &'static [u8] {
+        match self {
+            Phase::Yield => b"fpustress: FAIL fpu state lost across yield\n",
+            Phase::Preemption => b"fpustress: FAIL fpu state lost across preemption\n",
+        }
+    }
+
+    fn no_handoff_message(self) -> &'static [u8] {
+        match self {
+            Phase::Yield => b"fpustress: FAIL no other task ran during yield\n",
+            Phase::Preemption => b"fpustress: FAIL no other task ran during preemption\n",
+        }
+    }
+
+    fn state_lost_exit_code(self) -> i32 {
+        match self {
+            Phase::Yield => EXIT_CODE_FPU_LOST_ACROSS_YIELD,
+            Phase::Preemption => EXIT_CODE_FPU_LOST_ACROSS_PREEMPTION,
+        }
+    }
+}
+
+macro_rules! store_fpu_bank {
     ($base:literal) => {
         concat!(
             "movdqa [",
@@ -75,11 +173,17 @@ macro_rules! store_xmm_bank {
             "movdqa [",
             $base,
             " + 0xf0], xmm15\n",
+            "stmxcsr [",
+            $base,
+            " + {mxcsr_offset}]\n",
+            "fnstcw [",
+            $base,
+            " + {fcw_offset}]\n",
         )
     };
 }
 
-macro_rules! load_xmm_bank {
+macro_rules! load_fpu_bank {
     ($base:literal) => {
         concat!(
             "movdqa xmm0, [",
@@ -130,6 +234,22 @@ macro_rules! load_xmm_bank {
             "movdqa xmm15, [",
             $base,
             " + 0xf0]\n",
+            "ldmxcsr [",
+            $base,
+            " + {mxcsr_offset}]\n",
+            "fldcw [",
+            $base,
+            " + {fcw_offset}]\n",
+        )
+    };
+}
+
+// Rust code assumes the default rounding and precision, so no probe leaves its own behind
+macro_rules! load_default_control_words {
+    () => {
+        concat!(
+            "ldmxcsr [rip + {defaults} + {mxcsr_offset}]\n",
+            "fldcw [rip + {defaults} + {fcw_offset}]\n",
         )
     };
 }
@@ -143,8 +263,20 @@ fn write_str(s: &[u8]) {
     unsafe { sys_write(1, s.as_ptr(), s.len()) };
 }
 
+fn read_tsc() -> u64 {
+    unsafe { _rdtsc() }
+}
+
+fn tsc_ticks_per_ms() -> u64 {
+    let mut cpu_info = CpuInfoFlat::zeroed();
+    let info_written = sys_get_cpu_info(&mut cpu_info);
+    debug_assert!(info_written && cpu_info.tsc_frequency_hz >= MS_PER_SECOND);
+
+    cpu_info.tsc_frequency_hz / MS_PER_SECOND
+}
+
 #[inline(never)]
-unsafe fn yield_with_loaded_xmm(expected_bank: *const XmmBank, actual_bank: *mut XmmBank) {
+unsafe fn yield_with_loaded_fpu(expected_bank: *const FpuBank, actual_bank: *mut FpuBank) {
     unsafe {
         asm!(
             "push rbx",
@@ -154,16 +286,20 @@ unsafe fn yield_with_loaded_xmm(expected_bank: *const XmmBank, actual_bank: *mut
             "push r14",
             "push r15",
             "push rdi",
-            load_xmm_bank!("rsi"),
+            load_fpu_bank!("rsi"),
             "syscall",
             "pop rdi",
-            store_xmm_bank!("rdi"),
+            store_fpu_bank!("rdi"),
+            load_default_control_words!(),
             "pop r15",
             "pop r14",
             "pop r13",
             "pop r12",
             "pop rbp",
             "pop rbx",
+            mxcsr_offset = const MXCSR_OFFSET,
+            fcw_offset = const FCW_OFFSET,
+            defaults = sym DEFAULT_FPU_BANK,
             inout("rax") SYS_YIELD => _,
             inout("rdi") actual_bank => _,
             inout("rsi") expected_bank => _,
@@ -193,37 +329,33 @@ unsafe fn yield_with_loaded_xmm(expected_bank: *const XmmBank, actual_bank: *mut
     }
 }
 
-/// Yields with xmm and r12-r15 loaded and relies on the kernel to give them all back
-/// Unlike yield_with_loaded_xmm nothing is pushed around the syscall, the registers
-/// are operands of the asm so the compiler knows they change
+/// Holds the bank in the registers without entering the kernel until `deadline_tsc`,
+/// so only a timer interrupt can switch the task away
 #[inline(never)]
-unsafe fn yield_with_loaded_xmm_and_gprs(
-    expected_bank: *const XmmBank,
-    actual_bank: *mut XmmBank,
-    gprs: &mut [u64; GPR_PROBE_COUNT],
+unsafe fn spin_with_loaded_fpu(
+    expected_bank: *const FpuBank,
+    actual_bank: *mut FpuBank,
+    deadline_tsc: u64,
 ) {
-    let [mut r12_value, mut r13_value, mut r14_value, mut r15_value] = *gprs;
-
     unsafe {
         asm!(
-            "push rdi",
-            load_xmm_bank!("rsi"),
-            "syscall",
-            "pop rdi",
-            store_xmm_bank!("rdi"),
-            inout("rax") SYS_YIELD => _,
-            inout("rdi") actual_bank => _,
-            inout("rsi") expected_bank => _,
-            inout("r12") r12_value,
-            inout("r13") r13_value,
-            inout("r14") r14_value,
-            inout("r15") r15_value,
-            out("rcx") _,
+            load_fpu_bank!("rsi"),
+            "2:",
+            "rdtsc",
+            "shl rdx, 32",
+            "or rax, rdx",
+            "cmp rax, r8",
+            "jb 2b",
+            store_fpu_bank!("rdi"),
+            load_default_control_words!(),
+            mxcsr_offset = const MXCSR_OFFSET,
+            fcw_offset = const FCW_OFFSET,
+            defaults = sym DEFAULT_FPU_BANK,
+            in("rdi") actual_bank,
+            in("rsi") expected_bank,
+            in("r8") deadline_tsc,
+            out("rax") _,
             out("rdx") _,
-            out("r8") _,
-            out("r9") _,
-            out("r10") _,
-            out("r11") _,
             out("xmm0") _,
             out("xmm1") _,
             out("xmm2") _,
@@ -242,95 +374,118 @@ unsafe fn yield_with_loaded_xmm_and_gprs(
             out("xmm15") _,
         );
     }
-
-    *gprs = [r12_value, r13_value, r14_value, r15_value];
 }
+
+/// Repeats `probe` until REQUIRED_HANDOFFS of its runs saw another task take the core,
+/// `probe` returns false when the state it loaded did not come back
+fn run_phase_across_handoffs(timeout_tsc: u64, mut probe: impl FnMut(u32) -> bool) -> PhaseResult {
+    let deadline_tsc = read_tsc() + timeout_tsc;
+    let mut probes_with_handoff = 0;
+    let mut round = 0;
+
+    while probes_with_handoff < REQUIRED_HANDOFFS {
+        if read_tsc() >= deadline_tsc {
+            return PhaseResult::NoHandoff;
+        }
+
+        let handoffs_before = sys_get_handoff_count();
+        if !probe(round) {
+            return PhaseResult::StateLost;
+        }
+
+        if sys_get_handoff_count() != handoffs_before {
+            probes_with_handoff += 1;
+        }
+        round += 1;
+    }
+
+    PhaseResult::Passed
+}
+
+fn exit_on_failed_phase(phase_result: PhaseResult, phase: Phase) {
+    match phase_result {
+        PhaseResult::Passed => {}
+        PhaseResult::StateLost => {
+            write_str(phase.state_lost_message());
+            sys_exit(phase.state_lost_exit_code())
+        }
+        PhaseResult::NoHandoff => {
+            write_str(phase.no_handoff_message());
+            sys_exit(EXIT_CODE_NO_HANDOFF)
+        }
+    }
+}
+
+/// Written by _start before any compiled code can touch the fpu
+static mut INITIAL_FPU_BANK: FpuBank = FpuBank::zeroed();
 
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
+        "lea rdi, [rip + {initial_bank}]",
+        store_fpu_bank!("rdi"),
         "and rsp, -16",
         "call {start_checked}",
         "ud2",
+        initial_bank = sym INITIAL_FPU_BANK,
+        mxcsr_offset = const MXCSR_OFFSET,
+        fcw_offset = const FCW_OFFSET,
         start_checked = sym start_checked,
     )
 }
 
 extern "C" fn start_checked() -> ! {
-    let mut initial_bank = core::mem::MaybeUninit::<XmmBank>::uninit();
-    let mut initial_mxcsr: u32 = 0;
+    let initial_bank = unsafe { core::ptr::addr_of!(INITIAL_FPU_BANK).read() };
 
-    unsafe {
-        asm!(
-            store_xmm_bank!("rdi"),
-            "stmxcsr [rsi]",
-            in("rdi") initial_bank.as_mut_ptr(),
-            in("rsi") &mut initial_mxcsr as *mut u32,
-        );
-    }
-    let initial_bank = unsafe { initial_bank.assume_init() };
-
-    if initial_bank.registers.iter().any(|&value| value != 0) {
+    if initial_bank.xmm != DEFAULT_FPU_BANK.xmm {
         write_str(b"fpustress: FAIL initial xmm not zero\n");
         sys_exit(EXIT_CODE_DIRTY_INITIAL_XMM)
     }
-    if initial_mxcsr != MXCSR_DEFAULT {
+    if initial_bank.mxcsr != MXCSR_DEFAULT {
         write_str(b"fpustress: FAIL initial mxcsr\n");
         sys_exit(EXIT_CODE_BAD_INITIAL_MXCSR)
     }
-
-    let process_seed = unsafe { _rdtsc() } as u128;
-
-    for round in 0..YIELD_ROUNDS {
-        let mut expected_bank = XmmBank {
-            registers: [0; XMM_REGISTER_COUNT],
-        };
-        for (register_index, value) in expected_bank.registers.iter_mut().enumerate() {
-            *value = (process_seed << 64) | ((round as u128) << 32) | register_index as u128;
-        }
-
-        let mut actual_bank = XmmBank {
-            registers: [0; XMM_REGISTER_COUNT],
-        };
-        unsafe { yield_with_loaded_xmm(&expected_bank, &mut actual_bank) };
-
-        if actual_bank != expected_bank {
-            write_str(b"fpustress: FAIL xmm lost across yield\n");
-            sys_exit(EXIT_CODE_XMM_LOST_ACROSS_YIELD)
-        }
+    if initial_bank.fcw != FCW_DEFAULT {
+        write_str(b"fpustress: FAIL initial fcw\n");
+        sys_exit(EXIT_CODE_BAD_INITIAL_FCW)
     }
 
-    for round in 0..YIELD_ROUNDS {
-        let mut expected_bank = XmmBank {
-            registers: [0; XMM_REGISTER_COUNT],
-        };
-        for (register_index, value) in expected_bank.registers.iter_mut().enumerate() {
-            *value = (process_seed << 64) | ((round as u128) << 32) | register_index as u128;
-        }
+    let start_tsc = read_tsc();
+    let ticks_per_ms = tsc_ticks_per_ms();
+    let process_seed = start_tsc as u128;
 
-        let mut expected_gprs = [0u64; GPR_PROBE_COUNT];
-        for (gpr_index, value) in expected_gprs.iter_mut().enumerate() {
-            *value = (process_seed as u64)
-                .wrapping_add(GPR_PROBE_ROUND_STRIDE.wrapping_mul(round + gpr_index as u64));
-        }
+    // partners on a core get consecutive pids most of the time, so their modes differ
+    let rounding_mode = sys_get_pid() & ROUNDING_MODE_MASK;
+    let probe_mxcsr =
+        MXCSR_DEFAULT | MXCSR_FLUSH_TO_ZERO | ((rounding_mode as u32) << MXCSR_ROUNDING_SHIFT);
+    let probe_fcw = (FCW_DEFAULT & !FCW_PRECISION_MASK)
+        | FCW_PRECISION_DOUBLE
+        | ((rounding_mode as u16) << FCW_ROUNDING_SHIFT);
+    debug_assert!(probe_mxcsr != MXCSR_DEFAULT && probe_fcw != FCW_DEFAULT);
 
-        let mut actual_bank = XmmBank {
-            registers: [0; XMM_REGISTER_COUNT],
-        };
-        let mut actual_gprs = expected_gprs;
-        unsafe {
-            yield_with_loaded_xmm_and_gprs(&expected_bank, &mut actual_bank, &mut actual_gprs)
-        };
+    let yield_result = run_phase_across_handoffs(HANDOFF_TIMEOUT_MS * ticks_per_ms, |round| {
+        let expected_bank = FpuBank::for_round(process_seed, round, probe_mxcsr, probe_fcw);
+        let mut actual_bank = FpuBank::zeroed();
+        unsafe { yield_with_loaded_fpu(&expected_bank, &mut actual_bank) };
 
-        if actual_bank != expected_bank {
-            write_str(b"fpustress: FAIL xmm lost across yield without saved gprs\n");
-            sys_exit(EXIT_CODE_XMM_LOST_ACROSS_YIELD)
-        }
-        if actual_gprs != expected_gprs {
-            write_str(b"fpustress: FAIL gpr lost across yield\n");
-            sys_exit(EXIT_CODE_GPR_LOST_ACROSS_YIELD)
-        }
+        actual_bank == expected_bank
+    });
+    exit_on_failed_phase(yield_result, Phase::Yield);
+
+    let preemption_result = run_phase_across_handoffs(HANDOFF_TIMEOUT_MS * ticks_per_ms, |round| {
+        let expected_bank = FpuBank::for_round(process_seed, round, probe_mxcsr, probe_fcw);
+        let mut actual_bank = FpuBank::zeroed();
+        let deadline_tsc = read_tsc() + SPIN_DURATION_MS * ticks_per_ms;
+        unsafe { spin_with_loaded_fpu(&expected_bank, &mut actual_bank, deadline_tsc) };
+
+        actual_bank == expected_bank
+    });
+    exit_on_failed_phase(preemption_result, Phase::Preemption);
+
+    let linger_end_tsc = start_tsc + LINGER_MS * ticks_per_ms;
+    while read_tsc() < linger_end_tsc {
+        sys_yield();
     }
 
     write_str(b"fpustress: ok\n");

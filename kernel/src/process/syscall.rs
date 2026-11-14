@@ -26,6 +26,7 @@ use crate::{
 use core::arch::naked_asm;
 use core::sync::atomic::Ordering;
 use x86_64::registers::model_specific::{Efer, EferFlags};
+use x86_64::registers::rflags::RFlags;
 use x86_64::structures::paging::PageTableFlags;
 
 const SYSCALL_DEBUG_PRINT: bool = false;
@@ -151,6 +152,7 @@ pub enum SyscallNumber {
     FutexWake = 993,
 
     GetCpuInfo = 970,
+    GetHandoffCount = 995,
     GetProcessInfo = 996,
     GetPID = 997,
     Yield = 998,
@@ -433,6 +435,11 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
             Ok(pid as u64)
+        }
+        SyscallNumber::GetHandoffCount => {
+            let task_ref = crate::process::task::core_current_task_ref(get_current_core_id());
+            let task = crate::process::task::slot(task_ref.slot as usize);
+            Ok(task.handoff_count.load(Ordering::Relaxed) as u64)
         }
         SyscallNumber::Yield => {
             if SYSCALL_DEBUG_PRINT {
@@ -750,8 +757,9 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
 
             let flat = CpuInfoFlat::from_kernel_info(cpu_info, tsc_freq, boot_tsc, core_count);
 
+            // the user buffer carries no alignment guarantee
             unsafe {
-                core::ptr::write(buffer_ptr as *mut CpuInfoFlat, flat);
+                core::ptr::write_unaligned(buffer_ptr as *mut CpuInfoFlat, flat);
             }
 
             Ok(0)
@@ -819,7 +827,13 @@ pub fn init_syscall() {
     //
     // sysretq sets CS = (STAR[63:48] + 16) | 3 = 0x23, SS = (STAR[63:48] + 8) | 3 = 0x1B
     let star_value = (0x10u64 << 48) | (0x08u64 << 32);
-    let sfmask: u64 = 1 << 9;
+    // the kernel must not run with user TF, DF, AC or NT, the CPU only clears what SFMASK names
+    let sfmask = (RFlags::INTERRUPT_FLAG
+        | RFlags::TRAP_FLAG
+        | RFlags::DIRECTION_FLAG
+        | RFlags::ALIGNMENT_CHECK
+        | RFlags::NESTED_TASK)
+        .bits();
     unsafe {
         msr_write(0xC0000081, star_value);
         msr_write(0xC0000082, syscall_handler as *const () as u64);
