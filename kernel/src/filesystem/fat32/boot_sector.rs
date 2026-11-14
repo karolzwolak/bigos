@@ -1,4 +1,4 @@
-use crate::filesystem::sirius::{FileSystemError, FileSystemResult};
+use crate::filesystem::vfs::{FileSystemError, FileSystemResult};
 use crate::serial_println;
 
 // FAT32 Boot Sector (the first 512 bytes of a volume)

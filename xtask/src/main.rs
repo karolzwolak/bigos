@@ -115,6 +115,64 @@ fn kernel_bin(root: &Path, release: bool) -> PathBuf {
         .join("kernel")
 }
 
+const DISK_IMAGE_SIZE_MB: u32 = 64;
+const DEFAULT_DISK_TEMPLATE: &str = "disk_templates/default";
+const TEST_DISK_TEMPLATE: &str = "disk_templates/test";
+const DEFAULT_DISK_IMAGE: &str = "storage/disk.img";
+const TEST_DISK_IMAGE: &str = "storage/test_disk.img";
+const TEST_DISK_PATTERN_BYTES: u32 = 100_000;
+
+/// newest modification time of any file or directory under path, including path itself
+fn newest_modification_time(path: &Path) -> std::time::SystemTime {
+    let mut newest = fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(std::time::UNIX_EPOCH);
+
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            newest = newest.max(newest_modification_time(&entry.path()));
+        }
+    }
+
+    newest
+}
+
+/// builds the FAT32 image from the template directory, unless the image is newer than the template
+fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u32) {
+    let template_dir = root.join(template);
+    let output_path = root.join(output);
+    let script = root.join("scripts/create_disk_image.sh");
+
+    let image_time = fs::metadata(&output_path).and_then(|meta| meta.modified());
+    let script_time = newest_modification_time(&script);
+    let template_time = newest_modification_time(&template_dir).max(script_time);
+    if image_time.is_ok_and(|image_time| image_time >= template_time) {
+        return;
+    }
+
+    let mut cmd = Command::new(&script);
+    cmd.current_dir(root)
+        .arg("-i")
+        .arg(&template_dir)
+        .arg("-o")
+        .arg(&output_path)
+        .args(["-s", &DISK_IMAGE_SIZE_MB.to_string()]);
+    if pattern_bytes > 0 {
+        cmd.args(["-p", &pattern_bytes.to_string()]);
+    }
+    run_quiet(&mut cmd);
+}
+
+fn build_disk_images(root: &Path) {
+    ensure_disk_image(root, DEFAULT_DISK_TEMPLATE, DEFAULT_DISK_IMAGE, 0);
+    ensure_disk_image(
+        root,
+        TEST_DISK_TEMPLATE,
+        TEST_DISK_IMAGE,
+        TEST_DISK_PATTERN_BYTES,
+    );
+}
+
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
@@ -916,7 +974,7 @@ fn clippy(root: &Path, extra: &[String]) {
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + rustspace)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  disk         Build the FAT32 disk images in storage/ when out of date\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + rustspace)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 
@@ -938,6 +996,7 @@ fn main() {
         Some("run") => run_iso(&root),
         Some("run-nologs") => run_nologs(&root),
         Some("test") => run_tests(&root, &extra),
+        Some("disk") => build_disk_images(&root),
         Some("clean") => clean(&root),
         Some("fmt") => fmt(&root, &extra),
         Some("clippy") => clippy(&root, &extra),

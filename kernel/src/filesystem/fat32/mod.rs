@@ -3,21 +3,41 @@ pub mod direntry;
 pub mod test_data;
 
 use crate::filesystem::fat32::direntry::{FatFileAttributes, MAX_EXT_LENGTH, MAX_NAME_LENGTH};
-use crate::filesystem::sirius::{
-    FileAttributes, FileNode, FileSystemError, FileSystemResult, FileType, FilesystemDriver,
+use crate::filesystem::vfs::{
+    FileAttributes, FileNode, FileSystemError, FileSystemResult, FileType,
 };
-use crate::io::disk::{DiskManager, get_disk_mgr};
+use crate::io::disk::{BlockDevice, SECTOR_SIZE_BYTES};
 use crate::serial_println;
 use alloc::string::String;
 use alloc::vec::Vec;
 use boot_sector::BootSector;
+use core::cmp::{max, min};
 use direntry::{DIRECTORY_ENTRY_SIZE, DirectoryEntry, MAX_FULL_NAME_LENGTH};
-use spin::MutexGuard;
 
 pub const ROOT_CLUSTER: u32 = 2;
 // node_id packing assumes up to 2^24 clusters
-pub const MAX_CLUSTER: u32 = 0xFFFFFF;
-const EMPTY_FAT_ENTRY: u32 = 0;
+pub const MAX_CLUSTER: u32 = 0xFF_FFFF;
+
+/// placeholder for "no cluster", used for end of chain and empty files
+pub const NO_CLUSTER: u32 = 0;
+
+const FAT_ENTRY_SIZE_BYTES: usize = 4;
+const FAT_ENTRY_MASK: u32 = 0x0FFF_FFFF;
+const FAT_ENTRY_FREE: u32 = 0;
+pub const END_OF_CHAIN: u32 = 0x0FFF_FFFF;
+pub const BAD_CLUSTER: u32 = 0x0FFF_FFF7;
+pub const FAT_ENTRY_RESERVED_BEGIN: u32 = 0x0FFF_FFF8;
+pub const FAT_ENTRY_RESERVED_END: u32 = 0x0FFF_FFFE;
+
+const MAX_FILE_SIZE_BYTES: usize = u32::MAX as usize;
+
+// node handle layout: bit 63 by-entry-index flag, bits 56..63 fat attributes,
+// bits 32..56 parent directory cluster, bits 0..24 first cluster or entry index
+const NODE_BY_ENTRY_INDEX_FLAG: usize = 1 << 63;
+const NODE_ATTRIBUTES_SHIFT: u32 = 56;
+const NODE_ATTRIBUTES_MASK: usize = 0x7F;
+const NODE_PARENT_CLUSTER_SHIFT: u32 = 32;
+const NODE_CLUSTER_MASK: usize = MAX_CLUSTER as usize;
 
 pub type FileNodeHandle = usize;
 pub const INVALID_NODE_HANDLE: FileNodeHandle = 0;
@@ -26,137 +46,209 @@ const fn is_directory(fat_attributes: u8) -> bool {
     fat_attributes & FatFileAttributes::Directory as u8 != 0
 }
 
+fn is_valid_short_name_char(character: char) -> bool {
+    character.is_ascii_graphic()
+        && !matches!(
+            character,
+            '"' | '*'
+                | '+'
+                | ','
+                | '/'
+                | ':'
+                | ';'
+                | '<'
+                | '='
+                | '>'
+                | '?'
+                | '['
+                | '\\'
+                | ']'
+                | '|'
+        )
+}
+
 fn is_valid_filename(name: &str) -> bool {
-    if name.is_empty() || name.starts_with('.') {
+    if name.is_empty()
+        || name.starts_with('.')
+        || !name
+            .chars()
+            .all(|c| c == '.' || is_valid_short_name_char(c))
+    {
         return false;
     }
+
     match name.rfind('.') {
-        Some(dot) => dot <= MAX_NAME_LENGTH && (name.len() - dot - 1) <= MAX_EXT_LENGTH,
+        Some(dot) => {
+            let stem = &name[..dot];
+            let extension_length = name.len() - dot - 1;
+
+            stem.len() <= MAX_NAME_LENGTH
+                && !stem.contains('.')
+                && extension_length > 0
+                && extension_length <= MAX_EXT_LENGTH
+        }
         None => name.len() <= MAX_NAME_LENGTH,
     }
 }
 
-const ZERO_BUFFER: [u8; 4096] = [0u8; 4096]; // TODO: dont allocate each call, but also dont fill space with this --> write in some other way than copying from buffer
-
-fn encode_node_id(entry: &DirectoryEntry, parent_cluster: u32) -> FileNodeHandle {
-    let cluster = entry.get_first_cluster();
-    let reserved_flag = 0; // can use for something
-    let attrs = entry.attributes;
-
-    ((reserved_flag as usize) << 63)
-        | ((attrs as usize & 0x7F) << 56)
-        | ((parent_cluster as usize & 0xFFFFFF) << 32)
-        | (cluster as usize & 0xFFFFFF)
+/// result of unpacking a FileNodeHandle
+struct DecodedNode {
+    /// first cluster of the node, or the entry index in the parent when by_entry_index is set
+    cluster_or_entry_index: u32,
+    parent_cluster: u32,
+    attributes: u8,
+    by_entry_index: bool,
 }
 
-fn decode_node_id(node_id: FileNodeHandle) -> (u32, u32, u8) {
-    let attrs = ((node_id >> 56) & 0x7F) as u8;
-    let parent_cluster = ((node_id >> 32) & 0xFFFFFF) as u32;
-    let cluster = (node_id & 0xFFFFFF) as u32;
+fn encode_node_id(
+    entry: &DirectoryEntry,
+    parent_cluster: u32,
+    entry_index: usize,
+) -> FileNodeHandle {
+    let first_cluster = entry.get_first_cluster();
+    // an empty file has no cluster to identify it, so identify it by its slot in the parent
+    let (cluster_or_entry_index, by_entry_index_flag) = if first_cluster == NO_CLUSTER {
+        (entry_index, NODE_BY_ENTRY_INDEX_FLAG)
+    } else {
+        (first_cluster as usize, 0)
+    };
+    debug_assert!(cluster_or_entry_index <= NODE_CLUSTER_MASK);
+    debug_assert!(parent_cluster as usize <= NODE_CLUSTER_MASK);
 
-    (cluster, parent_cluster, attrs)
+    by_entry_index_flag
+        | ((entry.attributes as usize & NODE_ATTRIBUTES_MASK) << NODE_ATTRIBUTES_SHIFT)
+        | ((parent_cluster as usize & NODE_CLUSTER_MASK) << NODE_PARENT_CLUSTER_SHIFT)
+        | (cluster_or_entry_index & NODE_CLUSTER_MASK)
 }
 
-fn to_fat32_name(name: &str) -> FileSystemResult<[u8; 11]> {
+fn decode_node_id(node_id: FileNodeHandle) -> DecodedNode {
+    DecodedNode {
+        cluster_or_entry_index: (node_id & NODE_CLUSTER_MASK) as u32,
+        parent_cluster: ((node_id >> NODE_PARENT_CLUSTER_SHIFT) & NODE_CLUSTER_MASK) as u32,
+        attributes: ((node_id >> NODE_ATTRIBUTES_SHIFT) & NODE_ATTRIBUTES_MASK) as u8,
+        by_entry_index: node_id & NODE_BY_ENTRY_INDEX_FLAG != 0,
+    }
+}
+
+fn to_fat32_name(name: &str) -> FileSystemResult<[u8; MAX_FULL_NAME_LENGTH]> {
     if !is_valid_filename(name) {
         return Err(FileSystemError::InvalidFilename);
     }
 
-    let mut fat32_name = [b' '; 11];
+    let mut fat32_name = [b' '; MAX_FULL_NAME_LENGTH];
 
-    let (stem, ext) = if let Some(dot_pos) = name.rfind('.') {
-        (&name[..dot_pos], Some(&name[dot_pos + 1..]))
-    } else {
-        (name, None)
+    let (stem, extension) = match name.rfind('.') {
+        Some(dot_pos) => (&name[..dot_pos], &name[dot_pos + 1..]),
+        None => (name, ""),
     };
 
-    if stem.len() > MAX_NAME_LENGTH {
-        return Err(FileSystemError::InvalidFilename);
+    for (i, c) in stem.bytes().enumerate() {
+        fat32_name[i] = c.to_ascii_uppercase();
     }
-    if let Some(ext) = ext
-        && ext.len() > MAX_EXT_LENGTH
-    {
-        return Err(FileSystemError::InvalidFilename);
-    }
-
-    for (i, c) in stem.chars().enumerate() {
-        fat32_name[i] = c.to_ascii_uppercase() as u8;
-    }
-    if let Some(ext) = ext {
-        for (i, c) in ext.chars().enumerate() {
-            fat32_name[MAX_NAME_LENGTH + i] = c.to_ascii_uppercase() as u8;
-        }
+    for (i, c) in extension.bytes().enumerate() {
+        fat32_name[MAX_NAME_LENGTH + i] = c.to_ascii_uppercase();
     }
 
     Ok(fat32_name)
 }
 
-fn _to_fat32_path(path: &str) -> FileSystemResult<Vec<[u8; MAX_FULL_NAME_LENGTH]>> {
-    let path_parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-
-    let mut fat32_parts = Vec::<[u8; MAX_FULL_NAME_LENGTH]>::with_capacity(path_parts.len());
-
-    for part in path_parts {
-        if part == "." || part == ".." {
-            //TODO: handle user wanting to do "../some_file_in_parent_dir_relative" etc, when we get process working directories, but this is probably not the place to resolve these
-            return Err(FileSystemError::InvalidPath);
-        } else {
-            fat32_parts.push(to_fat32_name(part)?);
-        }
-    }
-
-    Ok(fat32_parts)
-}
-
 const fn file_attributes_from_fat_attributes(fat_attributes: u8) -> FileAttributes {
     if is_directory(fat_attributes) {
         FileAttributes::DIR_DEFAULT
+    } else if fat_attributes & FatFileAttributes::ReadOnly as u8 == 0 {
+        FileAttributes::FILE_READ_WRITE
     } else {
-        if fat_attributes & FatFileAttributes::ReadOnly as u8 == 0 {
-            FileAttributes::FILE_READ_WRITE
-        } else {
-            FileAttributes::FILE_READONLY
-        }
+        FileAttributes::FILE_READONLY
+    }
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+fn node_from_entry(entry: &DirectoryEntry, parent_cluster: u32, entry_index: usize) -> FileNode {
+    FileNode {
+        node_id: encode_node_id(entry, parent_cluster, entry_index),
+        name: entry.get_filename(),
+        file_type: entry.get_file_type(),
+        size: entry.file_size as usize,
+        created_time: entry.get_creation_timestamp(),
+        modified_time: entry.get_modified_timestamp(),
+        attributes: file_attributes_from_fat_attributes(entry.attributes),
     }
 }
 
 pub struct Fat32Driver {
-    boot_sector: BootSector,
-    fat_start_sector: u64,
-    root_start_sector: u64,
-    data_start_sector: u64,
-    sectors_per_cluster: u32,
+    pub device: BlockDevice,
+    pub boot_sector: BootSector,
+    pub fat_start_sector: u64,
+    pub data_start_sector: u64,
+    pub sectors_per_cluster: u32,
+    pub cluster_size: usize,
+    /// exclusive upper bound of valid cluster numbers
+    pub max_cluster: u32,
+    pub root_cluster: u32,
 
-    cluster_size: usize,
-
-    max_cluster: u32,
+    /// search for free clusters starts here
+    next_free_hint: u32,
+    /// scratch space for one cluster, owned for the lifetime of the mount
+    cluster_buffer: Vec<u8>,
 
     root_dir_node_id: FileNodeHandle,
     root_direntry: DirectoryEntry,
     root_filenode: FileNode,
 }
 
-pub const END_OF_CHAIN: u32 = 0x0FFFFFFF;
-pub const BAD_CLUSTER: u32 = 0xFFFFFFF7;
-pub const FAT_ENTRY_RESERVED_BEGIN: u32 = 0xFFFFFFF8;
-pub const FAT_ENTRY_RESERVED_END: u32 = 0xFFFFFFFE;
-
 impl Fat32Driver {
-    pub fn new(boot_sector_data: &[u8]) -> FileSystemResult<Self> {
-        serial_println!("Fat32Driver: initializing with boot_sector_data");
+    pub fn new(mut device: BlockDevice) -> FileSystemResult<Self> {
+        let mut boot_sector_data = [0u8; SECTOR_SIZE_BYTES];
+        device.read_sectors(0, &mut boot_sector_data)?;
 
-        let boot_sector = BootSector::from_bytes(boot_sector_data)?;
+        let boot_sector = BootSector::from_bytes(&boot_sector_data)?;
+        if boot_sector.bytes_per_sector as usize != SECTOR_SIZE_BYTES
+            || boot_sector.num_fats == 0
+            || !boot_sector.sectors_per_cluster.is_power_of_two()
+        {
+            return Err(FileSystemError::NotSupported);
+        }
 
         let fat_start_sector = boot_sector.reserved_sectors as u64;
         let sectors_per_cluster = boot_sector.sectors_per_cluster as u32;
-        let fat_size = boot_sector.fat_size_32 as u64;
-        let root_start_sector = fat_start_sector + (boot_sector.num_fats as u64 * fat_size);
-        let root_dir_sectors = 0u64;
-        let data_start_sector = root_start_sector + root_dir_sectors;
-        let cluster_size = (sectors_per_cluster as usize) * (boot_sector.bytes_per_sector as usize);
+        let fat_size_sectors = boot_sector.fat_size_32 as u64;
+        let data_start_sector = fat_start_sector + (boot_sector.num_fats as u64 * fat_size_sectors);
+        let cluster_size = (sectors_per_cluster as usize) * SECTOR_SIZE_BYTES;
+
+        // total_sectors_32 is 0 on small volumes, which use total_sectors_16
+        let total_sectors = if boot_sector.total_sectors_32 != 0 {
+            boot_sector.total_sectors_32 as u64
+        } else {
+            boot_sector.total_sectors_16 as u64
+        };
+        if total_sectors <= data_start_sector {
+            return Err(FileSystemError::IoError);
+        }
+
+        let total_clusters = (total_sectors - data_start_sector) / sectors_per_cluster as u64;
+        let clusters_described_by_fat =
+            fat_size_sectors * (SECTOR_SIZE_BYTES / FAT_ENTRY_SIZE_BYTES) as u64;
+        let max_cluster = min(
+            total_clusters + ROOT_CLUSTER as u64,
+            clusters_described_by_fat,
+        );
+        if max_cluster > MAX_CLUSTER as u64 {
+            return Err(FileSystemError::NotSupported);
+        }
+
+        let root_cluster = boot_sector.root_cluster;
+        debug_assert!(root_cluster == ROOT_CLUSTER);
 
         let root_direntry = DirectoryEntry::create_for_root();
-        let root_dir_node_id = encode_node_id(&root_direntry, boot_sector.root_cluster);
+        let root_dir_node_id = encode_node_id(&root_direntry, root_cluster, 0);
         let root_filenode = FileNode {
             node_id: root_dir_node_id,
             name: String::from("/"),
@@ -167,939 +259,686 @@ impl Fat32Driver {
             attributes: FileAttributes::DIR_DEFAULT,
         };
 
-        let available_data_sectors = boot_sector.total_sectors_32 - data_start_sector as u32;
-        let total_clusters = available_data_sectors / sectors_per_cluster;
-        let max_cluster = total_clusters + ROOT_CLUSTER;
-
-        serial_println!("Initialized Fat32Driver with boot sector data: \nfat_start_sector={},\n sectors_per_cluster={},\n 
-            fat_size={},\n root_start_sector={},\n root_dir_sectors={},\n data_start_sector={},\n cluster_size={},\n max_cluster={}", fat_start_sector, sectors_per_cluster, 
-            fat_size, root_start_sector, root_dir_sectors, data_start_sector, cluster_size, max_cluster);
+        serial_println!(
+            "Fat32Driver: mounted, fat_start_sector={}, fat_size_sectors={}, data_start_sector={}, cluster_size={}, max_cluster={}",
+            fat_start_sector,
+            fat_size_sectors,
+            data_start_sector,
+            cluster_size,
+            max_cluster
+        );
 
         Ok(Self {
+            device,
             boot_sector,
             fat_start_sector,
-            root_start_sector,
             data_start_sector,
             sectors_per_cluster,
             cluster_size,
-            max_cluster,
+            max_cluster: max_cluster as u32,
+            root_cluster,
+            next_free_hint: ROOT_CLUSTER,
+            cluster_buffer: alloc::vec![0u8; cluster_size],
             root_dir_node_id,
             root_direntry,
             root_filenode,
         })
     }
 
+    pub fn root_node(&self) -> FileNodeHandle {
+        self.root_dir_node_id
+    }
+
     fn cluster_to_sector(&self, cluster: u32) -> u64 {
-        if cluster >= 2 {
-            self.data_start_sector + (((cluster - 2) as u64) * self.sectors_per_cluster as u64)
-        } else {
-            self.root_start_sector
+        debug_assert!(cluster >= ROOT_CLUSTER && cluster < self.max_cluster);
+
+        self.data_start_sector + ((cluster - ROOT_CLUSTER) as u64 * self.sectors_per_cluster as u64)
+    }
+
+    /// sector of the first FAT copy that holds the entry, and the offset of the entry in it
+    fn fat_entry_location(&self, cluster: u32) -> (u64, usize) {
+        debug_assert!(cluster < self.max_cluster);
+
+        let fat_offset_bytes = cluster as u64 * FAT_ENTRY_SIZE_BYTES as u64;
+        let sector = self.fat_start_sector + fat_offset_bytes / SECTOR_SIZE_BYTES as u64;
+
+        (
+            sector,
+            (fat_offset_bytes % SECTOR_SIZE_BYTES as u64) as usize,
+        )
+    }
+
+    fn read_cluster_into_buffer(&mut self, cluster: u32) -> FileSystemResult<()> {
+        let sector = self.cluster_to_sector(cluster);
+        self.device.read_sectors(sector, &mut self.cluster_buffer)?;
+
+        Ok(())
+    }
+
+    fn write_cluster_from_buffer(&mut self, cluster: u32) -> FileSystemResult<()> {
+        let sector = self.cluster_to_sector(cluster);
+        self.device.write_sectors(sector, &self.cluster_buffer)?;
+
+        Ok(())
+    }
+
+    fn read_fat_entry(&mut self, cluster: u32) -> FileSystemResult<u32> {
+        let (sector, offset_in_sector) = self.fat_entry_location(cluster);
+        let mut sector_buffer = [0u8; SECTOR_SIZE_BYTES];
+        self.device.read_sectors(sector, &mut sector_buffer)?;
+
+        Ok(read_u32_le(&sector_buffer, offset_in_sector) & FAT_ENTRY_MASK)
+    }
+
+    /// writes the entry into every FAT copy, the top 4 bits of the entry are preserved
+    fn write_fat_entry(&mut self, cluster: u32, value: u32) -> FileSystemResult<()> {
+        debug_assert!(value & !FAT_ENTRY_MASK == 0);
+
+        let (first_fat_sector, offset_in_sector) = self.fat_entry_location(cluster);
+        let mut sector_buffer = [0u8; SECTOR_SIZE_BYTES];
+
+        for fat_index in 0..self.boot_sector.num_fats as u64 {
+            let sector = first_fat_sector + fat_index * self.boot_sector.fat_size_32 as u64;
+            self.device.read_sectors(sector, &mut sector_buffer)?;
+
+            let old_value = read_u32_le(&sector_buffer, offset_in_sector);
+            let new_value = (old_value & !FAT_ENTRY_MASK) | value;
+            sector_buffer[offset_in_sector..offset_in_sector + FAT_ENTRY_SIZE_BYTES]
+                .copy_from_slice(&new_value.to_le_bytes());
+
+            self.device.write_sectors(sector, &sector_buffer)?;
+        }
+
+        Ok(())
+    }
+
+    /// next cluster in the chain, or NO_CLUSTER at the end of the chain
+    fn get_next_cluster(&mut self, cluster: u32) -> FileSystemResult<u32> {
+        match self.read_fat_entry(cluster)? {
+            FAT_ENTRY_RESERVED_BEGIN..=END_OF_CHAIN => Ok(NO_CLUSTER),
+            next if next >= ROOT_CLUSTER && next < self.max_cluster => Ok(next),
+            _ => Err(FileSystemError::IoError),
         }
     }
 
-    fn read_fat_entry(
-        &self,
-        cluster: u32,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<u32> {
-        let fat_offset = (cluster as u64) * 4;
-        let fat_sector =
-            self.fat_start_sector + (fat_offset / self.boot_sector.bytes_per_sector as u64);
-        let offset_in_sector = (fat_offset % self.boot_sector.bytes_per_sector as u64) as usize;
-
-        let mut sector_buffer = alloc::vec![0u8; self.boot_sector.bytes_per_sector as usize];
-
-        {
-            //let mut disk_mgr = get_disk_mgr();
-            disk_mgr.read_sector(fat_sector, &mut sector_buffer)?
-        }
-
-        let entry_bytes = [
-            sector_buffer[offset_in_sector],
-            sector_buffer[offset_in_sector + 1],
-            sector_buffer[offset_in_sector + 2],
-            sector_buffer[offset_in_sector + 3],
-        ];
-
-        Ok(u32::from_le_bytes(entry_bytes))
-    }
-
-    fn get_next_cluster(
-        &self,
-        cluster: u32,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<Option<u32>> {
-        if cluster == 0 {
-            return Ok(None);
-        }
-
-        let fat_entry = self.read_fat_entry(cluster, disk_mgr)?;
-        serial_println!("get_next_cluster returning {}", fat_entry);
-
-        match fat_entry {
-            END_OF_CHAIN => Ok(None),
-            BAD_CLUSTER => Err(FileSystemError::DiskOpError),
-            FAT_ENTRY_RESERVED_BEGIN..=FAT_ENTRY_RESERVED_END => Ok(None),
-            next_cluster => Ok(Some(next_cluster)),
-        }
-    }
-
-    fn read_cluster_chain(
-        &self,
-        start_cluster: u32,
-        out_buffer: &mut [u8],
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<usize> {
-        let mut curr_cluster = start_cluster;
-        let mut bytes_read = 0;
-
-        while bytes_read < out_buffer.len() && curr_cluster < self.max_cluster {
-            let sector = self.cluster_to_sector(curr_cluster);
-            let bytes_to_read = core::cmp::min(self.cluster_size, out_buffer.len() - bytes_read);
-
-            {
-                let mut cluster_buffer = alloc::vec![0u8; self.cluster_size];
-                //let mut disk_mgr = get_disk_mgr();
-                disk_mgr.read_sectors(
-                    sector,
-                    self.sectors_per_cluster as usize,
-                    &mut cluster_buffer,
-                )?;
-                out_buffer[bytes_read..bytes_read + bytes_to_read]
-                    .copy_from_slice(&cluster_buffer[..bytes_to_read]);
-
-                bytes_read += bytes_to_read;
-
-                match self.get_next_cluster(curr_cluster, disk_mgr)? {
-                    Some(next) => curr_cluster = next,
-                    None => break,
-                }
+    /// walks hop_count links from first_cluster, NO_CLUSTER if the chain is shorter
+    fn nth_cluster(&mut self, first_cluster: u32, hop_count: usize) -> FileSystemResult<u32> {
+        let mut cluster = first_cluster;
+        for _ in 0..hop_count {
+            cluster = self.get_next_cluster(cluster)?;
+            if cluster == NO_CLUSTER {
+                break;
             }
         }
 
-        Ok(bytes_read)
+        Ok(cluster)
     }
 
-    fn get_cluster_chain_length(
-        &self,
-        start_cluster: u32,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<usize> {
+    fn get_cluster_chain_length(&mut self, first_cluster: u32) -> FileSystemResult<usize> {
         let mut length = 0;
-        let mut curr_cluster = start_cluster;
-
-        while curr_cluster >= ROOT_CLUSTER && curr_cluster < self.max_cluster {
+        let mut cluster = first_cluster;
+        while cluster != NO_CLUSTER {
             length += 1;
-            match self.get_next_cluster(curr_cluster, disk_mgr)? {
-                Some(next) => curr_cluster = next,
-                None => break,
-            }
+            cluster = self.get_next_cluster(cluster)?;
         }
 
         Ok(length)
     }
 
-    fn find_free_cluster(
-        &self,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<u32> {
-        for cluster in ROOT_CLUSTER..self.max_cluster {
-            let fat_entry = self.read_fat_entry(cluster, disk_mgr)?;
-            serial_println!(
-                "find_free_cluster: read next fat_entry ({}) for cluster {}",
-                fat_entry,
-                cluster
-            );
+    fn last_cluster_of_chain(&mut self, first_cluster: u32) -> FileSystemResult<u32> {
+        let mut cluster = first_cluster;
+        loop {
+            let next = self.get_next_cluster(cluster)?;
+            if next == NO_CLUSTER {
+                return Ok(cluster);
+            }
+            cluster = next;
+        }
+    }
 
-            if fat_entry == 0 {
-                serial_println!("  Found free cluster: {}", cluster);
+    /// returns the number of clusters in a run of consecutive cluster numbers starting at
+    /// first_cluster (at most max_run_length), and the cluster that follows the run in the chain
+    /// when want_next_cluster is set
+    fn contiguous_run(
+        &mut self,
+        first_cluster: u32,
+        max_run_length: usize,
+        want_next_cluster: bool,
+    ) -> FileSystemResult<(usize, u32)> {
+        debug_assert!(max_run_length >= 1);
+
+        let mut run_length = 1;
+        let mut last_cluster = first_cluster;
+
+        while run_length < max_run_length {
+            let next = self.get_next_cluster(last_cluster)?;
+            if next != last_cluster + 1 {
+                return Ok((run_length, next));
+            }
+            last_cluster = next;
+            run_length += 1;
+        }
+
+        let next = if want_next_cluster {
+            self.get_next_cluster(last_cluster)?
+        } else {
+            NO_CLUSTER
+        };
+
+        Ok((run_length, next))
+    }
+
+    fn scan_for_free_cluster(
+        &mut self,
+        from_cluster: u32,
+        to_cluster: u32,
+    ) -> FileSystemResult<u32> {
+        let mut sector_buffer = [0u8; SECTOR_SIZE_BYTES];
+        let mut loaded_sector = u64::MAX;
+
+        for cluster in from_cluster..to_cluster {
+            let (sector, offset_in_sector) = self.fat_entry_location(cluster);
+            if sector != loaded_sector {
+                self.device.read_sectors(sector, &mut sector_buffer)?;
+                loaded_sector = sector;
+            }
+
+            if read_u32_le(&sector_buffer, offset_in_sector) & FAT_ENTRY_MASK == FAT_ENTRY_FREE {
                 return Ok(cluster);
             }
         }
 
-        serial_println!("ERROR: find_free_cluster: could not find a free cluster");
-
-        Err(FileSystemError::NoSpace)
+        Ok(NO_CLUSTER)
     }
 
-    fn allocate_clusters(
-        &mut self,
-        count: usize,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<u32> {
-        assert!(count != 0);
+    fn find_free_cluster(&mut self) -> FileSystemResult<u32> {
+        let hint = self.next_free_hint.clamp(ROOT_CLUSTER, self.max_cluster);
 
-        let first_cluster = self.find_free_cluster(disk_mgr)?;
-        serial_println!("  Allocating cluster chain starting at: {}", first_cluster);
-
-        let mut prev_cluster = first_cluster;
-        for _ in 1..count {
-            let new_cluster = self.find_free_cluster(disk_mgr)?;
-            serial_println!("    Allocating new cluster: {}", new_cluster);
-
-            // link the previous cluster
-            self.write_fat_entry(prev_cluster, new_cluster, disk_mgr)?;
-
-            prev_cluster = new_cluster;
+        let mut free_cluster = self.scan_for_free_cluster(hint, self.max_cluster)?;
+        if free_cluster == NO_CLUSTER {
+            free_cluster = self.scan_for_free_cluster(ROOT_CLUSTER, hint)?;
         }
-        self.write_fat_entry(prev_cluster, END_OF_CHAIN, disk_mgr)?;
-
-        Ok(first_cluster)
-    }
-
-    fn clear_clusters(
-        &mut self,
-        start_cluster: u32,
-        count: u32,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<()> {
-        let mut curr_cluster = start_cluster;
-        serial_println!(
-            "clear_clusters: starting with start_cluster: {}, to clear count: {}",
-            start_cluster,
-            count
-        );
-
-        {
-            //let mut disk_mgr = get_disk_mgr();
-
-            for _ in 0..count {
-                let sector = self.cluster_to_sector(curr_cluster);
-                serial_println!(
-                    "clear_clusters: clearing cluster {}, sector {}",
-                    curr_cluster,
-                    sector
-                );
-
-                for i in 0..self.sectors_per_cluster {
-                    serial_println!("clear_clusters: writing sector {}", i);
-                    disk_mgr.write_sector(sector + i as u64, &ZERO_BUFFER)?;
-                }
-                serial_println!("clear_clusters: finished writing");
-
-                match self.get_next_cluster(curr_cluster, disk_mgr)? {
-                    Some(next) => {
-                        serial_println!("clear_clusters: moving to next cluster: {}", next);
-                        curr_cluster = next
-                    }
-                    None => break,
-                }
-            }
-        }
-
-        serial_println!("clear_clusters: finished");
-
-        Ok(())
-    }
-
-    fn write_fat_entry(
-        &mut self,
-        cluster: u32,
-        value: u32,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<()> {
-        let fat_offset = (cluster as u64) * 4;
-        let fat_sector =
-            self.fat_start_sector + (fat_offset / self.boot_sector.bytes_per_sector as u64);
-        let offset_in_sector = (fat_offset % self.boot_sector.bytes_per_sector as u64) as usize;
-
-        let value_bytes = value.to_le_bytes();
-
-        let mut sector_buffer = alloc::vec![0u8; self.boot_sector.bytes_per_sector as usize];
-
-        {
-            //TODO: buffer this write, write the whole ready sector buffer after all operations
-            //let mut disk_mgr = get_disk_mgr();
-            disk_mgr.read_sector(fat_sector, &mut sector_buffer)?;
-
-            sector_buffer[offset_in_sector..offset_in_sector + 4].copy_from_slice(&value_bytes);
-            disk_mgr.write_sector(fat_sector, &sector_buffer)?;
-        }
-
-        Ok(())
-    }
-
-    // Read directory entries starting with a given cluster
-    // NOTE: this returns all entries, including deleted ones, volume id and . / .. entries,
-    // since we use index of the entry in this returned vector for some operations
-    fn read_directory_entries(
-        &self,
-        start_cluster: u32,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<Vec<DirectoryEntry>> {
-        let cluster_count = self.get_cluster_chain_length(start_cluster, disk_mgr)?;
-        let buffer_size = cluster_count * self.cluster_size;
-        let mut buffer = alloc::vec![0u8; buffer_size];
-
-        let bytes_read = self.read_cluster_chain(start_cluster, &mut buffer, disk_mgr)?;
-
-        let entry_count = bytes_read / DIRECTORY_ENTRY_SIZE;
-        let mut valid_entries = Vec::with_capacity(entry_count);
-
-        serial_println!(
-            "read_directory_entries: cluster_chain_length: {}, bytes_read: {}, entry_count: {}",
-            cluster_count,
-            bytes_read,
-            entry_count
-        );
-
-        for i in 0..entry_count {
-            let offset = i * DIRECTORY_ENTRY_SIZE;
-            let entry = DirectoryEntry::from_bytes(&buffer[offset..offset + DIRECTORY_ENTRY_SIZE]);
-
-            if entry.is_empty() {
-                serial_println!(
-                    "read_directory_entries: Hit end of directory at entry {}",
-                    i
-                );
-                break;
-            }
-
-            serial_println!(
-                "  Entry {}: name={}, attr={:#x}, deleted={}",
-                i,
-                entry.get_filename(),
-                entry.attributes,
-                entry.is_deleted()
-            );
-
-            valid_entries.push(entry);
-        }
-
-        Ok(valid_entries)
-    }
-
-    fn find_entry_by_cluster(
-        &self,
-        parent_cluster: u32,
-        target_cluster: u32,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<DirectoryEntry> {
-        let entries = self.read_directory_entries(parent_cluster, disk_mgr)?;
-
-        for entry in entries {
-            if entry.get_first_cluster() == target_cluster {
-                return Ok(entry);
-            }
-        }
-
-        Err(FileSystemError::NotFound)
-    }
-
-    fn find_direntry(
-        &self,
-        path: &str,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<(DirectoryEntry, u32)> {
-        let path_parts: Vec<&str> = path.split("/").filter(|p| !p.is_empty()).collect();
-        let part_count = path_parts.len();
-
-        if path_parts.is_empty() {
-            return Ok((self.root_direntry, self.boot_sector.root_cluster));
-        }
-
-        let mut found_entry = None;
-        let mut curr_cluster = self.boot_sector.root_cluster;
-        let mut parent_cluster = self.boot_sector.root_cluster;
-
-        for (i, path_part) in path_parts.iter().enumerate() {
-            let fat32_path_part = to_fat32_name(path_part)?;
-            serial_println!(
-                "FAT32Driver: find_direntry: path part {} - {} = {:?}",
-                i,
-                *path_part,
-                fat32_path_part
-            );
-
-            let entries = self.read_directory_entries(curr_cluster, disk_mgr)?;
-            for e in &entries {
-                serial_println!(
-                    "   FAT32Driver: find_direntry: entry {}, is equal?: {}",
-                    e.get_filename(),
-                    e.full_name_matches(&fat32_path_part)
-                );
-            }
-
-            let entry = entries
-                .iter()
-                .find(|e| !e.is_deleted() && e.full_name_matches(&fat32_path_part))
-                .ok_or(FileSystemError::NotFound)?;
-
-            if i < part_count - 1 && !entry.is_directory() {
-                return Err(FileSystemError::NotDirectory);
-            }
-
-            parent_cluster = curr_cluster;
-            curr_cluster = entry.get_first_cluster();
-            found_entry = Some(*entry);
-        }
-
-        assert!(found_entry.is_some());
-        let entry = found_entry.ok_or(FileSystemError::NotFound)?;
-
-        Ok((entry, parent_cluster))
-    }
-
-    fn write_direntry(
-        &mut self,
-        dir_cluster: u32,
-        index_in_directory: usize,
-        entry: &DirectoryEntry,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<()> {
-        //TODO: try to avoid reading cluster chain into buffer here - pass an already filled buffer (would have to assure thread safety with a big disk maanager guard or have some sort of a cluster-level guard?)
-        let cluster_count = self.get_cluster_chain_length(dir_cluster, disk_mgr)?;
-        let buffer_size = cluster_count * self.cluster_size;
-        let mut dir_buffer = alloc::vec![0u8; buffer_size];
-
-        let bytes_read = self.read_cluster_chain(dir_cluster, &mut dir_buffer, disk_mgr)?;
-
-        let entry_offset = index_in_directory * DIRECTORY_ENTRY_SIZE;
-        let entry_end = entry_offset + DIRECTORY_ENTRY_SIZE;
-        if entry_end > bytes_read {
+        if free_cluster == NO_CLUSTER {
             return Err(FileSystemError::NoSpace);
         }
 
-        let entry_bytes = entry.as_bytes();
-        dir_buffer[entry_offset..entry_end].copy_from_slice(&entry_bytes);
+        Ok(free_cluster)
+    }
 
-        // write the buffer to disk
-        let mut bytes_written = 0;
-        let buffer_size = dir_buffer.len();
-        let sectors_per_cluster = self.sectors_per_cluster as usize;
-        let mut curr_cluster = dir_cluster;
+    /// allocates one zeroed cluster as the new end of a chain, linked after previous_cluster
+    /// unless that is NO_CLUSTER. Leaves cluster_buffer zeroed
+    fn allocate_cluster(&mut self, previous_cluster: u32) -> FileSystemResult<u32> {
+        let new_cluster = self.find_free_cluster()?;
 
-        {
-            //let mut disk_mgr = get_disk_mgr();
+        self.cluster_buffer.fill(0);
+        self.write_cluster_from_buffer(new_cluster)?;
+        self.write_fat_entry(new_cluster, END_OF_CHAIN)?;
+        if previous_cluster != NO_CLUSTER {
+            self.write_fat_entry(previous_cluster, new_cluster)?;
+        }
+        self.next_free_hint = new_cluster + 1;
 
-            while bytes_written < buffer_size && curr_cluster < self.max_cluster {
-                let sector = self.cluster_to_sector(curr_cluster);
-                let chunk_size = core::cmp::min(self.cluster_size, buffer_size - bytes_written);
+        Ok(new_cluster)
+    }
 
-                disk_mgr.write_sectors(
-                    sector,
-                    sectors_per_cluster,
-                    &dir_buffer[bytes_written..bytes_written + chunk_size],
-                )?;
-
-                bytes_written += chunk_size;
-
-                match self.get_next_cluster(curr_cluster, disk_mgr)? {
-                    Some(next) => curr_cluster = next,
-                    None => break,
-                }
-            }
+    fn free_cluster_chain(&mut self, first_cluster: u32) -> FileSystemResult<()> {
+        let mut cluster = first_cluster;
+        while cluster != NO_CLUSTER {
+            let next = self.get_next_cluster(cluster)?;
+            self.write_fat_entry(cluster, FAT_ENTRY_FREE)?;
+            self.next_free_hint = min(self.next_free_hint, cluster);
+            cluster = next;
         }
 
         Ok(())
     }
 
-    fn expand_directory(
+    /// returns all entries up to the end marker, including deleted ones and the volume label,
+    /// since the index of an entry in the returned vector identifies its slot in the directory
+    fn read_directory_entries(
+        &mut self,
+        first_cluster: u32,
+    ) -> FileSystemResult<Vec<DirectoryEntry>> {
+        let mut entries = Vec::new();
+        let mut cluster = first_cluster;
+
+        while cluster != NO_CLUSTER {
+            self.read_cluster_into_buffer(cluster)?;
+
+            for entry_bytes in self
+                .cluster_buffer
+                .as_chunks::<DIRECTORY_ENTRY_SIZE>()
+                .0
+                .iter()
+            {
+                let entry = DirectoryEntry::from_bytes(entry_bytes);
+                if entry.is_empty() {
+                    return Ok(entries);
+                }
+                entries.push(entry);
+            }
+
+            cluster = self.get_next_cluster(cluster)?;
+        }
+
+        Ok(entries)
+    }
+
+    fn read_direntry_at(
         &mut self,
         dir_cluster: u32,
-        curr_entry_count: usize,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
-    ) -> FileSystemResult<usize> {
-        let mut last_cluster = dir_cluster;
-        while last_cluster >= ROOT_CLUSTER && last_cluster < self.max_cluster {
-            match self.get_next_cluster(last_cluster, disk_mgr)? {
-                Some(next) => last_cluster = next,
-                None => break,
-            }
+        entry_index: usize,
+    ) -> FileSystemResult<DirectoryEntry> {
+        let entries_per_cluster = self.cluster_size / DIRECTORY_ENTRY_SIZE;
+        let cluster = self.nth_cluster(dir_cluster, entry_index / entries_per_cluster)?;
+        if cluster == NO_CLUSTER {
+            return Err(FileSystemError::NotFound);
         }
-        serial_println!("expand_directory: last_cluster = {}", last_cluster);
 
-        let new_cluster = self.allocate_clusters(1, disk_mgr)?;
-        serial_println!("expand_directory: allocated new_cluster = {}", new_cluster);
-        self.clear_clusters(new_cluster, 1, disk_mgr)?;
-        serial_println!("expand_directory: cleared new cluster");
+        self.read_cluster_into_buffer(cluster)?;
+        let offset = (entry_index % entries_per_cluster) * DIRECTORY_ENTRY_SIZE;
 
-        self.write_fat_entry(last_cluster, new_cluster, disk_mgr)?;
-        self.write_fat_entry(new_cluster, END_OF_CHAIN, disk_mgr)?;
-        let new_slot_index = curr_entry_count;
-        serial_println!(
-            "expand_directory: linked clusters {} and {}, returning new slot index: {}",
-            last_cluster,
-            new_cluster,
-            new_slot_index
-        );
-
-        Ok(new_slot_index)
+        Ok(DirectoryEntry::from_bytes(
+            &self.cluster_buffer[offset..offset + DIRECTORY_ENTRY_SIZE],
+        ))
     }
 
-    fn free_cluster_chain(
+    /// read-modify-write of the single directory cluster that holds the entry
+    fn write_direntry(
         &mut self,
-        start_cluster: u32,
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
+        dir_cluster: u32,
+        entry_index: usize,
+        entry: &DirectoryEntry,
     ) -> FileSystemResult<()> {
-        let mut curr_cluster = start_cluster;
-
-        while curr_cluster >= ROOT_CLUSTER && curr_cluster < self.max_cluster {
-            let next = match self.get_next_cluster(curr_cluster, disk_mgr)? {
-                Some(next_cluster) => {
-                    assert!(next_cluster >= ROOT_CLUSTER && next_cluster < self.max_cluster);
-                    Some(next_cluster)
-                }
-                None => None,
-            };
-
-            // free the current cluster
-            self.write_fat_entry(curr_cluster, EMPTY_FAT_ENTRY, disk_mgr)?;
-            serial_println!("free_cluster_chain: freed cluster {}", curr_cluster);
-
-            match next {
-                Some(next_cluster) => curr_cluster = next_cluster,
-                None => break,
-            }
+        let entries_per_cluster = self.cluster_size / DIRECTORY_ENTRY_SIZE;
+        let cluster = self.nth_cluster(dir_cluster, entry_index / entries_per_cluster)?;
+        if cluster == NO_CLUSTER {
+            return Err(FileSystemError::NoSpace);
         }
 
-        Ok(())
+        self.read_cluster_into_buffer(cluster)?;
+        let offset = (entry_index % entries_per_cluster) * DIRECTORY_ENTRY_SIZE;
+        self.cluster_buffer[offset..offset + DIRECTORY_ENTRY_SIZE]
+            .copy_from_slice(&entry.as_bytes());
+
+        self.write_cluster_from_buffer(cluster)
     }
 
+    /// slot for a new entry: a deleted one, the end marker, or the first slot of a new cluster
     fn find_free_slot_in_directory(
         &mut self,
         dir_cluster: u32,
         entries: &[DirectoryEntry],
-        disk_mgr: &mut MutexGuard<'_, DiskManager>,
     ) -> FileSystemResult<usize> {
-        serial_println!(
-            "FAT32Driver: find_free_slot_in_directory(): reading directory entries from a given entry list"
-        );
-        for (i, entry) in entries.iter().enumerate() {
-            if !entry.is_valid() {
-                serial_println!(
-                    "FAT32Driver: find_free_slot_in_directory(): found free entry at slot: {}",
-                    i
-                );
-                return Ok(i);
-            }
+        if let Some(deleted_slot) = entries.iter().position(|e| !e.is_valid()) {
+            return Ok(deleted_slot);
         }
 
-        serial_println!(
-            "FAT32Driver: find_free_slot_in_directory(): no free entry found, expanding directory"
-        );
-        let new_slot = self.expand_directory(dir_cluster, entries.len(), disk_mgr)?;
-        serial_println!(
-            "FAT32Driver: find_free_slot_in_directory(): expanded directory: new_slot: {}",
-            new_slot
-        );
+        let entries_per_cluster = self.cluster_size / DIRECTORY_ENTRY_SIZE;
+        let capacity = self.get_cluster_chain_length(dir_cluster)? * entries_per_cluster;
+        if entries.len() < capacity {
+            return Ok(entries.len());
+        }
 
-        Ok(new_slot)
+        let last_cluster = self.last_cluster_of_chain(dir_cluster)?;
+        self.allocate_cluster(last_cluster)?;
+
+        Ok(entries.len())
     }
-}
 
-impl FilesystemDriver for Fat32Driver {
-    fn read_file(
+    fn find_direntry(&mut self, path: &str) -> FileSystemResult<(DirectoryEntry, u32, usize)> {
+        let mut found = (self.root_direntry, self.root_cluster, 0);
+        let mut curr_cluster = self.root_cluster;
+        let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
+
+        while let Some(part) = parts.next() {
+            let fat32_part = to_fat32_name(part)?;
+            let entries = self.read_directory_entries(curr_cluster)?;
+            let entry_index = entries
+                .iter()
+                .position(|e| e.is_valid() && !e.is_volume_id() && e.full_name_matches(&fat32_part))
+                .ok_or(FileSystemError::NotFound)?;
+            let entry = entries[entry_index];
+
+            if parts.peek().is_some() && !entry.is_directory() {
+                return Err(FileSystemError::NotDirectory);
+            }
+
+            found = (entry, curr_cluster, entry_index);
+            curr_cluster = entry.get_first_cluster();
+        }
+
+        Ok(found)
+    }
+
+    /// finds the directory entry a handle refers to, and its slot index in the parent
+    fn load_entry(&mut self, node_id: FileNodeHandle) -> FileSystemResult<(DirectoryEntry, usize)> {
+        let node = decode_node_id(node_id);
+
+        if node.by_entry_index {
+            let entry_index = node.cluster_or_entry_index as usize;
+            let entry = self.read_direntry_at(node.parent_cluster, entry_index)?;
+            if !entry.is_valid() {
+                return Err(FileSystemError::NotFound);
+            }
+
+            return Ok((entry, entry_index));
+        }
+
+        let entries = self.read_directory_entries(node.parent_cluster)?;
+        let entry_index = entries
+            .iter()
+            .position(|e| {
+                e.is_valid()
+                    && !e.is_volume_id()
+                    && e.get_first_cluster() == node.cluster_or_entry_index
+            })
+            .ok_or(FileSystemError::NotFound)?;
+
+        Ok((entries[entry_index], entry_index))
+    }
+
+    fn is_root_node(&self, node_id: FileNodeHandle) -> bool {
+        let node = decode_node_id(node_id);
+
+        !node.by_entry_index && node.cluster_or_entry_index == self.root_cluster
+    }
+
+    pub fn read_file(
         &mut self,
         node_id: FileNodeHandle,
         offset: usize,
         out_buffer: &mut [u8],
     ) -> FileSystemResult<usize> {
-        let (cluster, parent_cluster, attributes) = decode_node_id(node_id);
-
-        serial_println!(
-            "FAT32Driver: read_file called with node_id={:#x}, cluster={}, offset={}, out_buffer_size={}",
-            node_id,
-            cluster,
-            offset,
-            out_buffer.len()
-        );
-
-        if is_directory(attributes) {
+        if is_directory(decode_node_id(node_id).attributes) {
             return Err(FileSystemError::IsDirectory);
         }
 
-        if cluster == 0 {
-            return Err(FileSystemError::InvalidPath);
-        }
-
-        let mut disk_mgr = get_disk_mgr();
-
-        let entry = self.find_entry_by_cluster(parent_cluster, cluster, &mut disk_mgr)?;
+        let (entry, _) = self.load_entry(node_id)?;
         let file_size = entry.file_size as usize;
-
-        if offset >= file_size {
-            serial_println!(
-                "FAT32Driver: Offset {} is beyond file size {}",
-                offset,
-                file_size
-            );
-            return Err(FileSystemError::FileSizeExceeded);
+        let first_cluster = entry.get_first_cluster();
+        if offset >= file_size || first_cluster == NO_CLUSTER || out_buffer.is_empty() {
+            return Ok(0);
         }
 
-        let skip_clusters = offset / self.cluster_size;
-        let offset_in_cluster = offset % self.cluster_size;
+        let bytes_to_read = min(out_buffer.len(), file_size - offset);
+        let mut cluster = self.nth_cluster(first_cluster, offset / self.cluster_size)?;
+        let mut offset_in_cluster = offset % self.cluster_size;
+        let mut total_read = 0;
 
-        // Skip to correct cluster
-        serial_println!(
-            "FAT32Driver: Reading file at cluster {}, offset_in_cluster {}, skip_clusters {}",
-            cluster,
-            offset_in_cluster,
-            skip_clusters
-        );
+        while total_read < bytes_to_read && cluster != NO_CLUSTER {
+            let remaining = bytes_to_read - total_read;
 
-        let mut curr_cluster = cluster;
+            if offset_in_cluster == 0 && remaining >= self.cluster_size {
+                // whole clusters go straight into the caller buffer, one request per contiguous run
+                let max_run_length = remaining / self.cluster_size;
+                let is_tail_left = !remaining.is_multiple_of(self.cluster_size);
+                let (run_length, next_cluster) =
+                    self.contiguous_run(cluster, max_run_length, is_tail_left)?;
+                let run_bytes = run_length * self.cluster_size;
 
-        for _ in 0..skip_clusters {
-            match self.get_next_cluster(curr_cluster, &mut disk_mgr)? {
-                Some(next) => curr_cluster = next,
-                None => return Ok(0),
+                let sector = self.cluster_to_sector(cluster);
+                self.device
+                    .read_sectors(sector, &mut out_buffer[total_read..total_read + run_bytes])?;
+
+                total_read += run_bytes;
+                cluster = next_cluster;
+            } else {
+                // partial first or last cluster goes through the bounce buffer
+                let chunk = min(self.cluster_size - offset_in_cluster, remaining);
+                self.read_cluster_into_buffer(cluster)?;
+                out_buffer[total_read..total_read + chunk].copy_from_slice(
+                    &self.cluster_buffer[offset_in_cluster..offset_in_cluster + chunk],
+                );
+
+                total_read += chunk;
+                offset_in_cluster = 0;
+                if total_read < bytes_to_read {
+                    cluster = self.get_next_cluster(cluster)?;
+                }
             }
         }
 
-        serial_println!(
-            "FAT32Driver: Positioned at cluster {} after skipping",
-            curr_cluster
-        );
-
-        // Read cluster and offset
-        let mut temp_buffer = alloc::vec![0u8; self.cluster_size];
-        let sector = self.cluster_to_sector(curr_cluster);
-        serial_println!(
-            "FAT32Driver: Reading cluster {}, sector {}, offset_in_cluster {}",
-            curr_cluster,
-            sector,
-            offset_in_cluster
-        );
-
-        {
-            serial_println!(
-                "FAT32Driver: Issuing read_sectors for sector {}, count {}, temp_buffer size {}",
-                sector,
-                self.sectors_per_cluster,
-                temp_buffer.len()
-            );
-            //let mut disk_mgr = get_disk_mgr();
-            disk_mgr.read_sectors(sector, self.sectors_per_cluster as usize, &mut temp_buffer)?
-        }
-
-        let available = self.cluster_size - offset_in_cluster;
-        let bytes_to_read = core::cmp::min(
-            available,
-            core::cmp::min(out_buffer.len(), file_size - offset),
-        );
-
-        serial_println!(
-            "FAT32Driver: Reading cluster {}, sector {}, offset_in_cluster {}, bytes_to_read {}",
-            curr_cluster,
-            sector,
-            offset_in_cluster,
-            bytes_to_read
-        );
-
-        out_buffer[..bytes_to_read]
-            .copy_from_slice(&temp_buffer[offset_in_cluster..offset_in_cluster + bytes_to_read]);
-
-        serial_println!(
-            "FAT32Driver: Read {} bytes from file (offset {})",
-            bytes_to_read,
-            offset
-        );
-
-        Ok(bytes_to_read)
+        Ok(total_read)
     }
 
-    fn write_file(
+    /// offset may be at most the current file size. Returns the number of bytes written, which
+    /// is smaller than data.len() only when the volume ran out of space
+    pub fn write_file(
         &mut self,
-        _node_id: FileNodeHandle,
-        _offset: usize,
-        _data: &[u8],
+        node_id: FileNodeHandle,
+        offset: usize,
+        data: &[u8],
     ) -> FileSystemResult<usize> {
-        Err(FileSystemError::NotSupported)
-    }
-
-    fn get_node(&self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
-        let (cluster, parent_cluster, _) = decode_node_id(node_id);
-
-        if cluster != ROOT_CLUSTER {
-            let mut disk_mgr = get_disk_mgr();
-            let entry = self.find_entry_by_cluster(parent_cluster, cluster, &mut disk_mgr)?;
-
-            Ok(FileNode {
-                node_id,
-                name: entry.get_filename(),
-                file_type: entry.get_file_type(),
-                size: entry.file_size as usize,
-                created_time: entry.get_creation_timestamp(),
-                modified_time: entry.get_modified_timestamp(),
-                attributes: file_attributes_from_fat_attributes(entry.attributes),
-            })
-        } else {
-            Ok(self.root_filenode.clone())
+        if is_directory(decode_node_id(node_id).attributes) {
+            return Err(FileSystemError::IsDirectory);
         }
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        let parent_cluster = decode_node_id(node_id).parent_cluster;
+        let (mut entry, entry_index) = self.load_entry(node_id)?;
+        if entry.attributes & FatFileAttributes::ReadOnly as u8 != 0 {
+            return Err(FileSystemError::PermissionDenied);
+        }
+
+        let old_size = entry.file_size as usize;
+        if offset > old_size {
+            return Err(FileSystemError::OffsetPastEnd);
+        }
+        if offset + data.len() > MAX_FILE_SIZE_BYTES {
+            return Err(FileSystemError::FileSizeExceeded);
+        }
+
+        let mut cluster = entry.get_first_cluster();
+        if cluster == NO_CLUSTER {
+            cluster = self.allocate_cluster(NO_CLUSTER)?;
+            entry.set_first_cluster(cluster);
+            self.write_direntry(parent_cluster, entry_index, &entry)?;
+        }
+
+        // walk to the cluster that holds offset, extending the chain when offset is at its end
+        for _ in 0..offset / self.cluster_size {
+            let next = self.get_next_cluster(cluster)?;
+            cluster = if next != NO_CLUSTER {
+                next
+            } else {
+                self.allocate_cluster(cluster)?
+            };
+        }
+
+        let mut offset_in_cluster = offset % self.cluster_size;
+        let mut total_written = 0;
+
+        while total_written < data.len() {
+            let chunk = min(
+                self.cluster_size - offset_in_cluster,
+                data.len() - total_written,
+            );
+            let chunk_data = &data[total_written..total_written + chunk];
+
+            if chunk == self.cluster_size {
+                let sector = self.cluster_to_sector(cluster);
+                self.device.write_sectors(sector, chunk_data)?;
+            } else {
+                self.read_cluster_into_buffer(cluster)?;
+                self.cluster_buffer[offset_in_cluster..offset_in_cluster + chunk]
+                    .copy_from_slice(chunk_data);
+                self.write_cluster_from_buffer(cluster)?;
+            }
+
+            total_written += chunk;
+            offset_in_cluster = 0;
+            if total_written == data.len() {
+                break;
+            }
+
+            let next = self.get_next_cluster(cluster)?;
+            if next != NO_CLUSTER {
+                cluster = next;
+                continue;
+            }
+            match self.allocate_cluster(cluster) {
+                Ok(new_cluster) => cluster = new_cluster,
+                // short write, the data written so far is kept
+                Err(FileSystemError::NoSpace) => break,
+                Err(error) => return Err(error),
+            }
+        }
+
+        let new_size = max(old_size, offset + total_written);
+        if new_size != old_size {
+            entry.file_size = new_size as u32;
+            self.write_direntry(parent_cluster, entry_index, &entry)?;
+        }
+
+        Ok(total_written)
     }
 
-    fn list_directory(&self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>> {
-        let (dir_cluster, _, attributes) = decode_node_id(node_id);
+    pub fn get_node(&mut self, node_id: FileNodeHandle) -> FileSystemResult<FileNode> {
+        if self.is_root_node(node_id) {
+            return Ok(self.root_filenode.clone());
+        }
 
-        if !is_directory(attributes) {
+        let (entry, entry_index) = self.load_entry(node_id)?;
+
+        Ok(node_from_entry(
+            &entry,
+            decode_node_id(node_id).parent_cluster,
+            entry_index,
+        ))
+    }
+
+    pub fn list_directory(&mut self, node_id: FileNodeHandle) -> FileSystemResult<Vec<FileNode>> {
+        let node = decode_node_id(node_id);
+        if !is_directory(node.attributes) {
             return Err(FileSystemError::NotDirectory);
         }
+        debug_assert!(!node.by_entry_index);
 
-        let mut entries;
-        {
-            let mut disk_mgr = get_disk_mgr();
-            entries = self.read_directory_entries(dir_cluster, &mut disk_mgr)?;
-            entries.retain(|e| e.is_valid() && !e.is_volume_id());
-        }
+        let dir_cluster = node.cluster_or_entry_index;
+        let entries = self.read_directory_entries(dir_cluster)?;
         let mut nodes = Vec::with_capacity(entries.len());
 
-        serial_println!(
-            "FAT32Driver: list_directory found {} entries in dir_cluster {}",
-            entries.len(),
-            dir_cluster
-        );
+        for (entry_index, entry) in entries.iter().enumerate() {
+            if !entry.is_valid()
+                || entry.is_volume_id()
+                || entry.is_current_directory()
+                || entry.is_parent_directory()
+            {
+                continue;
+            }
 
-        for entry in entries {
-            let entry_cluster = entry.get_first_cluster();
-            let is_dir = entry.is_directory();
-            let size = entry.file_size;
-            let node_id = encode_node_id(&entry, dir_cluster);
-
-            serial_println!(
-                "FAT32Driver: list_directory Encoding file '{}' with cluster={}, size={}, is_dir={}, node_id={:#x}",
-                entry.get_filename(),
-                entry_cluster,
-                size,
-                is_dir,
-                node_id
-            );
-
-            nodes.push(FileNode {
-                node_id,
-                name: entry.get_filename(),
-                file_type: entry.get_file_type(),
-                size: size as usize,
-                created_time: entry.get_creation_timestamp(),
-                modified_time: entry.get_modified_timestamp(),
-                attributes: file_attributes_from_fat_attributes(entry.attributes),
-            });
+            nodes.push(node_from_entry(entry, dir_cluster, entry_index));
         }
 
         Ok(nodes)
     }
 
-    fn find_node(&self, path: &str) -> FileSystemResult<FileNodeHandle> {
-        let mut disk_mgr = get_disk_mgr();
-        let (entry, parent_cluster) = self.find_direntry(path, &mut disk_mgr)?;
+    pub fn find_node(&mut self, path: &str) -> FileSystemResult<FileNodeHandle> {
+        let (entry, parent_cluster, entry_index) = self.find_direntry(path)?;
+        debug_assert!(!(entry.is_directory() && entry.file_size != 0));
 
-        let is_dir = entry.is_directory();
-        let size = entry.file_size;
-
-        serial_println!(
-            "FAT32Driver: find_node found '{}' at cluster {}, parent_cluster {}, is_dir={}",
-            path,
-            entry.get_first_cluster(),
-            parent_cluster,
-            is_dir
-        );
-        assert!(!(is_dir && size != 0));
-
-        let node_id = encode_node_id(&entry, parent_cluster);
-        serial_println!("find_node: Encoding node_id {:#x}", node_id);
-
-        Ok(node_id)
+        Ok(encode_node_id(&entry, parent_cluster, entry_index))
     }
 
-    fn create_file(
+    fn create_node(
         &mut self,
         parent_id: FileNodeHandle,
         name: &str,
+        is_new_node_directory: bool,
     ) -> FileSystemResult<FileNodeHandle> {
-        //TODO: there is possible thread overriding each other if i dont put a guard around the whole thing,
-        // including reading clusters and until the last write - maybe do a cluster-level guard (some busy flag?) (locking the
-        // whole disk is not a great idea)
-        let (parent_cluster, _, attrs) = decode_node_id(parent_id);
-        serial_println!(
-            "FAT32Driver: create_file: called for parent with node id: {:#x}",
-            parent_id
-        );
-
-        if !is_directory(attrs) {
-            serial_println!("FAT32Driver: create_file: parent is not a directory");
+        let parent = decode_node_id(parent_id);
+        if !is_directory(parent.attributes) {
             return Err(FileSystemError::NotDirectory);
         }
+        debug_assert!(!parent.by_entry_index);
 
-        if !is_valid_filename(name) {
-            serial_println!("FAT32Driver: create_file: filename is invalid");
-            return Err(FileSystemError::InvalidFilename);
-        }
+        let parent_cluster = parent.cluster_or_entry_index;
+        let fat32_name = to_fat32_name(name)?;
 
-        let mut entry = DirectoryEntry::create_empty();
-
+        let entries = self.read_directory_entries(parent_cluster)?;
+        if entries
+            .iter()
+            .any(|e| e.is_valid() && !e.is_volume_id() && e.full_name_matches(&fat32_name))
         {
-            let mut disk_mgr = get_disk_mgr();
-
-            let entries = self.read_directory_entries(parent_cluster, &mut disk_mgr)?;
-            if entries
-                .iter()
-                .any(|e| !e.is_deleted() && e.get_filename() == name)
-            {
-                serial_println!("FAT32Driver: create_file: entry already exists");
-                return Err(FileSystemError::FileExists);
-            }
-
-            let free_slot_index =
-                self.find_free_slot_in_directory(parent_cluster, &entries, &mut disk_mgr)?;
-            serial_println!(
-                "FAT32Driver: create_file: free_slot_index: {}",
-                free_slot_index
-            );
-
-            let new_file_cluster = self.allocate_clusters(1, &mut disk_mgr)?;
-            serial_println!(
-                "FAT32Driver: create_file: new_file_cluster: {}",
-                new_file_cluster
-            );
-            self.clear_clusters(new_file_cluster, 1, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: create_file: New file cluster cleared");
-
-            let _timestamp = 0; //TODO: pass to constructor
-            entry.set_filename(name);
-            entry.attributes = FatFileAttributes::Archive as u8;
-            entry.set_first_cluster(new_file_cluster);
-
-            self.write_direntry(parent_cluster, free_slot_index, &entry, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: create_file: new directory entry written");
+            return Err(FileSystemError::FileExists);
         }
 
-        let node_id = encode_node_id(&entry, parent_cluster);
+        let free_slot = self.find_free_slot_in_directory(parent_cluster, &entries)?;
 
-        Ok(node_id)
-    }
+        let mut new_entry = DirectoryEntry::create_empty();
+        new_entry.set_filename(name)?;
 
-    fn create_directory(
-        &mut self,
-        parent_id: FileNodeHandle,
-        name: &str,
-    ) -> FileSystemResult<FileNodeHandle> {
-        let (parent_cluster, _, attrs) = decode_node_id(parent_id);
-        serial_println!(
-            "FAT32Driver: create_directory: called for parent with node id: {:#x}",
-            parent_id
-        );
-
-        if !is_directory(attrs) {
-            serial_println!("FAT32Driver: create_directory: parent is not a directory");
-            return Err(FileSystemError::NotDirectory);
-        }
-
-        if !is_valid_filename(name) {
-            serial_println!("FAT32Driver: create_directory: name is invalid");
-            return Err(FileSystemError::InvalidFilename);
-        }
-
-        let mut new_dir_entry = DirectoryEntry::create_empty();
-
-        {
-            let mut disk_mgr = get_disk_mgr();
-
-            let entries = self.read_directory_entries(parent_cluster, &mut disk_mgr)?;
-            if entries
-                .iter()
-                .any(|e| !e.is_deleted() && e.get_filename() == name)
-            {
-                serial_println!("FAT32Driver: create_directory: entry already exists");
-                return Err(FileSystemError::FileExists);
-            }
-            let free_slot_index =
-                self.find_free_slot_in_directory(parent_cluster, &entries, &mut disk_mgr)?;
-            serial_println!(
-                "FAT32Driver: create_directory: free_slot_index: {}",
-                free_slot_index
-            );
-
-            let new_dir_cluster = self.allocate_clusters(1, &mut disk_mgr)?;
-            serial_println!(
-                "FAT32Driver: create_directory: allocated cluster: {}",
-                new_dir_cluster
-            );
-
-            self.clear_clusters(new_dir_cluster, 1, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: create_directory: cleared new cluster");
-
+        if is_new_node_directory {
+            let new_dir_cluster = self.allocate_cluster(NO_CLUSTER)?;
             let dot_entry = DirectoryEntry::create_dot_entry(new_dir_cluster);
-            let dotdot_entry = DirectoryEntry::create_dot_dot_entry(parent_cluster);
-
-            self.write_direntry(new_dir_cluster, 0, &dot_entry, &mut disk_mgr)?;
-            self.write_direntry(new_dir_cluster, 1, &dotdot_entry, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: create_directory: wrote . and .. entries");
-
-            new_dir_entry.set_filename(name);
-            new_dir_entry.attributes = FatFileAttributes::Directory as u8;
-            new_dir_entry.set_first_cluster(new_dir_cluster);
-            new_dir_entry.file_size = 0;
-
-            //TODO: timestamp
-
-            self.write_direntry(
-                parent_cluster,
-                free_slot_index,
-                &new_dir_entry,
-                &mut disk_mgr,
-            )?;
-            serial_println!("FAT32Driver: create_directory: wrote new directory entry to parent");
-        }
-
-        let node_id = encode_node_id(&new_dir_entry, parent_cluster);
-        serial_println!(
-            "FAT32Driver: create_directory: created directory with node_id: {:#x}",
-            node_id
-        );
-
-        Ok(node_id)
-    }
-
-    fn delete(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()> {
-        let (cluster, parent_cluster, attrs) = decode_node_id(node_id);
-        serial_println!(
-            "FAT32Driver: delete: called for node_id: {:#x}, cluster: {}, parent_cluster: {}",
-            node_id,
-            cluster,
-            parent_cluster
-        );
-
-        {
-            let mut disk_mgr = get_disk_mgr();
-
-            let entries = self.read_directory_entries(parent_cluster, &mut disk_mgr)?;
-            let (entry_index, entry) = entries
-                .iter()
-                .enumerate()
-                .find(|(_, e)| !e.is_deleted() && e.get_first_cluster() == cluster)
-                .ok_or(FileSystemError::NotFound)?;
-
-            serial_println!("FAT32Driver: delete: found entry at index {}", entry_index);
-
-            if is_directory(attrs) {
-                let dir_entries = self.read_directory_entries(cluster, &mut disk_mgr)?;
-                let has_valid_entries = dir_entries
-                    .iter()
-                    .any(|e| e.is_valid() && e.name[0] != b'.');
-
-                if has_valid_entries {
-                    //TODO: a way to delete non-empty directories recursively
-                    serial_println!("FAT32Driver: delete: directory is not empty");
-                    return Err(FileSystemError::DirectoryNotEmpty);
-                }
-
-                self.free_cluster_chain(cluster, &mut disk_mgr)?;
-                serial_println!("FAT32Driver: delete: freed directory clusters");
+            // the parent of a top level directory is recorded as cluster 0 in ".."
+            let dotdot_cluster = if parent_cluster == self.root_cluster {
+                NO_CLUSTER
             } else {
-                self.free_cluster_chain(cluster, &mut disk_mgr)?;
-                serial_println!("FAT32Driver: delete: freed file clusters");
-            }
+                parent_cluster
+            };
+            let dotdot_entry = DirectoryEntry::create_dot_dot_entry(dotdot_cluster);
 
-            let mut deleted_entry = *entry;
-            deleted_entry.mark_deleted();
-            self.write_direntry(parent_cluster, entry_index, &deleted_entry, &mut disk_mgr)?;
-            serial_println!("FAT32Driver: delete: marked entry as deleted");
+            // allocate_cluster left the buffer zeroed
+            self.cluster_buffer[..DIRECTORY_ENTRY_SIZE].copy_from_slice(&dot_entry.as_bytes());
+            self.cluster_buffer[DIRECTORY_ENTRY_SIZE..2 * DIRECTORY_ENTRY_SIZE]
+                .copy_from_slice(&dotdot_entry.as_bytes());
+            self.write_cluster_from_buffer(new_dir_cluster)?;
+
+            new_entry.attributes = FatFileAttributes::Directory as u8;
+            new_entry.set_first_cluster(new_dir_cluster);
+        } else {
+            // the first cluster is allocated by the first write
+            new_entry.attributes = FatFileAttributes::Archive as u8;
         }
+        new_entry.file_size = 0;
 
-        Ok(())
+        self.write_direntry(parent_cluster, free_slot, &new_entry)?;
+
+        Ok(encode_node_id(&new_entry, parent_cluster, free_slot))
     }
 
-    fn root_node(&self) -> FileNodeHandle {
-        self.root_dir_node_id
+    pub fn create_file(
+        &mut self,
+        parent_id: FileNodeHandle,
+        name: &str,
+    ) -> FileSystemResult<FileNodeHandle> {
+        self.create_node(parent_id, name, false)
+    }
+
+    pub fn create_directory(
+        &mut self,
+        parent_id: FileNodeHandle,
+        name: &str,
+    ) -> FileSystemResult<FileNodeHandle> {
+        self.create_node(parent_id, name, true)
+    }
+
+    pub fn delete(&mut self, node_id: FileNodeHandle) -> FileSystemResult<()> {
+        if self.is_root_node(node_id) {
+            return Err(FileSystemError::PermissionDenied);
+        }
+
+        let parent_cluster = decode_node_id(node_id).parent_cluster;
+        let (mut entry, entry_index) = self.load_entry(node_id)?;
+        let first_cluster = entry.get_first_cluster();
+
+        if entry.is_directory() {
+            let dir_entries = self.read_directory_entries(first_cluster)?;
+            if dir_entries
+                .iter()
+                .any(|e| e.is_valid() && !e.is_current_directory() && !e.is_parent_directory())
+            {
+                return Err(FileSystemError::DirectoryNotEmpty);
+            }
+        }
+
+        // the entry is marked deleted first so a failure never leaves it pointing at freed clusters
+        entry.mark_deleted();
+        self.write_direntry(parent_cluster, entry_index, &entry)?;
+        self.free_cluster_chain(first_cluster)
     }
 }

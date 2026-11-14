@@ -1,4 +1,4 @@
 pub mod fat32;
-pub mod sirius;
+pub mod vfs;
 
-pub use sirius::{FileNode, FileType, SIRIUS, Sirius, get_sirius, init_filesystem};
+pub use vfs::{FileNode, FileType, VFS, Vfs, get_vfs, init_filesystem};
