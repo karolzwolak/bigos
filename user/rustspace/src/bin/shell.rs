@@ -24,30 +24,30 @@ global_asm!(
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
     let Ok(window_id) = rustspace::sys_create_window(600, 400, 50, 50) else {
-        rustspace::println!("theophe: create_window failed");
+        rustspace::println!("shell: create_window failed");
         rustspace::sys_exit(1)
     };
-    rustspace::println!("theophe: window id={}", window_id);
+    rustspace::println!("shell: window id={}", window_id);
 
     let Ok(pixels) = rustspace::sys_map_window_buffer(window_id) else {
-        rustspace::println!("theophe: map_window_buffer failed");
+        rustspace::println!("shell: map_window_buffer failed");
         rustspace::sys_exit(1)
     };
     let mut window_info = WindowInfo::zeroed();
     if !sys_get_window_info(window_id, &mut window_info) {
-        rustspace::println!("theophe: get_window_info failed");
+        rustspace::println!("shell: get_window_info failed");
         rustspace::sys_exit(1)
     }
     let pixels_second = ((pixels as u64) + window_info.front_buffer_offset) as *mut u32;
 
     let (width, height) = rustspace::sys_get_window_size(window_id).unwrap_or((0, 0));
     if width == 0 || height == 0 {
-        rustspace::println!("theophe: get_window_size failed");
+        rustspace::println!("shell: get_window_size failed");
         rustspace::sys_exit(1)
     }
 
     rustspace::println!(
-        "theophe: window {}x{} id={} mapped at {:p}, front: {:p}",
+        "shell: window {}x{} id={} mapped at {:p}, front: {:p}",
         width,
         height,
         window_id,
@@ -63,11 +63,11 @@ pub extern "C" fn main() -> ! {
         let mut buffer_info = rustspace::CircularBufferInfo::zeroed();
         let ok = rustspace::sys_create_circular_buffer(64 * 1024, page_flags, &mut buffer_info);
         if !ok {
-            rustspace::println!("theophe: cant create circular buffer");
+            rustspace::println!("shell: cant create circular buffer");
             rustspace::sys_exit(1)
         }
         rustspace::println!(
-            "theophe: circular buffer base={:#x} view_size={} total={}",
+            "shell: circular buffer base={:#x} view_size={} total={}",
             buffer_info.virtual_base,
             buffer_info.view_size,
             buffer_info.total_virtual_size
@@ -76,17 +76,17 @@ pub extern "C" fn main() -> ! {
     };
 
     let surface = unsafe { UserSurface::new(pixels, pixels_second, width, height) };
-    let mut theophe = Terminal::new(surface, window_id, scrollback);
+    let mut shell = Terminal::new(surface, window_id, scrollback);
 
-    rustspace::println!("theophe: writing");
+    rustspace::println!("shell: writing");
 
-    theophe.write_line("Welcome to bigOS");
-    theophe.write_line("=======================");
+    shell.write_line("Welcome to bigOS");
+    shell.write_line("=======================");
 
-    rustspace::println!("theophe: starting loop");
+    rustspace::println!("shell: starting loop");
 
     rustspace::println!(
-        "theophe: window info: {}x{} event_buffer_vaddr: {}",
+        "shell: window info: {}x{} event_buffer_vaddr: {}",
         window_info.width,
         window_info.height,
         window_info.event_buffer_vaddr,
@@ -101,19 +101,19 @@ pub extern "C" fn main() -> ! {
         loop {
             let event = event_reader.try_read(window_id);
             match event {
-                Some(event) => theophe.handle_event(event),
+                Some(event) => shell.handle_event(event),
                 None => break,
             }
         }
 
-        let backbuffer_redraw_required = theophe.needs_redraw;
-        if theophe.needs_redraw {
-            theophe.render();
-            theophe.needs_redraw = false;
+        let backbuffer_redraw_required = shell.needs_redraw;
+        if shell.needs_redraw {
+            shell.render();
+            shell.needs_redraw = false;
         }
         rustspace::sys_present_window(window_id);
-        theophe.draw_target.swap();
-        theophe.needs_redraw = backbuffer_redraw_required;
+        shell.draw_target.swap();
+        shell.needs_redraw = backbuffer_redraw_required;
 
         frame = frame.wrapping_add(1);
     }
@@ -123,6 +123,6 @@ pub extern "C" fn main() -> ! {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    rustspace::println!("theophe: panic");
+    rustspace::println!("shell: panic");
     rustspace::sys_exit(1)
 }

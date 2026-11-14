@@ -8,6 +8,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use spin::Mutex;
 use x86_64::structures::paging::PageTableFlags;
 
+pub mod channel;
 pub mod gfx;
 pub mod terminal;
 
@@ -38,6 +39,8 @@ pub const SYS_CREATE_DIR: u64 = 27;
 pub const SYS_DELETE: u64 = 28;
 
 pub const SYS_CREATE_CIRCULAR_BUFFER: u64 = 600;
+pub const SYS_CREATE_CHANNEL: u64 = 601;
+pub const SYS_CLOSE_CHANNEL: u64 = 602;
 
 pub const SYS_GET_CPU_INFO: u64 = 970;
 
@@ -434,7 +437,7 @@ pub const MAX_ARGC: usize = 64;
 pub const MAX_ARGV_BYTES: usize = 4096;
 pub const MAX_PROCESS_NAME_LEN: usize = 32;
 
-const PROCESS_CREATE_RESERVED_BYTES: usize = 7;
+const PROCESS_CREATE_RESERVED_BYTES: usize = 5;
 
 bitflags::bitflags! {
     /// Mirrors the kernel's `ProcessCreateFlags`
@@ -446,6 +449,8 @@ bitflags::bitflags! {
         const DETACHED = 1 << 1;
         /// the child gets the caller's priority, the priority field is ignored
         const INHERIT_PRIORITY = 1 << 2;
+        /// stdout and stderr of the child go into stdout_channel, the caller must be its reader
+        const REDIRECT_STDOUT = 1 << 3;
     }
 }
 
@@ -468,6 +473,8 @@ pub struct ProcessCreateInfo<'a> {
     pub priority: u8,
     /// must be zero
     pub reserved: [u8; PROCESS_CREATE_RESERVED_BYTES],
+    /// read only with REDIRECT_STDOUT, must be 0 without it
+    pub stdout_channel: u16,
     pub borrowed: core::marker::PhantomData<&'a [u8]>,
 }
 
@@ -489,6 +496,7 @@ impl<'a> ProcessCreateInfo<'a> {
             flags: 0,
             priority,
             reserved: [0; PROCESS_CREATE_RESERVED_BYTES],
+            stdout_channel: 0,
             borrowed: core::marker::PhantomData,
         }
     }
@@ -507,8 +515,16 @@ impl<'a> ProcessCreateInfo<'a> {
         self
     }
 
+    /// Adds flags, so it combines with with_stdout_channel in any order
     pub fn with_flags(mut self, flags: ProcessCreateFlags) -> Self {
-        self.flags = flags.bits();
+        self.flags |= flags.bits();
+        self
+    }
+
+    /// The child's stdout and stderr go into the channel, the caller must be its reader
+    pub fn with_stdout_channel(mut self, channel_id: u16) -> Self {
+        self.flags |= ProcessCreateFlags::REDIRECT_STDOUT.bits();
+        self.stdout_channel = channel_id;
         self
     }
 }

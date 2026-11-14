@@ -1,15 +1,15 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::process::elf_loader::{BIGPROC_ELF, THEOPHE_ELF, load_elf_from_path};
+use crate::process::elf_loader::{BIGPROC_ELF, SHELL_ELF, load_elf_from_path};
 use crate::process::process_manager::{ARCHE_PID, BIGPROC_NAME, BIGPROC_PID};
 use crate::process::shared_state::init_shared_state;
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
-use crate::{RUN_THEOPHE, serial_println};
+use crate::{RUN_SHELL, serial_println};
 
-const THEOPHE_PATH: &str = "/BIN/theophe";
-const THEOPHE_NAME: &str = "theophe";
-const THEOPHE_PRIORITY: u8 = 7;
+const SHELL_PATH: &str = "/BIN/shell";
+const SHELL_NAME: &str = "shell";
+const SHELL_PRIORITY: u8 = 7;
 const INIT_PARENT_PID: usize = BIGPROC_PID;
 // bigproc only blocks, it never competes for cpu time
 const BIGPROC_PRIORITY: u8 = 0;
@@ -78,19 +78,19 @@ pub fn init_userspace() {
 pub fn create_userspace_processes() {
     serial_println!("Creating initial userspace processes");
 
-    if RUN_THEOPHE {
-        match create_userspace_process_from_path(THEOPHE_PATH, INIT_PARENT_PID, THEOPHE_PRIORITY) {
-            Ok(pid) => serial_println!("Created theophe from {} (PID {})", THEOPHE_PATH, pid),
+    if RUN_SHELL {
+        match create_userspace_process_from_path(SHELL_PATH, INIT_PARENT_PID, SHELL_PRIORITY) {
+            Ok(pid) => serial_println!("Created shell from {} (PID {})", SHELL_PATH, pid),
             Err(error) => {
-                serial_println!("{}, falling back to the embedded theophe", error);
+                serial_println!("{}, falling back to the embedded shell", error);
                 match create_userspace_process(
-                    THEOPHE_ELF,
-                    THEOPHE_NAME,
+                    SHELL_ELF,
+                    SHELL_NAME,
                     INIT_PARENT_PID,
-                    THEOPHE_PRIORITY,
+                    SHELL_PRIORITY,
                 ) {
-                    Ok(pid) => serial_println!("Created embedded theophe (PID {})", pid),
-                    Err(error) => serial_println!("Embedded theophe failed: {}", error),
+                    Ok(pid) => serial_println!("Created embedded shell (PID {})", pid),
+                    Err(error) => serial_println!("Embedded shell failed: {}", error),
                 }
             }
         }

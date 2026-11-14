@@ -1,3 +1,4 @@
+use crate::ipc::channel::{ChannelId, NO_CHANNEL};
 use crate::process::elf_loader::load_elf_from_path;
 use crate::process::process_manager::{BIGPROC_PID, PROCESS_MANAGER, ProcessSpawn};
 use crate::process::scheduler::{self, MAX_PRIORITY};
@@ -11,7 +12,7 @@ use bitflags::bitflags;
 use static_assertions::const_assert;
 
 const ARGUMENT_TERMINATOR: u8 = 0;
-const RESERVED_BYTES: usize = 7;
+const RESERVED_BYTES: usize = 5;
 
 /// Layout shared with rustspace `ProcessCreateInfo`
 #[repr(C)]
@@ -29,6 +30,8 @@ pub struct ProcessCreateInfo {
     /// ignored with INHERIT_PRIORITY
     pub priority: u8,
     pub reserved: [u8; RESERVED_BYTES],
+    /// read only with REDIRECT_STDOUT, must be 0 without it
+    pub stdout_channel: ChannelId,
 }
 
 const PROCESS_CREATE_INFO_SIZE_BYTES: usize = 64;
@@ -44,6 +47,8 @@ bitflags! {
         const DETACHED = 1 << 1;
         /// the child gets the caller's priority, the priority field is ignored
         const INHERIT_PRIORITY = 1 << 2;
+        /// stdout and stderr of the child go into stdout_channel, the caller must be its reader
+        const REDIRECT_STDOUT = 1 << 3;
     }
 }
 
@@ -94,6 +99,17 @@ pub fn create_process(frame: &SyscallFrame) -> Result<u64, SyscallError> {
     if info.reserved != [0; RESERVED_BYTES] {
         return Err(SyscallError::InvalidArgument);
     }
+    let stdout_channel = if flags.contains(ProcessCreateFlags::REDIRECT_STDOUT) {
+        if info.stdout_channel == NO_CHANNEL {
+            return Err(SyscallError::InvalidArgument);
+        }
+        info.stdout_channel
+    } else {
+        if info.stdout_channel != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        NO_CHANNEL
+    };
     if !flags.contains(ProcessCreateFlags::INHERIT_PRIORITY)
         && info.priority as usize > MAX_PRIORITY
     {
@@ -159,6 +175,8 @@ pub fn create_process(frame: &SyscallFrame) -> Result<u64, SyscallError> {
         argc: info.argc,
         packed_args,
         file_descriptors,
+        spawning_pid: caller_pid,
+        stdout_channel,
     };
     let pid = process_manager.spawn(&spawn, &elf_info)?;
 

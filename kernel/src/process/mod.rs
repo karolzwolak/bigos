@@ -19,6 +19,7 @@ pub use elf_loader::{ElfLoadError, ElfLoadInfo};
 pub use process_manager::ProcessManager;
 
 use crate::filesystem::fat32::{FileNodeHandle, INVALID_NODE_HANDLE};
+use crate::ipc::channel::{ChannelMapping, ChannelRole, MAX_CHANNELS_PER_PROCESS};
 use crate::memory::paging::PAGE_SIZE;
 use crate::memory::usermem::USER_STACK_TOP;
 use crate::process::syscall::SyscallError;
@@ -55,6 +56,10 @@ pub const PROCESS_WINDOW_BUFFER_HARD_MAX_SIZE: u64 = 64 * 1024 * 1024;
 
 // One page per window, indexed by window id, above the window buffer slots
 pub const PROCESS_EVENT_BUFFER_BASE: u64 = 0x0000_0008_0000_0000;
+
+// The stdout channel of a process started with REDIRECT_STDOUT: header page, then both data
+// views. Above the event buffer pages, which stay below it for any window id under 2^20
+pub const PROCESS_STDOUT_CHANNEL_BASE: u64 = 0x0000_0009_0000_0000;
 
 pub const PROCESS_HEAP_VIRT_START: u64 = 0x0000_0000_6000_0000;
 pub const PROCESS_HEAP_SIZE_BYTES: u64 = PROCESS_WINDOW_BUFFER_BASE - PROCESS_HEAP_VIRT_START;
@@ -170,6 +175,8 @@ pub struct Process {
     pub name: String,
     pub children: Vec<PID>,
     pub file_descriptors: [FileDescriptor; MAX_OPEN_FILES],
+    /// Channels mapped into this process, free slots hold ChannelMapping::NONE
+    pub channels: [ChannelMapping; MAX_CHANNELS_PER_PROCESS],
 
     pub resources: ProcessResources,
     pub exit_code: Option<i32>,
@@ -276,6 +283,15 @@ impl Process {
         }
     }
 
+    /// The channel this process writes its stdout into, NONE when it has none
+    pub fn stdout_channel(&self) -> ChannelMapping {
+        self.channels
+            .iter()
+            .find(|mapping| mapping.is_mapped() && mapping.role == ChannelRole::Writer)
+            .copied()
+            .unwrap_or(ChannelMapping::NONE)
+    }
+
     pub fn close_all_fds(&mut self) {
         self.file_descriptors = [FileDescriptor::CLOSED; MAX_OPEN_FILES];
     }
@@ -300,6 +316,7 @@ impl Process {
             name,
             children: Vec::new(),
             file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
+            channels: [ChannelMapping::NONE; MAX_CHANNELS_PER_PROCESS],
             resources,
             exit_code: None,
             is_out,
@@ -447,6 +464,7 @@ impl Process {
             name: String::from(name),
             children: Vec::new(),
             file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
+            channels: [ChannelMapping::NONE; MAX_CHANNELS_PER_PROCESS],
             resources: ProcessResources::default(),
             exit_code: None,
             is_out: true,

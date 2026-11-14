@@ -8,8 +8,8 @@ use elf::endian::AnyEndian;
 use elf::file::{Class, ELF64_EHDR_TAILSIZE, FileHeader, parse_ident};
 use elf::segment::{ProgramHeader, SegmentTable};
 
-/// Debug-stripped copy of the init program, the fallback when /BIN/theophe cannot be loaded
-pub const THEOPHE_ELF: &[u8] = include_bytes!("../../../target/user_bins/theophe");
+/// Debug-stripped copy of the init program, the fallback when /BIN/shell cannot be loaded
+pub const SHELL_ELF: &[u8] = include_bytes!("../../../target/user_bins/shell");
 /// Debug-stripped PID 1, embedded so it exists even when no disk is attached
 pub const BIGPROC_ELF: &[u8] = include_bytes!("../../../target/user_bins/bigproc");
 

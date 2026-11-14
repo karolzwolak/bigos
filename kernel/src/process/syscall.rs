@@ -3,6 +3,7 @@ use crate::filesystem::vfs::FileSystemError;
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::window::{WindowInfo, event_buffer_user_vaddr};
 use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
+use crate::ipc::channel::{self, ChannelId, ChannelInfo};
 use crate::memory::get_frame_allocator;
 use crate::memory::paging::PAGE_SIZE;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
@@ -30,6 +31,9 @@ use x86_64::registers::rflags::RFlags;
 use x86_64::structures::paging::PageTableFlags;
 
 const SYSCALL_DEBUG_PRINT: bool = false;
+
+const STDOUT_FD: u64 = 1;
+const STDERR_FD: u64 = 2;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +108,7 @@ impl From<ProcessError> for SyscallError {
             | ProcessError::SchedulerError
             | ProcessError::OutOfTaskSlots => Self::OutOfMemory,
             ProcessError::DoubleDelete => Self::InvalidArgument,
+            ProcessError::Channel(error) => error,
         }
     }
 }
@@ -145,6 +150,8 @@ pub enum SyscallNumber {
     Delete = 28,
 
     CreateCircularBuffer = 600,
+    CreateChannel = 601,
+    CloseChannel = 602,
 
     SleepMs = 990,
     WaitForInput = 991,
@@ -374,10 +381,18 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
                 return Err(SyscallError::InvalidPtr);
             }
             let slice = unsafe { core::slice::from_raw_parts(buf, count) };
+            let is_stdout = fd == STDOUT_FD || fd == STDERR_FD;
+            let pid = scheduler::get_current_process_for_core(get_current_core_id());
+
+            if is_stdout {
+                let stdout_channel = PROCESS_MANAGER.lock().get_process(pid)?.stdout_channel();
+                if stdout_channel.is_mapped() {
+                    return channel::write_stdout(&stdout_channel, slice).map(|n| n as u64);
+                }
+            }
+
             if let Ok(s) = core::str::from_utf8(slice) {
-                if fd == 1 || fd == 2 {
-                    let core_id = get_current_core_id();
-                    let pid = scheduler::get_current_process_for_core(core_id);
+                if is_stdout {
                     crate::serial2_print!("[pid={}] {}", pid, s);
                 } else {
                     serial_println_core!("WRITE: fd={}, count={}: {}", fd, count, s);
@@ -776,6 +791,38 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
                 &crate::process::wait::INPUT_WAIT_QUEUE,
                 || crate::graphics::compositor::get_compositor().process_has_pending_input(pid),
             );
+            Ok(0)
+        }
+        SyscallNumber::CreateChannel => {
+            let data_size_bytes = frame.arg1 as usize;
+            let info_out = frame.arg2 as usize;
+            if !validate_user_ptr(
+                info_out,
+                core::mem::size_of::<ChannelInfo>(),
+                UserAccess::Write,
+            ) {
+                return Err(SyscallError::InvalidPtr);
+            }
+
+            let pid = scheduler::get_current_process_for_core(get_current_core_id());
+            let mapping = {
+                let mut process_manager = PROCESS_MANAGER.lock();
+                let process = process_manager.get_process_mut(pid)?;
+                channel::create_channel(process, data_size_bytes)?
+            };
+
+            // SAFETY: validated as writable above, and only this process changes its mappings
+            unsafe { (info_out as *mut ChannelInfo).write_unaligned(mapping.info()) };
+            Ok(mapping.channel_id as u64)
+        }
+        SyscallNumber::CloseChannel => {
+            let channel_id =
+                ChannelId::try_from(frame.arg1).map_err(|_| SyscallError::InvalidArgument)?;
+            let pid = scheduler::get_current_process_for_core(get_current_core_id());
+
+            let mut process_manager = PROCESS_MANAGER.lock();
+            let process = process_manager.get_process_mut(pid)?;
+            channel::close_channel(process, channel_id)?;
             Ok(0)
         }
         SyscallNumber::FutexWait => {

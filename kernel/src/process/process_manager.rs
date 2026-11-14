@@ -1,9 +1,11 @@
 use crate::data_structures::vector::Vec;
+use crate::ipc::channel::{self, ChannelId, NO_CHANNEL};
 use crate::process::ProcessResources;
 //use alloc::vec::Vec;
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
 use crate::process::scheduler;
+use crate::process::syscall::SyscallError;
 use crate::process::task::{self, TaskState};
 use crate::process::{
     ChildPolicy, FileDescriptor, INVALID_PID, MAX_OPEN_FILES, MAX_PRIORITY, MAX_PROCESS_NAME_LEN,
@@ -36,6 +38,7 @@ pub enum ProcessError {
     NoCoresAvailable,
     SchedulerError,
     OutOfTaskSlots,
+    Channel(SyscallError),
 }
 
 /// Everything a new process starts with besides its ELF
@@ -47,6 +50,10 @@ pub struct ProcessSpawn<'a> {
     /// argc NUL-terminated strings, already validated
     pub packed_args: &'a [u8],
     pub file_descriptors: [FileDescriptor; MAX_OPEN_FILES],
+    /// The process asking for the spawn, it must be the reader of stdout_channel
+    pub spawning_pid: PID,
+    /// NO_CHANNEL leaves the child's stdout on serial
+    pub stdout_channel: ChannelId,
 }
 
 /// Manages processes and their associated kernel threads
@@ -100,6 +107,8 @@ impl ProcessManager {
             argc: 0,
             packed_args: &[],
             file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
+            spawning_pid: parent_pid,
+            stdout_channel: NO_CHANNEL,
         };
 
         self.spawn(&spawn, elf_info)
@@ -160,13 +169,32 @@ impl ProcessManager {
         let user_entry =
             process.place_arguments(elf_info.entry_point, spawn.argc, spawn.packed_args);
 
-        let cr3 = process.memory_layout.top_page_table_phys.as_u64();
-        let Some(slot_index) = task::allocate_task_slot(new_pid, priority, core_id, cr3) else {
+        // mapped before the task exists, so the child's first write already lands in the ring
+        if spawn.stdout_channel != NO_CHANNEL
+            && let Err(error) = channel::attach_stdout_writer(
+                &mut process,
+                spawn.spawning_pid,
+                spawn.stdout_channel,
+            )
+        {
             let user_mgr = crate::memory::get_user_mem_mgr();
             let mut frame_allocator = crate::memory::get_frame_allocator();
             process
                 .memory_layout
                 .free_address_space(user_mgr, &mut frame_allocator);
+            return Err(ProcessError::Channel(error));
+        }
+
+        let cr3 = process.memory_layout.top_page_table_phys.as_u64();
+        let Some(slot_index) = task::allocate_task_slot(new_pid, priority, core_id, cr3) else {
+            {
+                let user_mgr = crate::memory::get_user_mem_mgr();
+                let mut frame_allocator = crate::memory::get_frame_allocator();
+                process
+                    .memory_layout
+                    .free_address_space(user_mgr, &mut frame_allocator);
+            }
+            channel::release_process_channels(&mut process);
             return Err(ProcessError::OutOfTaskSlots);
         };
         task::init_task_stack(slot_index, user_entry);
@@ -241,6 +269,9 @@ impl ProcessManager {
                     );
                 }
             }
+
+            // the views went with the address space, this drops the references and tells peers
+            channel::release_process_channels(process);
         }
 
         // a parent killed in a cascade may already be gone

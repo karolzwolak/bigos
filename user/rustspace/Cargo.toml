@@ -18,8 +18,8 @@ name = "wnd_app"
 path = "src/bin/wnd_app.rs"
 
 [[bin]]
-name = "theophe"
-path = "src/bin/theophe.rs"
+name = "shell"
+path = "src/bin/shell.rs"
 
 [[bin]]
 name = "memstrs"
@@ -76,6 +76,14 @@ path = "src/bin/spawner.rs"
 [[bin]]
 name = "spawnee"
 path = "src/bin/spawnee.rs"
+
+[[bin]]
+name = "outread"
+path = "src/bin/outread.rs"
+
+[[bin]]
+name = "outwrite"
+path = "src/bin/outwrite.rs"
 
 [dependencies]
 x86_64 = "0.15.2"

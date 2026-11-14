@@ -4,7 +4,7 @@
 
 use static_assertions::const_assert;
 
-pub const RUN_THEOPHE: bool = true;
+pub const RUN_SHELL: bool = true;
 
 pub const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const MAX_CORES: u8 = 4;
@@ -28,6 +28,7 @@ pub mod gdt;
 pub mod graphics;
 pub mod interrupts;
 pub mod io;
+pub mod ipc;
 pub mod process;
 pub mod process_start;
 pub mod stack_guard;
