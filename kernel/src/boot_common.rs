@@ -16,8 +16,8 @@ use limine::{
     mp::{MP_FLAG_X2APIC, MpGotoFunction},
     paging::PagingMode,
     request::{
-        EfiMemmapRequest, FramebufferRequest, HhdmRequest, MemmapRequest, MpRequest,
-        PagingModeRequest, RsdpRequest,
+        EfiMemmapRequest, ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemmapRequest,
+        MpRequest, PagingModeRequest, RsdpRequest,
     },
 };
 
@@ -50,6 +50,10 @@ static EFI_MEMMAP_REQUEST: EfiMemmapRequest = EfiMemmapRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -107,7 +111,15 @@ pub unsafe fn bsp_early_init() {
     let framebuffer = framebuffer_response.framebuffers().first().unwrap();
     crate::graphics::framebuffer::init_framebuffer(framebuffer);
 
-    let boot_info = BootInfo { hhdm_offset };
+    let executable_address_response = EXECUTABLE_ADDRESS_REQUEST
+        .response()
+        .expect("Failed to get executable address response");
+
+    let boot_info = BootInfo {
+        hhdm_offset,
+        kernel_virtual_base: executable_address_response.virtual_base,
+        kernel_physical_base: executable_address_response.physical_base,
+    };
     BOOT_INFO.call_once(|| boot_info);
     serial_println!("Boot Info: hhdm_offset: {}", hhdm_offset);
 
@@ -221,7 +233,7 @@ pub unsafe fn bsp_early_init() {
         memory::usermem::UserMemoryManager::new(kernel_page_table_phys, hhdm_offset);
     serial_println_core!("Global memory managers initialized");
 
-    memory::init_memory_globals(frame_allocator, user_memory_manager);
+    memory::init_memory_globals(frame_allocator, user_memory_manager, mapper);
 
     unsafe { interrupts::init_tsc_globals() };
 

@@ -1,6 +1,8 @@
 use crate::serial_println;
 use alloc::vec::Vec;
 
+pub use crate::io::virtio::VirtioBlk;
+
 pub const SECTOR_SIZE_BYTES: usize = 512;
 
 pub type DiskOpResult<T> = Result<T, DiskOpError>;
@@ -65,23 +67,7 @@ impl RamDisk {
     }
 }
 
-/// placeholder until the virtio-blk driver lands, every access panics
-pub struct VirtioBlk;
-
-impl VirtioBlk {
-    pub fn sector_count(&self) -> u64 {
-        unimplemented!("virtio-blk is not implemented yet")
-    }
-
-    pub fn read_sectors(&mut self, _start_sector: u64, _buffer: &mut [u8]) -> DiskOpResult<()> {
-        unimplemented!("virtio-blk is not implemented yet")
-    }
-
-    pub fn write_sectors(&mut self, _start_sector: u64, _buffer: &[u8]) -> DiskOpResult<()> {
-        unimplemented!("virtio-blk is not implemented yet")
-    }
-}
-
+#[allow(clippy::large_enum_variant)]
 pub enum BlockDevice {
     Ram(RamDisk),
     VirtioBlk(VirtioBlk),
@@ -112,6 +98,14 @@ impl BlockDevice {
         match self {
             BlockDevice::Ram(disk) => disk.write_sectors(start_sector, buffer),
             BlockDevice::VirtioBlk(disk) => disk.write_sectors(start_sector, buffer),
+        }
+    }
+
+    /// makes completed writes durable, nothing to do for a RAM disk
+    pub fn flush(&mut self) -> DiskOpResult<()> {
+        match self {
+            BlockDevice::Ram(_) => Ok(()),
+            BlockDevice::VirtioBlk(disk) => disk.flush(),
         }
     }
 }

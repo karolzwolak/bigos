@@ -163,6 +163,51 @@ fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u
     run_quiet(&mut cmd);
 }
 
+const DISK_AIO_ENV: &str = "BIGOS_DISK_AIO";
+const DEFAULT_DISK_AIO: &str = "io_uring";
+const TEST_DISK_COPY_DIR: &str = "target/test_disks";
+const FSCK_TEST_PREFIXES: [&str; 2] = ["test_fs", "test_user_fs"];
+
+/// QEMU arguments that attach the disk image as a modern virtio-blk PCI device
+fn disk_qemu_args(image: &Path) -> Vec<String> {
+    let aio = env::var(DISK_AIO_ENV).unwrap_or_else(|_| DEFAULT_DISK_AIO.to_string());
+
+    vec![
+        "-drive".to_string(),
+        format!(
+            "file={},if=none,format=raw,cache=unsafe,aio={aio},id=disk0",
+            image.display()
+        ),
+        "-device".to_string(),
+        "virtio-blk-pci,drive=disk0,disable-legacy=on".to_string(),
+    ]
+}
+
+/// Copies the pristine test image so writes never leak between tests or runs
+fn prepare_test_disk(root: &Path, test_name: &str) -> PathBuf {
+    let copy_dir = root.join(TEST_DISK_COPY_DIR);
+    fs::create_dir_all(&copy_dir).expect("failed to create the test disk directory");
+
+    let copy_path = copy_dir.join(format!("{test_name}.img"));
+    fs::copy(root.join(TEST_DISK_IMAGE), &copy_path).expect("failed to copy the test disk image");
+
+    copy_path
+}
+
+/// Returns the fsck report when the image has errors
+fn fsck_report_if_dirty(image: &Path) -> Option<String> {
+    let output = Command::new("fsck.fat")
+        .arg("-n")
+        .arg(image)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run fsck.fat: {e}"));
+    if output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn build_disk_images(root: &Path) {
     ensure_disk_image(root, DEFAULT_DISK_TEMPLATE, DEFAULT_DISK_IMAGE, 0);
     ensure_disk_image(
@@ -393,6 +438,7 @@ fn run_test_with_timeout(
     iso: &Path,
     ovmf_code: &Path,
     ovmf_vars: &Path,
+    disk_image: &Path,
     timeout_secs: &str,
 ) -> TestResult {
     let smp = qemu_smp_arg(root);
@@ -428,6 +474,7 @@ fn run_test_with_timeout(
             &format!("if=pflash,unit=1,format=raw,file={}", ovmf_vars.display()),
         ])
         .args(["-cdrom", iso.to_str().unwrap()])
+        .args(disk_qemu_args(disk_image))
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .args([
             "-serial",
@@ -462,8 +509,20 @@ fn run_test_with_timeout(
     }
 }
 
-fn run_test(root: &Path, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
-    run_test_with_timeout(root, iso, ovmf_code, ovmf_vars, "30")
+fn run_test(root: &Path, name: &str, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
+    let disk_image = prepare_test_disk(root, name);
+    let mut result = run_test_with_timeout(root, iso, ovmf_code, ovmf_vars, &disk_image, "30");
+
+    let needs_fsck = FSCK_TEST_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix));
+    if needs_fsck && let Some(report) = fsck_report_if_dirty(&disk_image) {
+        result.passed = false;
+        result.serial.push_str("\nfsck.fat reported errors:\n");
+        result.serial.push_str(&report);
+    }
+
+    result
 }
 
 fn run_tests(root: &Path, args: &[String]) {
@@ -486,6 +545,7 @@ fn run_tests(root: &Path, args: &[String]) {
         std::process::exit(1);
     }
     ensure_limine(root);
+    build_disk_images(root);
     build_user(root);
     println!("{BOLD}Building test kernels…{RESET}");
     build_all_test_kernels(root, &bins, release);
@@ -503,7 +563,7 @@ fn run_tests(root: &Path, args: &[String]) {
         print!("  {BOLD}{name}{RESET} ... ");
         std::io::stdout().flush().unwrap();
         let iso = package_test_iso(root, name, release);
-        let result = run_test(root, &iso, &ovmf_code, &ovmf_vars);
+        let result = run_test(root, name, &iso, &ovmf_code, &ovmf_vars);
         // Save logs like log_splitter → test_logs/<name>/all.txt + core_N.txt + userspace
         save_test_logs(root, name, &result.serial, None);
         if result.passed {
@@ -807,6 +867,7 @@ fn ovmf(root: &Path) -> (PathBuf, PathBuf) {
 
 fn run_iso(root: &Path) {
     build_iso(root);
+    build_disk_images(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
     let socket1 = "/tmp/bigos_com1.sock";
@@ -852,6 +913,7 @@ fn run_iso(root: &Path) {
         &format!("if=pflash,unit=1,format=raw,file={}", vars.display()),
     ])
     .args(["-cdrom", iso.to_str().unwrap()])
+    .args(disk_qemu_args(&root.join(DEFAULT_DISK_IMAGE)))
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
     .args(["-serial", &format!("unix:{socket1},server")])
     .args(["-serial", &format!("unix:{socket2},server,nowait")])
@@ -871,6 +933,7 @@ fn run_iso(root: &Path) {
 
 fn run_nologs(root: &Path) {
     build_iso(root);
+    build_disk_images(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
     let smp = qemu_smp_arg(root);
@@ -901,6 +964,7 @@ fn run_nologs(root: &Path) {
         &format!("if=pflash,unit=1,format=raw,file={}", vars.display()),
     ])
     .args(["-cdrom", iso.to_str().unwrap()])
+    .args(disk_qemu_args(&root.join(DEFAULT_DISK_IMAGE)))
     .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
     .args(["-no-reboot"])
     .args(["-monitor", "telnet:127.0.0.1:1234,server,nowait"])

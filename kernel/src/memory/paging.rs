@@ -89,6 +89,38 @@ pub fn map_acpi_regions(
     Ok(())
 }
 
+/// Maps `size_bytes` of device memory at `phys_start` uncached into the HHDM window and
+/// returns the virtual address of `phys_start`. Pages that are already mapped are left alone
+pub fn map_mmio_range(phys_start: u64, size_bytes: u64) -> VirtAddr {
+    debug_assert!(size_bytes > 0);
+
+    let hhdm_offset = crate::boot_info::boot_info().hhdm_offset;
+    let first_page = align_down(phys_start, PAGE_SIZE as u64);
+    let end = align_up(phys_start + size_bytes, PAGE_SIZE as u64);
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
+
+    let mut mapper = crate::memory::get_kernel_mapper();
+    let mut frame_allocator = crate::memory::get_frame_allocator();
+
+    let mut phys = first_page;
+    while phys < end {
+        let frame: PhysFrame<Size4KiB> = PhysFrame::containing_address(PhysAddr::new(phys));
+        let page: Page<Size4KiB> = Page::containing_address(VirtAddr::new(phys + hhdm_offset));
+
+        // SAFETY: the page lies in the HHDM window, which holds no kernel data outside RAM
+        let map_result = unsafe { mapper.map_to(page, frame, flags, &mut *frame_allocator) };
+        match map_result {
+            Ok(flush) => flush.flush(),
+            Err(MapToError::PageAlreadyMapped(_)) => {}
+            Err(error) => panic!("map_mmio_range: {:?} for phys {:#x}", error, phys),
+        }
+
+        phys += PAGE_SIZE as u64;
+    }
+
+    VirtAddr::new(phys_start + hhdm_offset)
+}
+
 fn map_region(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,

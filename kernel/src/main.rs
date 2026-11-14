@@ -39,6 +39,7 @@ fn main() -> ! {
 
         wait_for_ap_cores_blocking();
         serial_println_core!("AP cores ready, creating userspace processes");
+        kernel::filesystem::init_boot_filesystem();
         kernel::process_start::create_userspace_processes();
 
         serial_println_core!("Created initial userspace processes");

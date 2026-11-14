@@ -130,7 +130,10 @@ impl Vfs {
     ) -> FileSystemResult<usize> {
         let node = self.open_file(path)?;
 
-        self.driver.write_file(node.node_id, offset, data)
+        let written = self.driver.write_file(node.node_id, offset, data)?;
+        self.driver.device.flush()?;
+
+        Ok(written)
     }
 
     pub fn create_file(&mut self, path: &str) -> FileSystemResult<FileNode> {
@@ -141,6 +144,7 @@ impl Vfs {
         }
 
         let node_id = self.driver.create_file(parent.node_id, name)?;
+        self.driver.device.flush()?;
 
         self.driver.get_node(node_id)
     }
@@ -153,6 +157,7 @@ impl Vfs {
         }
 
         let node_id = self.driver.create_directory(parent.node_id, name)?;
+        self.driver.device.flush()?;
 
         self.driver.get_node(node_id)
     }
@@ -160,7 +165,10 @@ impl Vfs {
     pub fn delete(&mut self, path: &str) -> FileSystemResult<()> {
         let node = self.resolve_path(path)?;
 
-        self.driver.delete(node.node_id)
+        self.driver.delete(node.node_id)?;
+        self.driver.device.flush()?;
+
+        Ok(())
     }
 }
 
