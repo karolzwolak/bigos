@@ -119,8 +119,9 @@ impl Default for WaitQueue {
 }
 
 pub fn block_current_task_until_event(queue: &WaitQueue, condition: impl Fn() -> bool) {
-    let core_id = get_current_core_id();
     loop {
+        // read on every pass, another core may have stolen the task while it was blocked
+        let core_id = get_current_core_id();
         if condition() || task::core_current_task_kill_pending(core_id) {
             return;
         }
@@ -142,11 +143,11 @@ pub fn sleep_current_task_ms(duration_ms: u64) {
     let wake_time_us =
         crate::interrupts::tsc_timestamp_us() + duration_ms * MICROSECONDS_PER_MILLISECOND;
 
-    let core_id = get_current_core_id();
+    // the core is read on every pass, another core may have stolen the task while it slept
     while crate::interrupts::tsc_timestamp_us() < wake_time_us
-        && !task::core_current_task_kill_pending(core_id)
+        && !task::core_current_task_kill_pending(get_current_core_id())
     {
-        scheduler::core_block_current_task_until_wake_time(wake_time_us, core_id);
+        scheduler::core_block_current_task_until_wake_time(wake_time_us, get_current_core_id());
     }
 }
 

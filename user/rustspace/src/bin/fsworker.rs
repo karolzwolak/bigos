@@ -96,7 +96,7 @@ impl Checker {
 
         self.failed_locally = true;
         counters[COUNTER_CHECKS_FAILED].fetch_add(1, Ordering::AcqRel);
-        rustspace::println!("fs_worker: FAILED: {}", name);
+        rustspace::println!("fsworker: FAILED: {}", name);
     }
 }
 

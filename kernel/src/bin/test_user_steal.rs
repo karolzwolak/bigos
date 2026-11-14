@@ -4,11 +4,11 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use kernel::process::elf_loader::{BUSYLOOP_ELF, ElfLoadInfo};
+use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task::{self, MAX_TASKS, TaskState};
-use kernel::process::{PID, ProcessState};
+use kernel::process::task::{self, TaskState};
+use kernel::process::{ChildPolicy, PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{AP_CORE_COUNT, boot_common, bsp_init, serial_println_core};
 
@@ -96,13 +96,25 @@ fn exit_code_of(pid: PID) -> Option<i32> {
     process.exit_code
 }
 
+fn free_task_slots() -> usize {
+    task::TASKS
+        .iter()
+        .filter(|slot| slot.state() == TaskState::Free)
+        .count()
+}
+
 fn test_main() -> ! {
     serial_println_core!("=== test_user_steal: start ===");
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::testing::mount_test_disk();
+
+    kernel::process_start::init_userspace();
     bsp_init::wait_for_ap_cores_blocking();
 
-    let elf_info = match ElfLoadInfo::from_elf_data(BUSYLOOP_ELF) {
+    // bigproc keeps its slot for good, so leaks are measured against this
+    let baseline_free_slots = free_task_slots();
+
+    let elf_info = match load_elf_from_path("/BIN/busyloop") {
         Ok(info) => info,
         Err(error) => {
             serial_println_core!("parse busyloop ELF: {:?}", error);
@@ -152,7 +164,7 @@ fn test_main() -> ! {
     let mut survivor_count = 0;
     for pid in pids {
         if home_core_of(pid) == Some(EMPTIED_CORE) {
-            if !task::request_kill(pid, KILL_EXIT_CODE) {
+            if !task::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
                 fail("request_kill found no task");
             }
         } else {
@@ -197,11 +209,7 @@ fn test_main() -> ! {
         }
     }
 
-    let free_slots = task::TASKS
-        .iter()
-        .filter(|slot| slot.state() == TaskState::Free)
-        .count();
-    if free_slots != MAX_TASKS {
+    if free_task_slots() != baseline_free_slots {
         fail("task slots leaked");
     }
 

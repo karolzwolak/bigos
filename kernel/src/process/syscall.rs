@@ -6,15 +6,18 @@ use crate::interrupts::{BOOT_TSC, TSC_FREQUENCY_HZ};
 use crate::memory::get_frame_allocator;
 use crate::memory::paging::PAGE_SIZE;
 use crate::process::core_pool::TOTAL_CORE_COUNT;
+use crate::process::elf_loader::ElfLoadError;
 use crate::process::file_syscalls;
+use crate::process::process_manager::ProcessError;
 use crate::process::process_mem::FrameOwnership;
+use crate::process::process_syscalls;
 use crate::process::user_access::{UserAccess, validate_user_ptr};
 use crate::util::cpuinfo::{CpuInfoFlat, get_cpu_info_for_core};
 use crate::util::msr::msr_write;
 use crate::{
     process::{
-        INVALID_PID,
-        process_manager::{ARCHE_PID, PROCESS_MANAGER},
+        ChildPolicy, INVALID_PID,
+        process_manager::{ARCHE_PID, BIGPROC_PID, PROCESS_MANAGER},
         scheduler,
     },
     serial_println_core,
@@ -46,6 +49,8 @@ pub enum SyscallError {
     InvalidPath = 14,
     IoError = 15,
     TooManyOpenFiles = 16,
+    /// the file is not a loadable x86_64 ELF executable
+    InvalidExecutable = 17,
     SyscallNotFound = 999,
 }
 
@@ -65,6 +70,39 @@ impl From<FileSystemError> for SyscallError {
             }
             FileSystemError::DiskOpError | FileSystemError::IoError => Self::IoError,
             FileSystemError::NotSupported => Self::NotImplemented,
+        }
+    }
+}
+
+impl From<ElfLoadError> for SyscallError {
+    fn from(error: ElfLoadError) -> Self {
+        match error {
+            ElfLoadError::FileSystem(error) => Self::from(error),
+            ElfLoadError::NoFilesystem => Self::NotFound,
+            ElfLoadError::ImageTooLarge => Self::OutOfMemory,
+            ElfLoadError::InvalidMagic
+            | ElfLoadError::InvalidHeader
+            | ElfLoadError::InvalidArch
+            | ElfLoadError::InvalidType
+            | ElfLoadError::NoLoadableSegments
+            | ElfLoadError::ReadError
+            | ElfLoadError::ParseError(_)
+            | ElfLoadError::Truncated
+            | ElfLoadError::TooManyProgramHeaders
+            | ElfLoadError::SegmentOutOfBounds => Self::InvalidExecutable,
+        }
+    }
+}
+
+impl From<ProcessError> for SyscallError {
+    fn from(error: ProcessError) -> Self {
+        match error {
+            ProcessError::ProcessNotFound | ProcessError::ParentNotFound => Self::ProcessNotFound,
+            ProcessError::ElfLoadError(error) => Self::from(error),
+            ProcessError::NoCoresAvailable
+            | ProcessError::SchedulerError
+            | ProcessError::OutOfTaskSlots => Self::OutOfMemory,
+            ProcessError::DoubleDelete => Self::InvalidArgument,
         }
     }
 }
@@ -265,19 +303,21 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
     let syscall = unsafe { core::mem::transmute::<u64, SyscallNumber>(frame.syscall_num) };
 
     match syscall {
-        SyscallNumber::CreateProcess => {
-            serial_println_core!("CreateProcess: not implemented");
-            Err(SyscallError::NotImplemented)
-        }
+        SyscallNumber::CreateProcess => process_syscalls::create_process(frame),
         SyscallNumber::TerminateProcess => {
             let target_pid = frame.arg1 as usize;
             let exit_code = frame.arg2 as i32;
+            let child_policy = ChildPolicy::try_from(frame.arg3)?;
             let caller_core = get_current_core_id();
             let caller_pid = scheduler::get_current_process_for_core(caller_core);
 
             if target_pid == INVALID_PID || target_pid == ARCHE_PID {
                 serial_println_core!("TerminateProcess: invalid target pid {}", target_pid);
                 return Err(SyscallError::InvalidArgument);
+            }
+            if target_pid == BIGPROC_PID {
+                serial_println_core!("TerminateProcess: pid {} tried to kill bigproc", caller_pid);
+                return Err(SyscallError::PermissionDenied);
             }
 
             let target_parent = {
@@ -307,11 +347,11 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             }
 
             if target_pid == caller_pid {
-                crate::process::task::exit_current(exit_code);
+                crate::process::task::exit_current(exit_code, child_policy);
             }
 
             // the target tears itself down once it is back at the edge of ring 3
-            if !crate::process::task::request_kill(target_pid, exit_code) {
+            if !crate::process::task::request_kill(target_pid, exit_code, child_policy) {
                 serial_println_core!("TerminateProcess: target {} has no task", target_pid);
                 return Err(SyscallError::ProcessNotFound);
             }
@@ -406,11 +446,12 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
         }
         SyscallNumber::Exit => {
             let exit_code = frame.arg1;
+            let child_policy = ChildPolicy::try_from(frame.arg2)?;
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
             serial_println_core!("sys_exit: PID {} exiting with code {}", pid, exit_code);
 
-            crate::process::task::exit_current(exit_code as i32);
+            crate::process::task::exit_current(exit_code as i32, child_policy);
         }
         SyscallNumber::Allocate => {
             let size = frame.arg1 as usize;

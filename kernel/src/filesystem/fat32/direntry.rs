@@ -1,4 +1,4 @@
-use crate::filesystem::fat32::{MAX_CLUSTER, ROOT_CLUSTER};
+use crate::filesystem::fat32::ROOT_CLUSTER;
 use crate::filesystem::vfs::{FileSystemError, FileSystemResult, FileType};
 use alloc::string::String;
 
@@ -23,6 +23,9 @@ pub const MAX_EXT_LENGTH: usize = 3;
 pub const MAX_FULL_NAME_LENGTH: usize = MAX_NAME_LENGTH + MAX_EXT_LENGTH;
 
 pub const DIRECTORY_ENTRY_SIZE: usize = 32;
+
+const LONG_NAME_ATTRIBUTES: u8 = 0x0F;
+const LONG_NAME_ATTRIBUTES_MASK: u8 = 0x3F;
 
 const THIS_DIR_ENTRY_NAME: [u8; 8] = *b".       ";
 const THIS_DIR_ENTRY_EXT: [u8; 3] = *b"   ";
@@ -119,9 +122,6 @@ impl DirectoryEntry {
 
         let first_cluster_high = u16::from_le_bytes([data[20], data[21]]);
         let first_cluster_low = u16::from_le_bytes([data[26], data[27]]);
-        let cluster = (first_cluster_high as u32) << 16 | first_cluster_low as u32;
-
-        assert!(cluster <= MAX_CLUSTER, "Cluster {} > MAX_CLUSTER", cluster);
 
         DirectoryEntry {
             name: [
@@ -196,6 +196,17 @@ impl DirectoryEntry {
 
     pub fn is_volume_id(&self) -> bool {
         (self.attributes & FatFileAttributes::VolumeId as u8) != 0
+    }
+
+    /// long file name entries are not supported, they stay in the directory but nothing decodes them
+    /// bytes 20..22 of such an entry are name characters, not a cluster
+    pub fn is_long_name(&self) -> bool {
+        self.attributes & LONG_NAME_ATTRIBUTES_MASK == LONG_NAME_ATTRIBUTES
+    }
+
+    /// a live short name entry that is not the volume label
+    pub fn is_short_name_node(&self) -> bool {
+        self.is_valid() && !self.is_long_name() && !self.is_volume_id()
     }
 
     pub fn is_current_directory(&self) -> bool {

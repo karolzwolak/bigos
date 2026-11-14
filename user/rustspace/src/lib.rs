@@ -72,6 +72,7 @@ impl SyscallError {
     pub const INVALID_PATH: Self = Self(14);
     pub const IO_ERROR: Self = Self(15);
     pub const TOO_MANY_OPEN_FILES: Self = Self(16);
+    pub const INVALID_EXECUTABLE: Self = Self(17);
     pub const SYSCALL_NOT_FOUND: Self = Self(999);
 }
 
@@ -82,6 +83,19 @@ fn syscall_ret_check(ret: u64) -> Result<u64, SyscallError> {
     } else {
         Ok(ret)
     }
+}
+
+/// Mirrors the kernel's `BIGPROC_PID`
+pub const BIGPROC_PID: usize = 1;
+
+/// What happens to the children of a terminating process, mirrors the kernel's `ChildPolicy`
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildPolicy {
+    /// every child is killed with the same exit code, and so on down the subtree
+    KillChildren = 0,
+    /// the children keep running and bigproc adopts them
+    OrphanChildren = 1,
 }
 
 pub const FD_FLAG_READ: u8 = 0x01;
@@ -328,15 +342,35 @@ pub unsafe fn sys_write(fd: u64, buf: *const u8, count: usize) -> i64 {
     unsafe { syscall3(SYS_WRITE, fd, buf as u64, count as u64) as i64 }
 }
 
+/// Exits and kills every child
 #[inline(always)]
 pub fn sys_exit(code: i32) -> ! {
-    unsafe { syscall1(SYS_EXIT, code as u64) };
-    unreachable!("SYS_EXIT returned")
+    sys_exit_with_policy(code, ChildPolicy::KillChildren)
 }
 
 #[inline(always)]
-pub fn sys_terminate_process(pid: usize, exit_code: i32) -> bool {
-    unsafe { syscall2(SYS_TERMINATE_PROCESS, pid as u64, exit_code as u64) == 0 }
+pub fn sys_exit_with_policy(code: i32, child_policy: ChildPolicy) -> ! {
+    unsafe { syscall2(SYS_EXIT, code as u64, child_policy as u64) };
+    unreachable!("SYS_EXIT returned")
+}
+
+/// Allowed on itself and on its own children, never on bigproc
+#[inline(always)]
+pub fn sys_terminate_process(
+    pid: usize,
+    exit_code: i32,
+    child_policy: ChildPolicy,
+) -> Result<(), SyscallError> {
+    let ret = unsafe {
+        syscall3(
+            SYS_TERMINATE_PROCESS,
+            pid as u64,
+            exit_code as u64,
+            child_policy as u64,
+        )
+    };
+
+    syscall_ret_check(ret).map(|_| ())
 }
 
 #[inline(always)]
@@ -387,18 +421,150 @@ pub fn sys_allocate(size: usize) -> Result<u64, SyscallError> {
     syscall_ret_check(unsafe { syscall1(SYS_ALLOCATE, size as u64) })
 }
 
+/// Mirrors the kernel limits of CreateProcess
+pub const MAX_ARGC: usize = 64;
+pub const MAX_ARGV_BYTES: usize = 4096;
+pub const MAX_PROCESS_NAME_LEN: usize = 32;
+
+const PROCESS_CREATE_RESERVED_BYTES: usize = 7;
+
+bitflags::bitflags! {
+    /// Mirrors the kernel's `ProcessCreateFlags`
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ProcessCreateFlags: u32 {
+        /// the child starts with a copy of the caller's fd table, at the same fd numbers
+        const INHERIT_FDS = 1 << 0;
+        /// the child is parented to bigproc, so the caller's KillChildren exit leaves it alive
+        const DETACHED = 1 << 1;
+        /// the child gets the caller's priority, the priority field is ignored
+        const INHERIT_PRIORITY = 1 << 2;
+    }
+}
+
+/// Argument of `sys_create_process`, layout shared with the kernel's `ProcessCreateInfo`
+/// The lifetime ties it to the path, name and argument buffers it points at
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessCreateInfo<'a> {
+    pub path_ptr: u64,
+    pub path_len: u64,
+    /// name_len 0 names the process after the last path component
+    pub name_ptr: u64,
+    pub name_len: u64,
+    /// argc NUL-terminated strings back to back, argv_size bytes in total
+    pub argv_ptr: u64,
+    pub argv_size: u64,
+    pub argc: u32,
+    pub flags: u32,
+    /// ignored with INHERIT_PRIORITY
+    pub priority: u8,
+    /// must be zero
+    pub reserved: [u8; PROCESS_CREATE_RESERVED_BYTES],
+    pub borrowed: core::marker::PhantomData<&'a [u8]>,
+}
+
+const PROCESS_CREATE_INFO_SIZE_BYTES: usize = 64;
+static_assertions::const_assert!(
+    core::mem::size_of::<ProcessCreateInfo>() == PROCESS_CREATE_INFO_SIZE_BYTES
+);
+
+impl<'a> ProcessCreateInfo<'a> {
+    pub fn new(path: &'a str, priority: u8) -> Self {
+        Self {
+            path_ptr: path.as_ptr() as u64,
+            path_len: path.len() as u64,
+            name_ptr: 0,
+            name_len: 0,
+            argv_ptr: 0,
+            argv_size: 0,
+            argc: 0,
+            flags: 0,
+            priority,
+            reserved: [0; PROCESS_CREATE_RESERVED_BYTES],
+            borrowed: core::marker::PhantomData,
+        }
+    }
+
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name_ptr = name.as_ptr() as u64;
+        self.name_len = name.len() as u64;
+        self
+    }
+
+    /// `packed_args` holds `argc` NUL-terminated strings back to back, like b"ls\0-l\0"
+    pub fn with_args(mut self, packed_args: &'a [u8], argc: u32) -> Self {
+        self.argv_ptr = packed_args.as_ptr() as u64;
+        self.argv_size = packed_args.len() as u64;
+        self.argc = argc;
+        self
+    }
+
+    pub fn with_flags(mut self, flags: ProcessCreateFlags) -> Self {
+        self.flags = flags.bits();
+        self
+    }
+}
+
+/// Starts a child process, returns its pid
 #[inline(always)]
-pub fn sys_create_process(elf_path: &[char], name: &[char], args_buffer: &[u8]) -> u32 {
-    unsafe {
-        syscall6(
-            SYS_CREATE_PROCESS,
-            elf_path.as_ptr() as u64,
-            elf_path.len() as u64,
-            name.as_ptr() as u64,
-            name.len() as u64,
-            args_buffer.as_ptr() as u64,
-            args_buffer.len() as u64,
-        ) as u32
+pub fn sys_create_process(info: &ProcessCreateInfo) -> Result<u32, SyscallError> {
+    let ret = unsafe { syscall1(SYS_CREATE_PROCESS, info as *const ProcessCreateInfo as u64) };
+
+    syscall_ret_check(ret).map(|pid| pid as u32)
+}
+
+/// One argument as the kernel lays it out on the stack, the string excludes its NUL
+/// Layout shared with the kernel's `ArgSlice`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ArgSlice {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+/// The arguments a process was started with, valid for its whole life
+#[derive(Debug, Clone, Copy)]
+pub struct Args {
+    slices: &'static [ArgSlice],
+}
+
+impl Args {
+    /// Build from the two registers of the first entry: rdi = argc, rsi = argv
+    /// The function the naked `_start` calls receives them as its first two arguments
+    ///
+    /// # Safety
+    ///
+    /// Call only with the unchanged entry values, the kernel validated the strings as UTF-8
+    pub unsafe fn from_entry(argc: usize, argv: *const ArgSlice) -> Self {
+        debug_assert!(argc <= MAX_ARGC);
+
+        let slices = if argc == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(argv, argc) }
+        };
+
+        Self { slices }
+    }
+
+    pub fn len(&self) -> usize {
+        self.slices.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slices.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> &'static str {
+        let slice = self.slices[index];
+
+        // SAFETY: the kernel copied the string onto the stack, which lives as long as the process,
+        // and checked it is UTF-8
+        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(slice.ptr, slice.len)) }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'static str> + '_ {
+        (0..self.len()).map(|index| self.get(index))
     }
 }
 

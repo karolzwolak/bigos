@@ -5,9 +5,8 @@ extern crate alloc;
 
 use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use kernel::filesystem::{get_vfs, init_filesystem, vfs::FileSystemError};
-use kernel::io::{disk::BlockDevice, virtio::VirtioBlk};
-use kernel::process::elf_loader::{ElfLoadInfo, FS_TEST_ELF};
+use kernel::filesystem::{get_vfs, vfs::FileSystemError};
+use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
 use kernel::process::task;
@@ -84,7 +83,7 @@ fn wait_until(what: &str, deadline_us: u64, condition: impl Fn() -> bool) {
 }
 
 fn spawn_fs_test() -> PID {
-    let elf_info = match ElfLoadInfo::from_elf_data(FS_TEST_ELF) {
+    let elf_info = match load_elf_from_path("/BIN/fs_test") {
         Ok(info) => info,
         Err(error) => {
             serial_println_core!("parse ELF: {:?}", error);
@@ -180,10 +179,9 @@ fn check_filesystem_state() {
 fn test_main() -> ! {
     serial_println_core!("=== test_user_fs: start ===");
 
-    let device = VirtioBlk::find_and_init().expect("virtio-blk device not found");
-    init_filesystem(BlockDevice::VirtioBlk(device)).expect("mounting the test disk failed");
+    kernel::testing::mount_test_disk();
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::process_start::init_userspace();
     bsp_init::wait_for_ap_cores_blocking();
 
     let pid = spawn_fs_test();

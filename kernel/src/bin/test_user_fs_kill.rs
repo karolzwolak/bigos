@@ -4,17 +4,16 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use kernel::filesystem::{get_vfs, init_filesystem};
-use kernel::io::{disk::BlockDevice, virtio::VirtioBlk};
-use kernel::process::elf_loader::{ElfLoadInfo, FS_WORKER_ELF};
+use kernel::filesystem::get_vfs;
+use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
 use kernel::process::task;
-use kernel::process::{FileDescriptor, PID};
+use kernel::process::{ChildPolicy, FileDescriptor, PID};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
 
-// indexes into the shared test counters, fs_worker uses the same values
+// indexes into the shared test counters, fsworker uses the same values
 const COUNTER_WORKER_MODE: usize = 4;
 const COUNTER_HELD_FDS: usize = 6;
 
@@ -46,28 +45,27 @@ fn now_us() -> u64 {
 }
 
 fn mount_test_disk() {
-    let device = VirtioBlk::find_and_init().expect("virtio-blk device not found");
-    init_filesystem(BlockDevice::VirtioBlk(device)).expect("mounting the test disk failed");
+    kernel::testing::mount_test_disk();
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::process_start::init_userspace();
     bsp_init::wait_for_ap_cores_blocking();
 }
 
 fn spawn_worker() -> PID {
-    let elf_info = match ElfLoadInfo::from_elf_data(FS_WORKER_ELF) {
+    let elf_info = match load_elf_from_path("/BIN/fsworker") {
         Ok(info) => info,
         Err(error) => {
             serial_println_core!("parse ELF: {:?}", error);
-            fail("could not parse the fs_worker ELF");
+            fail("could not parse the fsworker ELF");
         }
     };
 
     let mut process_manager = PROCESS_MANAGER.lock();
-    match process_manager.create_process_from_elf(0, &elf_info, "fs_worker", PROGRAM_PRIORITY) {
+    match process_manager.create_process_from_elf(0, &elf_info, "fsworker", PROGRAM_PRIORITY) {
         Ok(pid) => pid,
         Err(error) => {
             serial_println_core!("create_process_from_elf: {:?}", error);
-            fail("could not create the fs_worker process");
+            fail("could not create the fsworker process");
         }
     }
 }
@@ -186,7 +184,7 @@ fn test_main() -> ! {
     );
 
     let start_us = now_us();
-    if !task::request_kill(pid, KILL_EXIT_CODE) {
+    if !task::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
         fail("request_kill found no task");
     }
     wait_until("the worker to die", KILL_DEADLINE_US, || {

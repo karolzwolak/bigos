@@ -137,7 +137,111 @@ fn newest_modification_time(path: &Path) -> std::time::SystemTime {
     newest
 }
 
-/// builds the FAT32 image from the template directory, unless the image is newer than the template
+const USER_BINS_DIR: &str = "target/user_bins";
+const USER_BUILD_DIR: &str = "user/rustspace/target/x86_64-user/debug";
+const DISK_STAGING_DIR: &str = "target/disk_staging";
+const DISK_BIN_DIR: &str = "BIN";
+const HEADER_ONLY_ELF_NAME: &str = "HDRONLY.ELF";
+const TRUNCATED_ELF_NAME: &str = "TRUNC.ELF";
+const TRUNCATION_SOURCE_BIN: &str = "rust1st";
+const HEADER_ONLY_ELF_BYTES: usize = 32;
+const ELF64_PHOFF_OFFSET: usize = 0x20;
+const ELF64_PHENTSIZE_OFFSET: usize = 0x36;
+const ELF64_PHNUM_OFFSET: usize = 0x38;
+const ELF64_PH_TYPE_OFFSET: usize = 0;
+const ELF64_PH_OFFSET_OFFSET: usize = 8;
+const ELF64_PH_FILESZ_OFFSET: usize = 32;
+const PT_LOAD: u32 = 1;
+
+fn read_le_u16(bytes: &[u8], offset: usize) -> usize {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap()) as usize
+}
+
+fn read_le_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn read_le_u64(bytes: &[u8], offset: usize) -> usize {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize
+}
+
+/// Length that cuts the ELF in the middle of its first PT_LOAD with file data, after the
+/// program header table, so the header parses and only the segment bounds check can fail
+fn truncated_elf_length(elf: &[u8]) -> usize {
+    let phoff = read_le_u64(elf, ELF64_PHOFF_OFFSET);
+    let phentsize = read_le_u16(elf, ELF64_PHENTSIZE_OFFSET);
+    let phnum = read_le_u16(elf, ELF64_PHNUM_OFFSET);
+    let table_end = phoff + phentsize * phnum;
+
+    for index in 0..phnum {
+        let header = phoff + index * phentsize;
+        let filesz = read_le_u64(elf, header + ELF64_PH_FILESZ_OFFSET);
+        if read_le_u32(elf, header + ELF64_PH_TYPE_OFFSET) != PT_LOAD || filesz == 0 {
+            continue;
+        }
+
+        let segment_end = read_le_u64(elf, header + ELF64_PH_OFFSET_OFFSET) + filesz;
+        let cut = segment_end - filesz / 2;
+        assert!(
+            cut > table_end && cut < segment_end,
+            "the truncated ELF must keep the program header table and lose segment data"
+        );
+
+        return cut;
+    }
+
+    panic!("{TRUNCATION_SOURCE_BIN} has no PT_LOAD segment with file data");
+}
+
+fn copy_directory_recursive(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination)
+        .unwrap_or_else(|e| panic!("can't create {}: {e}", destination.display()));
+
+    for entry in fs::read_dir(source)
+        .unwrap_or_else(|e| panic!("can't read {}: {e}", source.display()))
+        .flatten()
+    {
+        let target = destination.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_directory_recursive(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target)
+                .unwrap_or_else(|e| panic!("can't copy {}: {e}", entry.path().display()));
+        }
+    }
+}
+
+fn stage_disk_contents(root: &Path, template_dir: &Path, staging_dir: &Path, is_test: bool) {
+    if staging_dir.exists() {
+        fs::remove_dir_all(staging_dir).unwrap();
+    }
+    copy_directory_recursive(template_dir, staging_dir);
+
+    let bin_dir = staging_dir.join(DISK_BIN_DIR);
+    fs::create_dir_all(&bin_dir).unwrap();
+    let stripped_dir = root.join(USER_BINS_DIR);
+    for name in user_bin_names(root) {
+        fs::copy(stripped_dir.join(&name), bin_dir.join(&name))
+            .unwrap_or_else(|e| panic!("stripped program {name} is missing: {e}"));
+    }
+
+    if is_test {
+        let source = fs::read(stripped_dir.join(TRUNCATION_SOURCE_BIN)).unwrap();
+        fs::write(
+            bin_dir.join(HEADER_ONLY_ELF_NAME),
+            &source[..HEADER_ONLY_ELF_BYTES],
+        )
+        .unwrap();
+        fs::write(
+            bin_dir.join(TRUNCATED_ELF_NAME),
+            &source[..truncated_elf_length(&source)],
+        )
+        .unwrap();
+    }
+}
+
+/// builds the FAT32 image from the staged template, unless the image is newer than the template,
+/// the script and the stripped programs
 fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u32) {
     let template_dir = root.join(template);
     let output_path = root.join(output);
@@ -145,15 +249,24 @@ fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u
 
     let image_time = fs::metadata(&output_path).and_then(|meta| meta.modified());
     let script_time = newest_modification_time(&script);
-    let template_time = newest_modification_time(&template_dir).max(script_time);
+    let template_time = newest_modification_time(&template_dir)
+        .max(script_time)
+        .max(newest_modification_time(&root.join(USER_BINS_DIR)));
     if image_time.is_ok_and(|image_time| image_time >= template_time) {
         return;
     }
 
+    let image_stem = output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("disk image path has a file name");
+    let staging_dir = root.join(DISK_STAGING_DIR).join(image_stem);
+    stage_disk_contents(root, &template_dir, &staging_dir, pattern_bytes > 0);
+
     let mut cmd = Command::new(&script);
     cmd.current_dir(root)
         .arg("-i")
-        .arg(&template_dir)
+        .arg(&staging_dir)
         .arg("-o")
         .arg(&output_path)
         .args(["-s", &DISK_IMAGE_SIZE_MB.to_string()]);
@@ -550,8 +663,8 @@ fn run_tests(root: &Path, args: &[String]) {
         std::process::exit(1);
     }
     ensure_limine(root);
-    build_disk_images(root);
     build_user(root);
+    build_disk_images(root);
     println!("{BOLD}Building test kernels…{RESET}");
     build_all_test_kernels(root, &bins, release);
     let (ovmf_code, ovmf_vars) = ovmf(root);
@@ -643,7 +756,130 @@ const RUSTSPACE_TARGET_ARGS: [&str; 6] = [
     "x86_64-user.json",
 ];
 
+const MAX_BIN_NAME_LENGTH: usize = 8;
+const USER_BIN_MANIFEST: &str = "user/rustspace/Cargo.toml";
+const USER_BIN_SOURCE_DIR: &str = "user/rustspace/src/bin";
+const BIN_SECTION_HEADER: &str = "[[bin]]";
+const NAME_KEY: &str = "name";
+
+/// Names of every userspace program, from the [[bin]] tables of the rustspace manifest
+fn user_bin_names(root: &Path) -> Vec<String> {
+    let path = root.join(USER_BIN_MANIFEST);
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
+
+    let mut names = Vec::new();
+    let mut in_bin_table = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_bin_table = trimmed == BIN_SECTION_HEADER;
+            continue;
+        }
+        if !in_bin_table {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() == NAME_KEY {
+            names.push(value.trim().trim_matches('"').to_string());
+        }
+    }
+
+    names
+}
+
+fn is_valid_bin_name(name: &str) -> bool {
+    let length_ok = (1..=MAX_BIN_NAME_LENGTH).contains(&name.len());
+    let chars_ok = name
+        .bytes()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_');
+
+    length_ok && chars_ok
+}
+
+/// Stops the build when a program name cannot be a FAT 8.3 short name (no LFN support), or when
+/// a source file in src/bin has no [[bin]] entry (cargo would build it under its file name and
+/// it would miss the disk image)
+fn check_user_bin_names(root: &Path) {
+    let declared = user_bin_names(root);
+    let source_dir = root.join(USER_BIN_SOURCE_DIR);
+    for entry in fs::read_dir(&source_dir)
+        .unwrap_or_else(|e| panic!("can't read {}: {e}", source_dir.display()))
+        .flatten()
+    {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = file_name.strip_suffix(".rs")
+            && !declared.iter().any(|name| name == stem)
+        {
+            eprintln!(
+                "error: {USER_BIN_SOURCE_DIR}/{file_name} has no [[bin]] entry named '{stem}' in {USER_BIN_MANIFEST}"
+            );
+            std::process::exit(1);
+        }
+    }
+
+    for name in declared {
+        if !is_valid_bin_name(&name) {
+            eprintln!(
+                "error: userspace program name '{name}' is invalid: names must be 1 to {MAX_BIN_NAME_LENGTH} characters of a-z, 0-9 or _ so they fit a FAT 8.3 short name (no long file name support)"
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Rustup llvm-objcopy, so no system package is needed
+fn llvm_objcopy_path() -> PathBuf {
+    let sysroot = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("failed to run rustc");
+    let version = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("failed to run rustc");
+    let version = String::from_utf8_lossy(&version.stdout);
+    let host = version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("rustc -vV has no host line");
+
+    PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
+        .join("lib/rustlib")
+        .join(host)
+        .join("bin/llvm-objcopy")
+}
+
+/// Writes target/user_bins/<name> without debug info, the debug builds are about 5 MB each
+fn strip_user_bins(root: &Path) {
+    let objcopy = llvm_objcopy_path();
+    let output_dir = root.join(USER_BINS_DIR);
+    fs::create_dir_all(&output_dir).unwrap();
+
+    for name in user_bin_names(root) {
+        let input = root.join(USER_BUILD_DIR).join(&name);
+        let output = output_dir.join(&name);
+        let input_time = fs::metadata(&input)
+            .and_then(|meta| meta.modified())
+            .unwrap_or_else(|e| panic!("{} was not built: {e}", input.display()));
+        let output_time = fs::metadata(&output).and_then(|meta| meta.modified());
+        if output_time.is_ok_and(|output_time| output_time >= input_time) {
+            continue;
+        }
+
+        run_quiet(
+            Command::new(&objcopy)
+                .arg("--strip-debug")
+                .arg(&input)
+                .arg(&output),
+        );
+    }
+}
+
 fn build_user(root: &Path) {
+    check_user_bin_names(root);
     println!("Building user programs…");
     let user_dir = root.join("user");
     let rustspace_dir = user_dir.join("rustspace");
@@ -658,11 +894,13 @@ fn build_user(root: &Path) {
             .args(RUSTSPACE_TARGET_ARGS)
             .current_dir(&rustspace_dir));
     }
+    strip_user_bins(root);
 }
 
 fn build_iso(root: &Path) {
     ensure_limine(root);
     build_user(root);
+    build_disk_images(root);
     build_kernel(root, false);
     println!("Building ISO image…");
     let iso_root = root.join("target/iso_root");
@@ -734,6 +972,7 @@ fn build_iso(root: &Path) {
 fn build_hdd(root: &Path) {
     ensure_limine(root);
     build_user(root);
+    build_disk_images(root);
     build_kernel(root, false);
     println!("Building HDD image…");
     let hdd = root.join("target/template-x86_64.hdd");
@@ -872,7 +1111,6 @@ fn ovmf(root: &Path) -> (PathBuf, PathBuf) {
 
 fn run_iso(root: &Path) {
     build_iso(root);
-    build_disk_images(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
     let socket1 = "/tmp/bigos_com1.sock";
@@ -938,7 +1176,6 @@ fn run_iso(root: &Path) {
 
 fn run_nologs(root: &Path) {
     build_iso(root);
-    build_disk_images(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
     let smp = qemu_smp_arg(root);
@@ -1043,7 +1280,7 @@ fn clippy(root: &Path, extra: &[String]) {
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  disk         Build the FAT32 disk images in storage/ when out of date\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + rustspace)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  disk         Build the user programs and the FAT32 disk images in storage/ when out of date\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + rustspace)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + rustspace)  [cargo args | -- lint flags]\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
     );
 }
 
@@ -1058,6 +1295,7 @@ fn main() {
         }
         Some("build") => {
             build_user(&root);
+            build_disk_images(&root);
             build_kernel(&root, false);
         }
         Some("iso") | None => build_iso(&root),
@@ -1065,7 +1303,10 @@ fn main() {
         Some("run") => run_iso(&root),
         Some("run-nologs") => run_nologs(&root),
         Some("test") => run_tests(&root, &extra),
-        Some("disk") => build_disk_images(&root),
+        Some("disk") => {
+            build_user(&root);
+            build_disk_images(&root);
+        }
         Some("clean") => clean(&root),
         Some("fmt") => fmt(&root, &extra),
         Some("clippy") => clippy(&root, &extra),

@@ -10,20 +10,20 @@ name = "rustspace"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rust_first"
-path = "src/bin/rust_first.rs"
+name = "rust1st"
+path = "src/bin/rust1st.rs"
 
 [[bin]]
-name = "window_app"
-path = "src/bin/window_app.rs"
+name = "wnd_app"
+path = "src/bin/wnd_app.rs"
 
 [[bin]]
 name = "theophe"
 path = "src/bin/theophe.rs"
 
 [[bin]]
-name = "memstress"
-path = "src/bin/memstress.rs"
+name = "memstrs"
+path = "src/bin/memstrs.rs"
 
 [[bin]]
 name = "regprobe"
@@ -38,8 +38,8 @@ name = "busyloop"
 path = "src/bin/busyloop.rs"
 
 [[bin]]
-name = "yieldloop"
-path = "src/bin/yieldloop.rs"
+name = "yldloop"
+path = "src/bin/yldloop.rs"
 
 [[bin]]
 name = "worker"
@@ -58,8 +58,24 @@ name = "fs_test"
 path = "src/bin/fs_test.rs"
 
 [[bin]]
-name = "fs_worker"
-path = "src/bin/fs_worker.rs"
+name = "fsworker"
+path = "src/bin/fsworker.rs"
+
+[[bin]]
+name = "fpustrs"
+path = "src/bin/fpustrs.rs"
+
+[[bin]]
+name = "winstrs"
+path = "src/bin/winstrs.rs"
+
+[[bin]]
+name = "spawner"
+path = "src/bin/spawner.rs"
+
+[[bin]]
+name = "spawnee"
+path = "src/bin/spawnee.rs"
 
 [dependencies]
 x86_64 = "0.15.2"
@@ -67,3 +83,15 @@ spin = "0.10.0"
 embedded-graphics = "0.8.2"
 bitflags = "2.11.0"
 static_assertions = "1.1.0"
+
+[[bin]]
+name = "bigproc"
+path = "src/bin/bigproc.rs"
+
+[[bin]]
+name = "treeroot"
+path = "src/bin/treeroot.rs"
+
+[[bin]]
+name = "treeleaf"
+path = "src/bin/treeleaf.rs"

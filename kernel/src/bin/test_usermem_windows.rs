@@ -5,7 +5,7 @@ extern crate alloc;
 
 use kernel::graphics::compositor::{get_compositor, init_compositor};
 use kernel::process::ProcessState;
-use kernel::process::elf_loader::{ElfLoadInfo, WINSTRESS_ELF};
+use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::scheduler;
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
@@ -34,7 +34,9 @@ extern "C" fn kmain() -> ! {
 fn test_main() -> ! {
     serial_println_core!("=== test_usermem_windows: start ===");
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::testing::mount_test_disk();
+
+    kernel::process_start::init_userspace();
     init_compositor(FRAMEBUFFER_WIDTH, FRAMEBUFFER_HEIGHT);
 
     bsp_init::wait_for_ap_cores_blocking();
@@ -47,17 +49,17 @@ fn test_main() -> ! {
         before_in_use
     );
 
-    let elf_info = match ElfLoadInfo::from_elf_data(WINSTRESS_ELF) {
+    let elf_info = match load_elf_from_path("/BIN/winstrs") {
         Ok(info) => info,
         Err(e) => {
-            serial_println_core!("FAIL: parse winstress ELF: {:?}", e);
+            serial_println_core!("FAIL: parse winstrs ELF: {:?}", e);
             exit_qemu(QemuExitCode::Failed);
         }
     };
 
     let pid = {
         let mut pm = PROCESS_MANAGER.lock();
-        match pm.create_process_from_elf(0, &elf_info, "winstress", 5) {
+        match pm.create_process_from_elf(0, &elf_info, "winstrs", 5) {
             Ok(pid) => pid,
             Err(e) => {
                 serial_println_core!("FAIL: create_process_from_elf: {:?}", e);
@@ -72,7 +74,7 @@ fn test_main() -> ! {
 
     loop {
         if kernel::interrupts::system_uptime_ns().saturating_sub(start) >= TIMEOUT_MS * NS_PER_MS {
-            serial_println_core!("FAIL: winstress pid={} timed out", pid);
+            serial_println_core!("FAIL: winstrs pid={} timed out", pid);
             break;
         }
 
@@ -99,10 +101,7 @@ fn test_main() -> ! {
         success = false;
     }
     if exit_code != Some(0) {
-        serial_println_core!(
-            "FAIL: winstress exit code {:?}, expected Some(0)",
-            exit_code
-        );
+        serial_println_core!("FAIL: winstrs exit code {:?}, expected Some(0)", exit_code);
         success = false;
     }
 

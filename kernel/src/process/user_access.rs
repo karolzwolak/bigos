@@ -84,3 +84,19 @@ pub fn copy_user_path(ptr: usize, len: usize) -> Result<PathBuf, SyscallError> {
 
     Ok(path)
 }
+
+/// Copies `destination.len()` bytes from user memory
+pub fn copy_from_user(ptr: usize, destination: &mut [u8]) -> Result<(), SyscallError> {
+    if destination.is_empty() {
+        return Ok(());
+    }
+    if !validate_user_ptr(ptr, destination.len(), UserAccess::Read) {
+        return Err(SyscallError::InvalidPtr);
+    }
+
+    // SAFETY: the range was validated as mapped user memory above
+    let source = unsafe { core::slice::from_raw_parts(ptr as *const u8, destination.len()) };
+    destination.copy_from_slice(source);
+
+    Ok(())
+}

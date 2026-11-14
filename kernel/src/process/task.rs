@@ -1,6 +1,7 @@
 use crate::gdt::{self, USER_CODE_SELECTOR_VALUE, USER_DATA_SELECTOR_VALUE};
+use crate::process::process_manager::BIGPROC_PID;
 use crate::process::scheduler;
-use crate::process::{INVALID_PID, PID, RFLAGS_DEFAULT};
+use crate::process::{ChildPolicy, INVALID_PID, PID, RFLAGS_DEFAULT};
 use crate::trap::{TRAP_FRAME_SIZE, TrapFrame, pop_all_gprs};
 use crate::util::cpuinfo::get_current_core_id;
 use core::arch::{asm, naked_asm};
@@ -128,6 +129,8 @@ pub struct TaskSlot {
     pub on_cpu: AtomicBool,
     pub kill_pending: AtomicBool,
     pub exit_code_request: AtomicI32,
+    /// ChildPolicy of the pending kill
+    pub child_policy_request: AtomicU8,
     pub cpu_ticks: AtomicU64,
     pub core_migration_count: AtomicU32,
     pub cr3: AtomicU64,
@@ -153,6 +156,7 @@ impl TaskSlot {
             on_cpu: AtomicBool::new(false),
             kill_pending: AtomicBool::new(false),
             exit_code_request: AtomicI32::new(0),
+            child_policy_request: AtomicU8::new(ChildPolicy::KillChildren as u8),
             cpu_ticks: AtomicU64::new(0),
             core_migration_count: AtomicU32::new(0),
             cr3: AtomicU64::new(0),
@@ -206,6 +210,8 @@ pub fn allocate_task_slot(pid: PID, priority: u8, home_core: u8, cr3: u64) -> Op
         task.on_cpu.store(false, Ordering::Relaxed);
         task.kill_pending.store(false, Ordering::Relaxed);
         task.exit_code_request.store(0, Ordering::Relaxed);
+        task.child_policy_request
+            .store(ChildPolicy::KillChildren as u8, Ordering::Relaxed);
         task.cpu_ticks.store(0, Ordering::Relaxed);
         task.core_migration_count.store(0, Ordering::Relaxed);
         task.cr3.store(cr3, Ordering::Relaxed);
@@ -250,7 +256,17 @@ pub fn release_task_slot(slot_index: usize) {
 /// Builds the stack of a task that has never run
 /// The first switch_context into it returns to task_first_entry, which leaves
 /// for ring 3 through the trap frame above it
-pub fn init_task_stack(slot_index: usize, user_rip: u64, user_rsp: u64) {
+/// Registers a task finds on its first entry to ring 3
+/// rdi and rsi carry argc and the ArgSlice array, so the entry function gets them as arguments
+#[derive(Debug, Clone, Copy)]
+pub struct UserEntry {
+    pub rip: u64,
+    pub rsp: u64,
+    pub argc: u64,
+    pub argv: u64,
+}
+
+pub fn init_task_stack(slot_index: usize, entry: UserEntry) {
     let task = slot(slot_index);
     let stack_top = task.kernel_stack_top.load(Ordering::Relaxed);
     debug_assert!(stack_top % 16 == 0);
@@ -260,10 +276,12 @@ pub fn init_task_stack(slot_index: usize, user_rip: u64, user_rsp: u64) {
     let saved_rsp = return_address_slot - CALLEE_SAVED_SIZE;
 
     let mut frame = TrapFrame::zeroed();
-    frame.rip = user_rip;
+    frame.rip = entry.rip;
     frame.cs = USER_CODE_SELECTOR_VALUE as u64;
     frame.rflags = RFLAGS_DEFAULT;
-    frame.rsp = user_rsp;
+    frame.rsp = entry.rsp;
+    frame.rdi = entry.argc;
+    frame.rsi = entry.argv;
     frame.ss = USER_DATA_SELECTOR_VALUE as u64;
 
     // SAFETY: the addresses lie inside the stack of this slot, which nobody runs on yet
@@ -315,19 +333,24 @@ pub fn exit_if_kill_pending() {
 
     let task = slot(slot_index);
     if task.kill_pending.load(Ordering::Acquire) {
-        exit_current(task.exit_code_request.load(Ordering::Acquire));
+        let child_policy = ChildPolicy::from_raw(task.child_policy_request.load(Ordering::Acquire));
+        exit_current(task.exit_code_request.load(Ordering::Acquire), child_policy);
     }
 }
 
 /// Asks a task to exit, the task tears itself down at its next return to ring 3
 /// Returns false when no such task exists
-pub fn request_kill(pid: PID, exit_code: i32) -> bool {
+pub fn request_kill(pid: PID, exit_code: i32, child_policy: ChildPolicy) -> bool {
+    debug_assert!(pid != BIGPROC_PID, "bigproc is never killed");
+
     let Some(slot_index) = find_slot_by_pid(pid) else {
         return false;
     };
 
     let task = slot(slot_index);
     task.exit_code_request.store(exit_code, Ordering::Release);
+    task.child_policy_request
+        .store(child_policy as u8, Ordering::Release);
     task.kill_pending.store(true, Ordering::Release);
 
     scheduler::wake_task(TaskRef {
@@ -350,7 +373,7 @@ pub fn request_kill(pid: PID, exit_code: i32) -> bool {
 
 /// Tears the running task down on its own kernel stack, never returns
 /// The scheduler loop frees the slot once it has switched away from the dead task
-pub fn exit_current(exit_code: i32) -> ! {
+pub fn exit_current(exit_code: i32, child_policy: ChildPolicy) -> ! {
     let core_id = get_current_core_id();
     let slot_index = scheduler::get_current_slot_for_core(core_id);
     let pid = scheduler::get_current_process_for_core(core_id);
@@ -372,7 +395,7 @@ pub fn exit_current(exit_code: i32) -> ! {
     crate::graphics::compositor::destroy_windows_of_process(pid);
     {
         let mut process_manager = crate::process::process_manager::PROCESS_MANAGER.lock();
-        let result = process_manager.terminate_process(pid, exit_code, false);
+        let result = process_manager.terminate_process(pid, exit_code, child_policy);
         debug_assert!(result.is_ok());
     }
 

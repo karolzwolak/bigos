@@ -107,11 +107,14 @@ fn encode_node_id(
 ) -> FileNodeHandle {
     let first_cluster = entry.get_first_cluster();
     // an empty file has no cluster to identify it, so identify it by its slot in the parent
-    let (cluster_or_entry_index, by_entry_index_flag) = if first_cluster == NO_CLUSTER {
-        (entry_index, NODE_BY_ENTRY_INDEX_FLAG)
-    } else {
-        (first_cluster as usize, 0)
-    };
+    // a cluster that does not fit the handle comes from a corrupt entry, it is identified by
+    // its slot too and rejected when the entry is loaded
+    let (cluster_or_entry_index, by_entry_index_flag) =
+        if first_cluster == NO_CLUSTER || first_cluster > MAX_CLUSTER {
+            (entry_index, NODE_BY_ENTRY_INDEX_FLAG)
+        } else {
+            (first_cluster as usize, 0)
+        };
     debug_assert!(cluster_or_entry_index <= NODE_CLUSTER_MASK);
     debug_assert!(parent_cluster as usize <= NODE_CLUSTER_MASK);
 
@@ -287,6 +290,11 @@ impl Fat32Driver {
 
     pub fn root_node(&self) -> FileNodeHandle {
         self.root_dir_node_id
+    }
+
+    /// whether a first cluster read from a directory entry may be followed, NO_CLUSTER means empty
+    fn is_cluster_followable(&self, cluster: u32) -> bool {
+        cluster == NO_CLUSTER || (ROOT_CLUSTER..self.max_cluster).contains(&cluster)
     }
 
     fn cluster_to_sector(&self, cluster: u32) -> u64 {
@@ -596,9 +604,12 @@ impl Fat32Driver {
             let entries = self.read_directory_entries(curr_cluster)?;
             let entry_index = entries
                 .iter()
-                .position(|e| e.is_valid() && !e.is_volume_id() && e.full_name_matches(&fat32_part))
+                .position(|e| e.is_short_name_node() && e.full_name_matches(&fat32_part))
                 .ok_or(FileSystemError::NotFound)?;
             let entry = entries[entry_index];
+            if !self.is_cluster_followable(entry.get_first_cluster()) {
+                return Err(FileSystemError::IoError);
+            }
 
             if parts.peek().is_some() && !entry.is_directory() {
                 return Err(FileSystemError::NotDirectory);
@@ -618,8 +629,11 @@ impl Fat32Driver {
         if node.by_entry_index {
             let entry_index = node.cluster_or_entry_index as usize;
             let entry = self.read_direntry_at(node.parent_cluster, entry_index)?;
-            if !entry.is_valid() {
+            if !entry.is_short_name_node() {
                 return Err(FileSystemError::NotFound);
+            }
+            if !self.is_cluster_followable(entry.get_first_cluster()) {
+                return Err(FileSystemError::IoError);
             }
 
             return Ok((entry, entry_index));
@@ -629,9 +643,7 @@ impl Fat32Driver {
         let entry_index = entries
             .iter()
             .position(|e| {
-                e.is_valid()
-                    && !e.is_volume_id()
-                    && e.get_first_cluster() == node.cluster_or_entry_index
+                e.is_short_name_node() && e.get_first_cluster() == node.cluster_or_entry_index
             })
             .ok_or(FileSystemError::NotFound)?;
 
@@ -815,15 +827,17 @@ impl Fat32Driver {
         if !is_directory(node.attributes) {
             return Err(FileSystemError::NotDirectory);
         }
-        debug_assert!(!node.by_entry_index);
+        if node.by_entry_index {
+            // a directory with a corrupt first cluster
+            return Err(FileSystemError::IoError);
+        }
 
         let dir_cluster = node.cluster_or_entry_index;
         let entries = self.read_directory_entries(dir_cluster)?;
         let mut nodes = Vec::with_capacity(entries.len());
 
         for (entry_index, entry) in entries.iter().enumerate() {
-            if !entry.is_valid()
-                || entry.is_volume_id()
+            if !entry.is_short_name_node()
                 || entry.is_current_directory()
                 || entry.is_parent_directory()
             {
@@ -853,7 +867,10 @@ impl Fat32Driver {
         if !is_directory(parent.attributes) {
             return Err(FileSystemError::NotDirectory);
         }
-        debug_assert!(!parent.by_entry_index);
+        if parent.by_entry_index {
+            // a directory with a corrupt first cluster
+            return Err(FileSystemError::IoError);
+        }
 
         let parent_cluster = parent.cluster_or_entry_index;
         let fat32_name = to_fat32_name(name)?;
@@ -861,7 +878,7 @@ impl Fat32Driver {
         let entries = self.read_directory_entries(parent_cluster)?;
         if entries
             .iter()
-            .any(|e| e.is_valid() && !e.is_volume_id() && e.full_name_matches(&fat32_name))
+            .any(|e| e.is_short_name_node() && e.full_name_matches(&fat32_name))
         {
             return Err(FileSystemError::FileExists);
         }
@@ -928,10 +945,9 @@ impl Fat32Driver {
 
         if entry.is_directory() {
             let dir_entries = self.read_directory_entries(first_cluster)?;
-            if dir_entries
-                .iter()
-                .any(|e| e.is_valid() && !e.is_current_directory() && !e.is_parent_directory())
-            {
+            if dir_entries.iter().any(|e| {
+                e.is_short_name_node() && !e.is_current_directory() && !e.is_parent_directory()
+            }) {
                 return Err(FileSystemError::DirectoryNotEmpty);
             }
         }

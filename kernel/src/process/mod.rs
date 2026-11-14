@@ -6,6 +6,7 @@ pub mod elf_loader;
 pub mod file_syscalls;
 pub mod process_manager;
 pub mod process_mem;
+pub mod process_syscalls;
 pub mod scheduler;
 pub mod shared_state;
 pub mod syscall;
@@ -18,8 +19,10 @@ pub use elf_loader::{ElfLoadError, ElfLoadInfo};
 pub use process_manager::ProcessManager;
 
 use crate::filesystem::fat32::{FileNodeHandle, INVALID_NODE_HANDLE};
+use crate::memory::paging::PAGE_SIZE;
 use crate::memory::usermem::USER_STACK_TOP;
 use crate::process::syscall::SyscallError;
+use crate::process::task::UserEntry;
 use crate::{
     data_structures::vector::Vec,
     process::{
@@ -28,6 +31,7 @@ use crate::{
     serial_println,
 };
 use alloc::string::String;
+use core::cmp::min;
 use x86_64::{
     VirtAddr,
     structures::paging::{PageTableFlags, Size4KiB, mapper::MapToError},
@@ -57,6 +61,68 @@ pub const PROCESS_HEAP_SIZE_BYTES: u64 = PROCESS_WINDOW_BUFFER_BASE - PROCESS_HE
 pub const PROCESS_HEAP_VIRT_END: u64 = PROCESS_HEAP_VIRT_START + PROCESS_HEAP_SIZE_BYTES;
 
 pub type PID = usize;
+
+/// Limits of the arguments a new process gets, also checked by CreateProcess
+pub const MAX_ARGC: usize = 64;
+pub const MAX_ARGV_BYTES: usize = 4096;
+pub const MAX_PROCESS_NAME_LEN: usize = 32;
+
+const USER_STACK_ALIGNMENT: u64 = 16;
+const ARG_SLICE_SIZE_BYTES: usize = core::mem::size_of::<ArgSlice>();
+
+/// One argument as the new process sees it, the string excludes its NUL
+/// Layout shared with rustspace `ArgSlice`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ArgSlice {
+    pub ptr: u64,
+    pub len: u64,
+}
+
+impl ArgSlice {
+    fn as_bytes(&self) -> [u8; ARG_SLICE_SIZE_BYTES] {
+        let mut bytes = [0u8; ARG_SLICE_SIZE_BYTES];
+        bytes[..8].copy_from_slice(&self.ptr.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.len.to_le_bytes());
+        bytes
+    }
+}
+
+/// What happens to the children of a terminating process
+/// The raw values are the syscall ABI, 0 is the default so callers that pass nothing kill the subtree
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildPolicy {
+    /// every child is killed with the same exit code, and so on down the subtree
+    KillChildren = 0,
+    /// the children keep running and bigproc (PID 1) adopts them
+    OrphanChildren = 1,
+}
+
+impl ChildPolicy {
+    /// For values the kernel stored itself
+    pub const fn from_raw(raw: u8) -> Self {
+        debug_assert!(raw <= ChildPolicy::OrphanChildren as u8);
+
+        match raw {
+            0 => ChildPolicy::KillChildren,
+            _ => ChildPolicy::OrphanChildren,
+        }
+    }
+}
+
+impl TryFrom<u64> for ChildPolicy {
+    type Error = SyscallError;
+
+    /// For values coming from userspace
+    fn try_from(raw: u64) -> Result<Self, Self::Error> {
+        match raw {
+            0 => Ok(ChildPolicy::KillChildren),
+            1 => Ok(ChildPolicy::OrphanChildren),
+            _ => Err(SyscallError::InvalidArgument),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
@@ -144,6 +210,70 @@ impl Process {
         self.file_descriptors[fd] = FileDescriptor::CLOSED;
 
         Ok(())
+    }
+
+    /// Copies bytes into this process, through the HHDM, into pages that are already mapped
+    fn write_user_bytes(&self, user_vaddr: u64, bytes: &[u8]) {
+        let address_space_manager = crate::memory::get_user_mem_mgr();
+        let mut bytes_written = 0;
+
+        while bytes_written < bytes.len() {
+            let destination = VirtAddr::new(user_vaddr + bytes_written as u64);
+            let phys = address_space_manager
+                .translate_user_virt_to_phys(self.memory_layout.top_page_table_phys, destination)
+                .expect("argument page is not mapped");
+            let hhdm_vaddr = phys.as_u64() + address_space_manager.phys_offset;
+
+            let page_offset = destination.as_u64() as usize % PAGE_SIZE;
+            let chunk_len = min(PAGE_SIZE - page_offset, bytes.len() - bytes_written);
+
+            // SAFETY: the page belongs to this process and nothing runs in it yet
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr().add(bytes_written),
+                    hhdm_vaddr as *mut u8,
+                    chunk_len,
+                );
+            }
+
+            bytes_written += chunk_len;
+        }
+    }
+
+    /// Puts the packed arguments at the top of the user stack and the ArgSlice array below them
+    /// Returns the registers of the first entry, rsp points at the array
+    pub fn place_arguments(&self, entry_point: u64, argc: u32, packed_args: &[u8]) -> UserEntry {
+        let argc = argc as usize;
+        debug_assert!(argc <= MAX_ARGC && packed_args.len() <= MAX_ARGV_BYTES);
+        debug_assert!(packed_args.iter().filter(|&&byte| byte == 0).count() == argc);
+
+        let strings_base = USER_STACK_TOP - packed_args.len() as u64;
+        let array_bytes = (argc * ARG_SLICE_SIZE_BYTES) as u64;
+        let array_base = (strings_base - array_bytes) & !(USER_STACK_ALIGNMENT - 1);
+
+        let mut array = [0u8; MAX_ARGC * ARG_SLICE_SIZE_BYTES];
+        let mut string_offset = 0;
+        for (index, argument) in packed_args.split(|&byte| byte == 0).take(argc).enumerate() {
+            let slice = ArgSlice {
+                ptr: strings_base + string_offset as u64,
+                len: argument.len() as u64,
+            };
+            let array_offset = index * ARG_SLICE_SIZE_BYTES;
+            array[array_offset..array_offset + ARG_SLICE_SIZE_BYTES]
+                .copy_from_slice(&slice.as_bytes());
+
+            string_offset += argument.len() + 1;
+        }
+
+        self.write_user_bytes(strings_base, packed_args);
+        self.write_user_bytes(array_base, &array[..argc * ARG_SLICE_SIZE_BYTES]);
+
+        UserEntry {
+            rip: entry_point,
+            rsp: array_base,
+            argc: argc as u64,
+            argv: array_base,
+        }
     }
 
     pub fn close_all_fds(&mut self) {

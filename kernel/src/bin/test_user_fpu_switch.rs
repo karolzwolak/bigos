@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use kernel::process::elf_loader::{ElfLoadInfo, FPUSTRESS_ELF};
+use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::{PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
@@ -30,13 +30,15 @@ extern "C" fn kmain() -> ! {
 fn test_main() -> ! {
     serial_println_core!("=== test_user_fpu_switch: start ===");
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::testing::mount_test_disk();
+
+    kernel::process_start::init_userspace();
     bsp_init::wait_for_ap_cores_blocking();
 
-    let elf_info = match ElfLoadInfo::from_elf_data(FPUSTRESS_ELF) {
+    let elf_info = match load_elf_from_path("/BIN/fpustrs") {
         Ok(info) => info,
         Err(e) => {
-            serial_println_core!("FAIL: parse fpustress ELF: {:?}", e);
+            serial_println_core!("FAIL: parse fpustrs ELF: {:?}", e);
             exit_qemu(QemuExitCode::Failed);
         }
     };
@@ -47,14 +49,14 @@ fn test_main() -> ! {
         let mut pm = PROCESS_MANAGER.lock();
 
         for pid_slot in pids.iter_mut() {
-            *pid_slot =
-                match pm.create_process_from_elf(0, &elf_info, "fpustress", PROCESS_PRIORITY) {
-                    Ok(pid) => pid,
-                    Err(e) => {
-                        serial_println_core!("FAIL: create_process_from_elf: {:?}", e);
-                        exit_qemu(QemuExitCode::Failed);
-                    }
-                };
+            *pid_slot = match pm.create_process_from_elf(0, &elf_info, "fpustrs", PROCESS_PRIORITY)
+            {
+                Ok(pid) => pid,
+                Err(e) => {
+                    serial_println_core!("FAIL: create_process_from_elf: {:?}", e);
+                    exit_qemu(QemuExitCode::Failed);
+                }
+            };
         }
     }
 
@@ -66,7 +68,7 @@ fn test_main() -> ! {
             if kernel::interrupts::system_uptime_ns().saturating_sub(start_ns)
                 >= TIMEOUT_MS * NS_PER_MS
             {
-                serial_println_core!("FAIL: fpustress pid={} timed out", pid);
+                serial_println_core!("FAIL: fpustrs pid={} timed out", pid);
                 exit_qemu(QemuExitCode::Failed);
             }
 
@@ -79,7 +81,7 @@ fn test_main() -> ! {
                 Some((ProcessState::Terminated, exit_code)) => {
                     if exit_code != Some(0) {
                         serial_println_core!(
-                            "FAIL: fpustress pid={} exit code {:?}, expected Some(0)",
+                            "FAIL: fpustrs pid={} exit code {:?}, expected Some(0)",
                             pid,
                             exit_code
                         );
@@ -89,7 +91,7 @@ fn test_main() -> ! {
                 }
                 Some(_) => {}
                 None => {
-                    serial_println_core!("FAIL: fpustress pid={} vanished", pid);
+                    serial_println_core!("FAIL: fpustrs pid={} vanished", pid);
                     success = false;
                     break;
                 }
