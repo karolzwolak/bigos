@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use core::sync::atomic::Ordering;
-use kernel::process::elf_loader::{ElfLoadInfo, MEMSTRESS_ELF};
+use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::scheduler;
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
@@ -30,7 +30,9 @@ fn test_main() -> ! {
         kernel::AP_CORE_COUNT
     );
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::testing::mount_test_disk();
+
+    kernel::process_start::init_userspace();
 
     bsp_init::wait_for_ap_cores_blocking();
     let (ready, expected) = bsp_init::check_ap_cores_ready();
@@ -47,26 +49,26 @@ fn test_main() -> ! {
         before_bump
     );
 
-    let elf_info = match ElfLoadInfo::from_elf_data(MEMSTRESS_ELF) {
+    let elf_info = match load_elf_from_path("/BIN/memstrs") {
         Ok(info) => {
             serial_println_core!(
-                "test_usermem_reclaim: parsed memstress ELF entry={:#x} segments={}",
+                "test_usermem_reclaim: parsed memstrs ELF entry={:#x} segments={}",
                 info.entry_point,
                 info.segments.len()
             );
             info
         }
         Err(e) => {
-            serial_println_core!("FAIL: parse memstress ELF: {:?}", e);
+            serial_println_core!("FAIL: parse memstrs ELF: {:?}", e);
             exit_qemu(QemuExitCode::Failed);
         }
     };
 
     let pid = {
         let mut pm = PROCESS_MANAGER.lock();
-        match pm.create_process_from_elf(0, &elf_info, "memstress", 5) {
+        match pm.create_process_from_elf(0, &elf_info, "memstrs", 5) {
             Ok(pid) => {
-                serial_println_core!("test_usermem_reclaim: created memstress pid={}", pid);
+                serial_println_core!("test_usermem_reclaim: created memstrs pid={}", pid);
                 pid
             }
             Err(e) => {
@@ -86,7 +88,7 @@ fn test_main() -> ! {
         let now = kernel::interrupts::system_uptime_ns();
         if now.saturating_sub(start) >= timeout_ns {
             serial_println_core!(
-                "FAIL: memstress pid={} timed out after {} ms",
+                "FAIL: memstrs pid={} timed out after {} ms",
                 pid,
                 TIMEOUT_MS
             );
@@ -129,14 +131,14 @@ fn test_main() -> ! {
     }
 
     if !terminated {
-        serial_println_core!("FAIL: memstress did not terminate");
+        serial_println_core!("FAIL: memstrs did not terminate");
         success = false;
     }
 
     if let Some(code) = exit_code
         && code != 0
     {
-        serial_println_core!("FAIL: memstress exit_code {} != 0", code);
+        serial_println_core!("FAIL: memstrs exit_code {} != 0", code);
         success = false;
     }
 

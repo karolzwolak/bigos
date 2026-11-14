@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use kernel::process::elf_loader::{ElfLoadInfo, REGPROBE_ELF};
+use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::{PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
@@ -30,10 +30,12 @@ extern "C" fn kmain() -> ! {
 fn test_main() -> ! {
     serial_println_core!("=== test_user_regprobe: start ===");
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::testing::mount_test_disk();
+
+    kernel::process_start::init_userspace();
     bsp_init::wait_for_ap_cores_blocking();
 
-    let elf_info = match ElfLoadInfo::from_elf_data(REGPROBE_ELF) {
+    let elf_info = match load_elf_from_path("/BIN/regprobe") {
         Ok(info) => info,
         Err(e) => {
             serial_println_core!("FAIL: parse regprobe ELF: {:?}", e);

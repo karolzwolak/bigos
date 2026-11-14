@@ -3,7 +3,7 @@
 
 mod boot;
 
-use kernel::bsp_init::{init_shared_state_on_bsp, wait_for_ap_cores_blocking};
+use kernel::bsp_init::wait_for_ap_cores_blocking;
 use kernel::graphics::compositor::{get_compositor, init_compositor};
 use kernel::testing::{QemuExitCode, exit_qemu};
 use kernel::{interrupts, serial_println_core};
@@ -28,9 +28,9 @@ fn main() -> ! {
 
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
-        init_shared_state_on_bsp();
+        kernel::process_start::init_userspace();
 
-        serial_println_core!("Shared state initialized");
+        serial_println_core!("Shared state initialized, bigproc started");
 
         serial_println_core!("Framebuffer size: {}x{}", fb_width, fb_height);
 
@@ -39,6 +39,7 @@ fn main() -> ! {
 
         wait_for_ap_cores_blocking();
         serial_println_core!("AP cores ready, creating userspace processes");
+        kernel::filesystem::init_boot_filesystem();
         kernel::process_start::create_userspace_processes();
 
         serial_println_core!("Created initial userspace processes");

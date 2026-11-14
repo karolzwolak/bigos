@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use core::sync::atomic::Ordering;
-use kernel::process::elf_loader::{ElfLoadInfo, SPINNER_ELF};
+use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::get_shared_program_data_buffer_mut;
 use kernel::process::{PID, ProcessState};
@@ -35,10 +35,12 @@ extern "C" fn kmain() -> ! {
 fn test_main() -> ! {
     serial_println_core!("=== test_user_preempt: start ===");
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::testing::mount_test_disk();
+
+    kernel::process_start::init_userspace();
     bsp_init::wait_for_ap_cores_blocking();
 
-    let elf_info = match ElfLoadInfo::from_elf_data(SPINNER_ELF) {
+    let elf_info = match load_elf_from_path("/BIN/spinner") {
         Ok(info) => info,
         Err(e) => {
             serial_println_core!("FAIL: parse spinner ELF: {:?}", e);

@@ -5,7 +5,7 @@ extern crate alloc;
 
 use core::sync::atomic::Ordering;
 use kernel::process::PID;
-use kernel::process::elf_loader::{BUSYLOOP_ELF, ElfLoadInfo, WORKER_ELF, YIELDLOOP_ELF};
+use kernel::process::elf_loader::{ElfLoadInfo, load_elf_from_path};
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
 use kernel::process::task;
@@ -83,8 +83,8 @@ fn wait_until(what: &str, deadline_us: u64, condition: impl Fn() -> bool) {
     }
 }
 
-fn parse(elf: &[u8]) -> ElfLoadInfo {
-    match ElfLoadInfo::from_elf_data(elf) {
+fn parse(path: &str) -> ElfLoadInfo {
+    match load_elf_from_path(path) {
         Ok(info) => info,
         Err(error) => {
             serial_println_core!("parse ELF: {:?}", error);
@@ -148,14 +148,16 @@ fn run_case(
 fn test_main() -> ! {
     serial_println_core!("=== test_user_priority: start ===");
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::testing::mount_test_disk();
+
+    kernel::process_start::init_userspace();
     bsp_init::wait_for_ap_cores_blocking();
 
-    let yieldloop_elf = parse(YIELDLOOP_ELF);
-    let busyloop_elf = parse(BUSYLOOP_ELF);
-    let worker_elf = parse(WORKER_ELF);
+    let yldloop_elf = parse("/BIN/yldloop");
+    let busyloop_elf = parse("/BIN/busyloop");
+    let worker_elf = parse("/BIN/worker");
 
-    run_case("yielding", &yieldloop_elf, "yieldloop", &worker_elf, true);
+    run_case("yielding", &yldloop_elf, "yldloop", &worker_elf, true);
     run_case("spinning", &busyloop_elf, "busyloop", &worker_elf, false);
 
     serial_println_core!("=== test_user_priority: ok ===");

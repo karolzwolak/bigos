@@ -141,6 +141,43 @@ impl UserMemoryManager {
         Some(PhysAddr::new(pt_entry.addr().as_u64() + page_offset))
     }
 
+    /// True when the page holding vaddr is mapped with the required flags at every level of the walk
+    pub fn is_user_page_accessible(
+        &self,
+        pml4_table_phys: PhysAddr,
+        vaddr: u64,
+        writable: bool,
+    ) -> bool {
+        const LEVEL_SHIFTS: [u32; 4] = [39, 30, 21, 12];
+        const INDEX_MASK: u64 = 0x1FF;
+        const LAST_LEVEL: usize = 3;
+        const HUGE_PAGE_LEVELS: [bool; 4] = [false, true, true, false];
+
+        let mut required = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+        if writable {
+            required |= PageTableFlags::WRITABLE;
+        }
+
+        let mut table_phys = pml4_table_phys.as_u64();
+        for (level, shift) in LEVEL_SHIFTS.iter().enumerate() {
+            let table = unsafe { &*((table_phys + self.phys_offset) as *const PageTable) };
+            let entry = &table[((vaddr >> shift) & INDEX_MASK) as usize];
+            let flags = entry.flags();
+            if !flags.contains(required) {
+                return false;
+            }
+            if level == LAST_LEVEL
+                || (HUGE_PAGE_LEVELS[level] && flags.contains(PageTableFlags::HUGE_PAGE))
+            {
+                return true;
+            }
+
+            table_phys = entry.addr().as_u64();
+        }
+
+        unreachable!("the walk returns at the last level")
+    }
+
     /// Read the PageTableFlags of an already-mapped page by walking the page table manually
     /// Returns empty flags if the page is not mapped
     fn get_page_flags(&self, pml4_table_phys: PhysAddr, page: Page<Size4KiB>) -> PageTableFlags {

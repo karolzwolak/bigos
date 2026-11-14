@@ -6,3 +6,4 @@ logs/
 /test_logs
 *.iso
 *.hdd
+storage/

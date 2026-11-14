@@ -1,5 +1,5 @@
-use crate::filesystem::fat32::{MAX_CLUSTER, ROOT_CLUSTER};
-use crate::filesystem::sirius::FileType;
+use crate::filesystem::fat32::ROOT_CLUSTER;
+use crate::filesystem::vfs::{FileSystemError, FileSystemResult, FileType};
 use alloc::string::String;
 
 #[repr(u8)]
@@ -23,6 +23,9 @@ pub const MAX_EXT_LENGTH: usize = 3;
 pub const MAX_FULL_NAME_LENGTH: usize = MAX_NAME_LENGTH + MAX_EXT_LENGTH;
 
 pub const DIRECTORY_ENTRY_SIZE: usize = 32;
+
+const LONG_NAME_ATTRIBUTES: u8 = 0x0F;
+const LONG_NAME_ATTRIBUTES_MASK: u8 = 0x3F;
 
 const THIS_DIR_ENTRY_NAME: [u8; 8] = *b".       ";
 const THIS_DIR_ENTRY_EXT: [u8; 3] = *b"   ";
@@ -119,9 +122,6 @@ impl DirectoryEntry {
 
         let first_cluster_high = u16::from_le_bytes([data[20], data[21]]);
         let first_cluster_low = u16::from_le_bytes([data[26], data[27]]);
-        let cluster = (first_cluster_high as u32) << 16 | first_cluster_low as u32;
-
-        assert!(cluster <= MAX_CLUSTER, "Cluster {} > MAX_CLUSTER", cluster);
 
         DirectoryEntry {
             name: [
@@ -163,6 +163,7 @@ impl DirectoryEntry {
     pub fn create_dot_entry(cluster: u32) -> Self {
         let mut entry = DirectoryEntry::create_empty();
         entry.name.copy_from_slice(&THIS_DIR_ENTRY_NAME);
+        entry.extension.copy_from_slice(&THIS_DIR_ENTRY_EXT);
         entry.attributes = FatFileAttributes::Directory as u8;
         entry.set_first_cluster(cluster);
         entry
@@ -171,6 +172,7 @@ impl DirectoryEntry {
     pub fn create_dot_dot_entry(parent_cluster: u32) -> Self {
         let mut entry = DirectoryEntry::create_empty();
         entry.name.copy_from_slice(&PARENT_DIR_ENTRY_NAME);
+        entry.extension.copy_from_slice(&PARENT_DIR_ENTRY_EXT);
         entry.attributes = FatFileAttributes::Directory as u8;
         entry.set_first_cluster(parent_cluster);
         entry
@@ -194,6 +196,17 @@ impl DirectoryEntry {
 
     pub fn is_volume_id(&self) -> bool {
         (self.attributes & FatFileAttributes::VolumeId as u8) != 0
+    }
+
+    /// long file name entries are not supported, they stay in the directory but nothing decodes them
+    /// bytes 20..22 of such an entry are name characters, not a cluster
+    pub fn is_long_name(&self) -> bool {
+        self.attributes & LONG_NAME_ATTRIBUTES_MASK == LONG_NAME_ATTRIBUTES
+    }
+
+    /// a live short name entry that is not the volume label
+    pub fn is_short_name_node(&self) -> bool {
+        self.is_valid() && !self.is_long_name() && !self.is_volume_id()
     }
 
     pub fn is_current_directory(&self) -> bool {
@@ -269,38 +282,26 @@ impl DirectoryEntry {
         self.name == fullname[0..8] && self.extension == fullname[8..11]
     }
 
-    pub fn set_filename(&mut self, filename: &str) {
+    pub fn set_filename(&mut self, filename: &str) -> FileSystemResult<()> {
+        let (name_part, ext_part) = match filename.rfind('.') {
+            Some(pos) => (&filename[..pos], &filename[pos + 1..]),
+            None => (filename, ""),
+        };
+        if name_part.len() > MAX_NAME_LENGTH || ext_part.len() > MAX_EXT_LENGTH {
+            return Err(FileSystemError::InvalidFilename);
+        }
+
         self.name.fill(b' ');
         self.extension.fill(b' ');
 
-        let last_dot = filename.rfind('.');
-
-        let (name_part, ext_part) = match last_dot {
-            Some(pos) => {
-                let name = &filename[..pos];
-                let ext = &filename[pos + 1..];
-                (name, Some(ext))
-            }
-            None => (filename, None),
-        };
-
-        let name_bytes = name_part.as_bytes();
-        for (i, &c) in name_bytes.iter().enumerate().take(8) {
-            self.name[i] = match c {
-                b'a'..=b'z' => c - 32,
-                _ => c,
-            };
+        for (i, c) in name_part.bytes().enumerate() {
+            self.name[i] = c.to_ascii_uppercase();
+        }
+        for (i, c) in ext_part.bytes().enumerate() {
+            self.extension[i] = c.to_ascii_uppercase();
         }
 
-        if let Some(ext) = ext_part {
-            let ext_bytes = ext.as_bytes();
-            for (i, &c) in ext_bytes.iter().enumerate().take(3) {
-                self.extension[i] = match c {
-                    b'a'..=b'z' => c - 32,
-                    _ => c,
-                };
-            }
-        }
+        Ok(())
     }
 
     pub fn mark_deleted(&mut self) {

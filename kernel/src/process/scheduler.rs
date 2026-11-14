@@ -30,6 +30,10 @@ static CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES as usize] =
 static CURRENT_SLOT_ON_CORE: [AtomicU16; MAX_CORES as usize] =
     [const { AtomicU16::new(INVALID_SLOT) }; MAX_CORES as usize];
 
+/// PID of the task that ran last on each core, only the owning core touches it
+static LAST_PROCESS_ON_CORE: [AtomicU64; MAX_CORES as usize] =
+    [const { AtomicU64::new(INVALID_PID as u64) }; MAX_CORES as usize];
+
 /// Set when the task running on a core should call core_run_scheduling() before it returns to ring 3
 static CORE_SHOULD_BE_RESCHEDULED: [AtomicBool; MAX_CORES as usize] =
     [const { AtomicBool::new(false) }; MAX_CORES as usize];
@@ -632,6 +636,11 @@ fn run_task(core_id: u8, slot_index: usize) {
     debug_assert!(task.state() == TaskState::Ready);
 
     let pid = task.pid.load(Ordering::Acquire);
+    let last_pid = LAST_PROCESS_ON_CORE[core_id as usize].swap(pid as u64, Ordering::Relaxed);
+    if last_pid != pid as u64 {
+        task.handoff_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     task.set_state(TaskState::Running);
     task.on_cpu.store(true, Ordering::Release);
     set_current_task_for_core(core_id, slot_index as u16, pid);

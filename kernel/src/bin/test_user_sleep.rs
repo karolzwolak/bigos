@@ -4,11 +4,11 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use kernel::process::elf_loader::{ElfLoadInfo, PINGPONG_ELF, SLEEPER_ELF};
+use kernel::process::elf_loader::{ElfLoadInfo, load_elf_from_path};
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
 use kernel::process::task::{self, TaskState};
-use kernel::process::{PID, ProcessState};
+use kernel::process::{ChildPolicy, PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
 
@@ -67,8 +67,8 @@ fn now_us() -> u64 {
     kernel::interrupts::tsc_timestamp_us()
 }
 
-fn parse(elf: &[u8]) -> ElfLoadInfo {
-    match ElfLoadInfo::from_elf_data(elf) {
+fn parse(path: &str) -> ElfLoadInfo {
+    match load_elf_from_path(path) {
         Ok(info) => info,
         Err(error) => {
             serial_println_core!("parse ELF: {:?}", error);
@@ -179,7 +179,7 @@ fn test_kill_during_sleep(sleeper_elf: &ElfLoadInfo) {
     });
 
     let start_us = now_us();
-    if !task::request_kill(pid, KILL_EXIT_CODE) {
+    if !task::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
         fail("request_kill found no task");
     }
     wait_until_gone(pid, KILL_DEADLINE_US);
@@ -228,11 +228,13 @@ fn test_wake_racing_with_block(pingpong_elf: &ElfLoadInfo) {
 fn test_main() -> ! {
     serial_println_core!("=== test_user_sleep: start ===");
 
-    kernel::process::shared_state::init_shared_state();
+    kernel::testing::mount_test_disk();
+
+    kernel::process_start::init_userspace();
     bsp_init::wait_for_ap_cores_blocking();
 
-    let sleeper_elf = parse(SLEEPER_ELF);
-    let pingpong_elf = parse(PINGPONG_ELF);
+    let sleeper_elf = parse("/BIN/sleeper");
+    let pingpong_elf = parse("/BIN/pingpong");
 
     test_sleep_duration_and_cpu_use(&sleeper_elf);
     test_kill_during_sleep(&sleeper_elf);

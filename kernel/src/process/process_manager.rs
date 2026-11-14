@@ -1,18 +1,25 @@
 use crate::data_structures::vector::Vec;
+use crate::ipc::channel::{self, ChannelId, NO_CHANNEL};
 use crate::process::ProcessResources;
 //use alloc::vec::Vec;
-use crate::memory::usermem::USER_STACK_TOP;
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
 use crate::process::scheduler;
+use crate::process::syscall::SyscallError;
 use crate::process::task::{self, TaskState};
-use crate::process::{INVALID_PID, MAX_PRIORITY, PID, Process, ProcessState};
+use crate::process::{
+    ChildPolicy, FileDescriptor, INVALID_PID, MAX_OPEN_FILES, MAX_PRIORITY, MAX_PROCESS_NAME_LEN,
+    PID, Process, ProcessState,
+};
 use crate::serial_println;
 use alloc::string::String;
 use spin::Mutex;
 use x86_64::PhysAddr;
 
 pub const ARCHE_PID: usize = 0;
+/// The first userspace process, it adopts orphans and lives as long as the kernel
+pub const BIGPROC_PID: usize = 1;
+pub const BIGPROC_NAME: &str = "bigproc";
 
 lazy_static::lazy_static! {
     pub static ref PROCESS_MANAGER: Mutex<ProcessManager> = {
@@ -31,6 +38,22 @@ pub enum ProcessError {
     NoCoresAvailable,
     SchedulerError,
     OutOfTaskSlots,
+    Channel(SyscallError),
+}
+
+/// Everything a new process starts with besides its ELF
+pub struct ProcessSpawn<'a> {
+    pub parent_pid: PID,
+    pub name: &'a str,
+    pub priority: u8,
+    pub argc: u32,
+    /// argc NUL-terminated strings, already validated
+    pub packed_args: &'a [u8],
+    pub file_descriptors: [FileDescriptor; MAX_OPEN_FILES],
+    /// The process asking for the spawn, it must be the reader of stdout_channel
+    pub spawning_pid: PID,
+    /// NO_CHANNEL leaves the child's stdout on serial
+    pub stdout_channel: ChannelId,
 }
 
 /// Manages processes and their associated kernel threads
@@ -69,6 +92,7 @@ impl ProcessManager {
         0
     }
 
+    /// Spawn without arguments and without open files
     pub fn create_process_from_elf(
         &mut self,
         parent_pid: usize,
@@ -76,9 +100,33 @@ impl ProcessManager {
         name: &str,
         priority: u8,
     ) -> Result<usize, ProcessError> {
-        // Verify parent exists
+        let spawn = ProcessSpawn {
+            parent_pid,
+            name,
+            priority,
+            argc: 0,
+            packed_args: &[],
+            file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
+            spawning_pid: parent_pid,
+            stdout_channel: NO_CHANNEL,
+        };
+
+        self.spawn(&spawn, elf_info)
+    }
+
+    pub fn spawn(
+        &mut self,
+        spawn: &ProcessSpawn,
+        elf_info: &crate::process::ElfLoadInfo,
+    ) -> Result<usize, ProcessError> {
+        let parent_pid = spawn.parent_pid;
+        let name = spawn.name;
+        let priority = spawn.priority;
+        debug_assert!(!name.is_empty() && name.len() <= MAX_PROCESS_NAME_LEN);
+        debug_assert!(priority as usize <= scheduler::MAX_PRIORITY);
+
         if crate::process::PROCESS_DEBUG_PRINT {
-            serial_println!("create_process_from_elf");
+            serial_println!("spawn");
         }
 
         let _parent = self
@@ -117,21 +165,46 @@ impl ProcessManager {
         // Set priority and state
         process.priority = priority;
         process.state = ProcessState::Ready;
+        process.file_descriptors = spawn.file_descriptors;
 
-        let cr3 = process.memory_layout.top_page_table_phys.as_u64();
-        let Some(slot_index) = task::allocate_task_slot(new_pid, priority, core_id, cr3) else {
+        // mapped before the task exists, so the child's first write already lands in the ring
+        if spawn.stdout_channel != NO_CHANNEL
+            && let Err(error) = channel::attach_stdout_writer(
+                &mut process,
+                spawn.spawning_pid,
+                spawn.stdout_channel,
+            )
+        {
             let user_mgr = crate::memory::get_user_mem_mgr();
             let mut frame_allocator = crate::memory::get_frame_allocator();
             process
                 .memory_layout
                 .free_address_space(user_mgr, &mut frame_allocator);
+            return Err(ProcessError::Channel(error));
+        }
+
+        // after the attach, the startup info tells the child where its stdout channel is
+        let user_entry =
+            process.place_arguments(elf_info.entry_point, spawn.argc, spawn.packed_args);
+
+        let cr3 = process.memory_layout.top_page_table_phys.as_u64();
+        let Some(slot_index) = task::allocate_task_slot(new_pid, priority, core_id, cr3) else {
+            {
+                let user_mgr = crate::memory::get_user_mem_mgr();
+                let mut frame_allocator = crate::memory::get_frame_allocator();
+                process
+                    .memory_layout
+                    .free_address_space(user_mgr, &mut frame_allocator);
+            }
+            channel::release_process_channels(&mut process);
             return Err(ProcessError::OutOfTaskSlots);
         };
-        task::init_task_stack(slot_index, elf_info.entry_point, USER_STACK_TOP);
+        task::init_task_stack(slot_index, user_entry);
 
-        // Store the process BEFORE enqueuing to the scheduler, an AP core can pick the
-        // task up the instant it is queued
+        // Store the process and link it to its parent BEFORE enqueuing to the scheduler,
+        // an AP core can pick the task up the instant it is queued
         self.processes.push(process);
+        self.get_process_mut(parent_pid)?.children.push(new_pid);
 
         task::slot(slot_index).set_state(TaskState::Ready);
         scheduler::core_enqueue_ready_task(core_id, slot_index, priority);
@@ -162,18 +235,25 @@ impl ProcessManager {
         &mut self,
         pid: usize,
         exit_code: i32,
-        cascade: bool,
+        child_policy: ChildPolicy,
     ) -> Result<(), ProcessError> {
         if pid == INVALID_PID {
             return Err(ProcessError::DoubleDelete);
         }
+        assert!(
+            pid != BIGPROC_PID,
+            "bigproc (PID 1) terminated, orphans have no adopter"
+        );
 
-        let children: Vec<PID>;
+        let parent_pid;
+        let children;
         {
             let process = self.get_process_mut(pid)?;
-            children = process.children.clone();
+            parent_pid = process.parent_pid;
+            children = core::mem::take(&mut process.children);
             process.state = ProcessState::Terminated;
             process.exit_code = Some(exit_code);
+            process.close_all_fds();
 
             if process.memory_layout.top_page_table_phys.as_u64() != 0 {
                 let user_mgr = crate::memory::get_user_mem_mgr();
@@ -191,21 +271,32 @@ impl ProcessManager {
                     );
                 }
             }
+
+            // the views went with the address space, this drops the references and tells peers
+            channel::release_process_channels(process);
         }
 
-        // Handle children
-        if cascade {
-            for child_pid in children.iter().copied() {
-                task::request_kill(child_pid, exit_code);
+        // a parent killed in a cascade may already be gone
+        if let Ok(parent) = self.get_process_mut(parent_pid) {
+            parent.children.retain(|&child_pid| child_pid != pid);
+        }
+
+        // children unlink themselves when they terminate, so every pid here is alive
+        match child_policy {
+            ChildPolicy::KillChildren => {
+                for child_pid in children.iter().copied() {
+                    let found = task::request_kill(child_pid, exit_code, ChildPolicy::KillChildren);
+                    debug_assert!(found, "child {} of {} has no task", child_pid, pid);
+                }
             }
-        } else {
-            for child_pid in children.iter().copied() {
-                if let Ok(child) = self.get_process_mut(child_pid) {
-                    child.parent_pid = ARCHE_PID;
+            ChildPolicy::OrphanChildren => {
+                for child_pid in children.iter().copied() {
+                    self.get_process_mut(child_pid)?.parent_pid = BIGPROC_PID;
                 }
 
-                if let Ok(arche) = self.get_process_mut(ARCHE_PID) {
-                    arche.children.push(child_pid);
+                let bigproc = self.get_process_mut(BIGPROC_PID)?;
+                for child_pid in children.iter().copied() {
+                    bigproc.children.push(child_pid);
                 }
             }
         }

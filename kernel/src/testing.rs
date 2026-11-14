@@ -1,3 +1,6 @@
+use crate::filesystem::init_filesystem;
+use crate::io::disk::BlockDevice;
+use crate::io::virtio::VirtioBlk;
 use crate::{hlt_loop, serial_print, serial_println};
 use core::panic::PanicInfo;
 use x86_64::instructions::port::Port;
@@ -18,6 +21,12 @@ pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
         port.write(exit_code as u32);
     }
     hlt_loop()
+}
+
+/// Mounts the virtio-blk test disk, xtask attaches a fresh copy of the test image to every test
+pub fn mount_test_disk() {
+    let device = VirtioBlk::find_and_init().expect("virtio-blk device not found");
+    init_filesystem(BlockDevice::VirtioBlk(device)).expect("mounting the test disk failed");
 }
 
 pub fn test_panic_handler(info: &PanicInfo) -> ! {

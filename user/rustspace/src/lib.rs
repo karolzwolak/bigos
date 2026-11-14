@@ -5,10 +5,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
+use core::cmp::min;
 use spin::Mutex;
 use x86_64::structures::paging::PageTableFlags;
 
+pub mod channel;
 pub mod gfx;
+pub mod job;
 pub mod terminal;
 
 pub const SYS_CREATE_PROCESS: u64 = 0;
@@ -17,6 +20,7 @@ pub const SYS_WRITE: u64 = 2;
 pub const SYS_READ: u64 = 3;
 pub const SYS_GET_LINE: u64 = 4;
 pub const SYS_ALLOCATE: u64 = 5;
+pub const SYS_LIST_PROCESSES: u64 = 6;
 pub const SYS_LOAD_FILE: u64 = 8;
 pub const SYS_UNLOAD_FILE: u64 = 9;
 pub const SYS_CREATE_WINDOW: u64 = 10;
@@ -27,7 +31,6 @@ pub const SYS_GET_WINDOW_SIZE: u64 = 14;
 pub const SYS_FOCUS_WINDOW: u64 = 15;
 pub const SYS_GET_WINDOW_INFO: u64 = 16;
 
-// Filesystem syscalls
 pub const SYS_OPEN_FILE: u64 = 20;
 pub const SYS_CLOSE_FILE: u64 = 21;
 pub const SYS_READ_FILE: u64 = 22;
@@ -39,6 +42,8 @@ pub const SYS_CREATE_DIR: u64 = 27;
 pub const SYS_DELETE: u64 = 28;
 
 pub const SYS_CREATE_CIRCULAR_BUFFER: u64 = 600;
+pub const SYS_CREATE_CHANNEL: u64 = 601;
+pub const SYS_CLOSE_CHANNEL: u64 = 602;
 
 pub const SYS_GET_CPU_INFO: u64 = 970;
 
@@ -46,19 +51,40 @@ pub const SYS_SLEEP_MS: u64 = 990;
 pub const SYS_WAIT_FOR_INPUT: u64 = 991;
 pub const SYS_FUTEX_WAIT: u64 = 992;
 pub const SYS_FUTEX_WAKE: u64 = 993;
+pub const SYS_GET_HANDOFF_COUNT: u64 = 995;
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
-pub const SYS_ECHO: u64 = 997;
+pub const SYS_GET_PID: u64 = 997;
+pub const SYS_ECHO: u64 = SYS_GET_PID;
 
-/// Mirrors the kernel's `SyscallError::NotImplemented.as_return()`.
 pub const SYSCALL_NOT_IMPLEMENTED: u64 = 6u64.wrapping_neg();
 
-/// A kernel `SyscallError` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyscallError(pub u64);
 
+impl SyscallError {
+    pub const INVALID_PTR: Self = Self(1);
+    pub const PERMISSION_DENIED: Self = Self(2);
+    pub const OUT_OF_MEMORY: Self = Self(3);
+    pub const PROCESS_NOT_FOUND: Self = Self(4);
+    pub const INVALID_FD: Self = Self(5);
+    pub const NOT_IMPLEMENTED: Self = Self(6);
+    pub const INVALID_ARGUMENT: Self = Self(7);
+    pub const NOT_FOUND: Self = Self(8);
+    pub const ALREADY_EXISTS: Self = Self(9);
+    pub const NOT_A_DIRECTORY: Self = Self(10);
+    pub const IS_A_DIRECTORY: Self = Self(11);
+    pub const DIRECTORY_NOT_EMPTY: Self = Self(12);
+    pub const NO_SPACE: Self = Self(13);
+    pub const INVALID_PATH: Self = Self(14);
+    pub const IO_ERROR: Self = Self(15);
+    pub const TOO_MANY_OPEN_FILES: Self = Self(16);
+    pub const INVALID_EXECUTABLE: Self = Self(17);
+    pub const SYSCALL_NOT_FOUND: Self = Self(999);
+}
+
 // No successful return (address, id, count, packed size) sets the top bit.
-fn check(ret: u64) -> Result<u64, SyscallError> {
+fn syscall_ret_check(ret: u64) -> Result<u64, SyscallError> {
     if (ret as i64) < 0 {
         Err(SyscallError(ret.wrapping_neg()))
     } else {
@@ -66,8 +92,27 @@ fn check(ret: u64) -> Result<u64, SyscallError> {
     }
 }
 
+/// Mirrors the kernel's `BIGPROC_PID`
+pub const BIGPROC_PID: usize = 1;
+
+/// Mirrors the kernel's `USER_STACK_TOP`
+const USER_STACK_TOP: usize = 0x7FFF_FFFF_F000;
+
+/// What happens to the children of a terminating process, mirrors the kernel's `ChildPolicy`
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildPolicy {
+    /// every child is killed with the same exit code, and so on down the subtree
+    KillChildren = 0,
+    /// the children keep running and bigproc adopts them
+    OrphanChildren = 1,
+}
+
 pub const FD_FLAG_READ: u8 = 0x01;
 pub const FD_FLAG_WRITE: u8 = 0x02;
+
+/// Mirrors the kernel's `MAX_OPEN_FILES`
+pub const MAX_OPEN_FILES: usize = 32;
 
 pub const FS_NAME_LEN: usize = 16;
 
@@ -307,15 +352,35 @@ pub unsafe fn sys_write(fd: u64, buf: *const u8, count: usize) -> i64 {
     unsafe { syscall3(SYS_WRITE, fd, buf as u64, count as u64) as i64 }
 }
 
+/// Exits and kills every child
 #[inline(always)]
 pub fn sys_exit(code: i32) -> ! {
-    unsafe { syscall1(SYS_EXIT, code as u64) };
-    unreachable!("SYS_EXIT returned")
+    sys_exit_with_policy(code, ChildPolicy::KillChildren)
 }
 
 #[inline(always)]
-pub fn sys_terminate_process(pid: usize, exit_code: i32) -> bool {
-    unsafe { syscall2(SYS_TERMINATE_PROCESS, pid as u64, exit_code as u64) == 0 }
+pub fn sys_exit_with_policy(code: i32, child_policy: ChildPolicy) -> ! {
+    unsafe { syscall2(SYS_EXIT, code as u64, child_policy as u64) };
+    unreachable!("SYS_EXIT returned")
+}
+
+/// Allowed on itself and on its own children, never on bigproc
+#[inline(always)]
+pub fn sys_terminate_process(
+    pid: usize,
+    exit_code: i32,
+    child_policy: ChildPolicy,
+) -> Result<(), SyscallError> {
+    let ret = unsafe {
+        syscall3(
+            SYS_TERMINATE_PROCESS,
+            pid as u64,
+            exit_code as u64,
+            child_policy as u64,
+        )
+    };
+
+    syscall_ret_check(ret).map(|_| ())
 }
 
 #[inline(always)]
@@ -351,6 +416,18 @@ pub fn sys_futex_wake() {
 }
 
 #[inline(always)]
+pub fn sys_get_pid() -> usize {
+    unsafe { syscall1(SYS_GET_PID, 0) as usize }
+}
+
+/// Returns how many runs of the calling task began right after another task ran on that
+/// core, a growing count proves its registers and fpu state went through the save areas
+#[inline(always)]
+pub fn sys_get_handoff_count() -> u64 {
+    unsafe { syscall1(SYS_GET_HANDOFF_COUNT, 0) }
+}
+
+#[inline(always)]
 pub fn sys_echo(val: u64) -> u64 {
     unsafe { syscall1(SYS_ECHO, val) }
 }
@@ -358,21 +435,216 @@ pub fn sys_echo(val: u64) -> u64 {
 /// Returns the base address of the allocated region.
 #[inline(always)]
 pub fn sys_allocate(size: usize) -> Result<u64, SyscallError> {
-    check(unsafe { syscall1(SYS_ALLOCATE, size as u64) })
+    syscall_ret_check(unsafe { syscall1(SYS_ALLOCATE, size as u64) })
 }
 
+/// Mirrors the kernel limits of CreateProcess
+pub const MAX_ARGC: usize = 64;
+pub const MAX_ARGV_BYTES: usize = 4096;
+pub const MAX_PROCESS_NAME_LEN: usize = 32;
+
+const PROCESS_CREATE_RESERVED_BYTES: usize = 5;
+
+bitflags::bitflags! {
+    /// Mirrors the kernel's `ProcessCreateFlags`
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ProcessCreateFlags: u32 {
+        /// the child starts with a copy of the caller's fd table, at the same fd numbers
+        const INHERIT_FDS = 1 << 0;
+        /// the child is parented to bigproc, so the caller's KillChildren exit leaves it alive
+        const DETACHED = 1 << 1;
+        /// the child gets the caller's priority, the priority field is ignored
+        const INHERIT_PRIORITY = 1 << 2;
+        /// stdout and stderr of the child go into stdout_channel, the caller must be its reader
+        const REDIRECT_STDOUT = 1 << 3;
+    }
+}
+
+/// Argument of `sys_create_process`, layout shared with the kernel's `ProcessCreateInfo`
+/// The lifetime ties it to the path, name and argument buffers it points at
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessCreateInfo<'a> {
+    pub path_ptr: u64,
+    pub path_len: u64,
+    /// name_len 0 names the process after the last path component
+    pub name_ptr: u64,
+    pub name_len: u64,
+    /// argc NUL-terminated strings back to back, argv_size bytes in total
+    pub argv_ptr: u64,
+    pub argv_size: u64,
+    pub argc: u32,
+    pub flags: u32,
+    /// ignored with INHERIT_PRIORITY
+    pub priority: u8,
+    /// must be zero
+    pub reserved: [u8; PROCESS_CREATE_RESERVED_BYTES],
+    /// read only with REDIRECT_STDOUT, must be 0 without it
+    pub stdout_channel: u16,
+    pub borrowed: core::marker::PhantomData<&'a [u8]>,
+}
+
+const PROCESS_CREATE_INFO_SIZE_BYTES: usize = 64;
+static_assertions::const_assert!(
+    core::mem::size_of::<ProcessCreateInfo>() == PROCESS_CREATE_INFO_SIZE_BYTES
+);
+
+impl<'a> ProcessCreateInfo<'a> {
+    pub fn new(path: &'a str, priority: u8) -> Self {
+        Self {
+            path_ptr: path.as_ptr() as u64,
+            path_len: path.len() as u64,
+            name_ptr: 0,
+            name_len: 0,
+            argv_ptr: 0,
+            argv_size: 0,
+            argc: 0,
+            flags: 0,
+            priority,
+            reserved: [0; PROCESS_CREATE_RESERVED_BYTES],
+            stdout_channel: 0,
+            borrowed: core::marker::PhantomData,
+        }
+    }
+
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name_ptr = name.as_ptr() as u64;
+        self.name_len = name.len() as u64;
+        self
+    }
+
+    /// `packed_args` holds `argc` NUL-terminated strings back to back, like b"ls\0-l\0"
+    pub fn with_args(mut self, packed_args: &'a [u8], argc: u32) -> Self {
+        self.argv_ptr = packed_args.as_ptr() as u64;
+        self.argv_size = packed_args.len() as u64;
+        self.argc = argc;
+        self
+    }
+
+    /// Adds flags, so it combines with with_stdout_channel in any order
+    pub fn with_flags(mut self, flags: ProcessCreateFlags) -> Self {
+        self.flags |= flags.bits();
+        self
+    }
+
+    /// The child's stdout and stderr go into the channel, the caller must be its reader
+    pub fn with_stdout_channel(mut self, channel_id: u16) -> Self {
+        self.flags |= ProcessCreateFlags::REDIRECT_STDOUT.bits();
+        self.stdout_channel = channel_id;
+        self
+    }
+}
+
+/// Starts a child process, returns its pid
 #[inline(always)]
-pub fn sys_create_process(elf_path: &[char], name: &[char], args_buffer: &[u8]) -> u32 {
-    unsafe {
-        syscall6(
-            SYS_CREATE_PROCESS,
-            elf_path.as_ptr() as u64,
-            elf_path.len() as u64,
-            name.as_ptr() as u64,
-            name.len() as u64,
-            args_buffer.as_ptr() as u64,
-            args_buffer.len() as u64,
-        ) as u32
+pub fn sys_create_process(info: &ProcessCreateInfo) -> Result<u32, SyscallError> {
+    let ret = unsafe { syscall1(SYS_CREATE_PROCESS, info as *const ProcessCreateInfo as u64) };
+
+    syscall_ret_check(ret).map(|pid| pid as u32)
+}
+
+const PROCESS_INFO_RESERVED_BYTES: usize = 7;
+
+/// One sys_list_processes entry, layout shared with the kernel's `ProcessInfoFlat`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessInfoFlat {
+    pub pid: u64,
+    pub name_len: u8,
+    pub reserved: [u8; PROCESS_INFO_RESERVED_BYTES],
+    /// not NUL-terminated, name_len bytes are valid
+    pub name: [u8; MAX_PROCESS_NAME_LEN],
+}
+
+static_assertions::const_assert!(core::mem::size_of::<ProcessInfoFlat>() == 48);
+
+impl ProcessInfoFlat {
+    pub const EMPTY: Self = Self {
+        pid: 0,
+        name_len: 0,
+        reserved: [0; PROCESS_INFO_RESERVED_BYTES],
+        name: [0; MAX_PROCESS_NAME_LEN],
+    };
+
+    /// Names come from CreateProcess, which only accepts UTF-8
+    pub fn name(&self) -> &str {
+        let name_len = min(self.name_len as usize, MAX_PROCESS_NAME_LEN);
+        core::str::from_utf8(&self.name[..name_len]).unwrap_or("?")
+    }
+}
+
+/// Lists the processes that have not terminated, starting at entry start_index
+/// Returns the number of entries written, fewer than out_entries.len() means the end
+#[inline(always)]
+pub fn sys_list_processes(
+    start_index: usize,
+    out_entries: &mut [ProcessInfoFlat],
+) -> Result<usize, SyscallError> {
+    let byte_len = core::mem::size_of_val(out_entries);
+    let ret = unsafe {
+        syscall3(
+            SYS_LIST_PROCESSES,
+            out_entries.as_mut_ptr() as u64,
+            byte_len as u64,
+            start_index as u64,
+        )
+    };
+
+    syscall_ret_check(ret).map(|n| n as usize)
+}
+
+/// One argument as the kernel lays it out on the stack, the string excludes its NUL
+/// Layout shared with the kernel's `ArgSlice`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ArgSlice {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+/// The arguments a process was started with, valid for its whole life
+#[derive(Debug, Clone, Copy)]
+pub struct Args {
+    slices: &'static [ArgSlice],
+}
+
+impl Args {
+    /// Build from the two registers of the first entry: rdi = argc, rsi = argv
+    /// The function the naked `_start` calls receives them as its first two arguments
+    ///
+    /// # Safety
+    ///
+    /// Call only with the unchanged entry values, the kernel validated the strings as UTF-8
+    pub unsafe fn from_entry(argc: usize, argv: *const ArgSlice) -> Self {
+        debug_assert!(argc <= MAX_ARGC);
+
+        let slices = if argc == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(argv, argc) }
+        };
+
+        Self { slices }
+    }
+
+    pub fn len(&self) -> usize {
+        self.slices.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slices.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> &'static str {
+        let slice = self.slices[index];
+
+        // SAFETY: the kernel copied the string onto the stack, which lives as long as the process,
+        // and checked it is UTF-8
+        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(slice.ptr, slice.len)) }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'static str> + '_ {
+        (0..self.len()).map(|index| self.get(index))
     }
 }
 
@@ -390,7 +662,7 @@ pub fn sys_create_window(width: u32, height: u32, x: i32, y: i32) -> Result<u32,
             0,
         )
     };
-    check(ret).map(|id| id as u32)
+    syscall_ret_check(ret).map(|id| id as u32)
 }
 
 /// # Safety
@@ -406,7 +678,8 @@ pub unsafe fn sys_destroy_window(window_id: u32) {
 /// Returns a pointer to the first pixel (XRGB8888 u32 array).
 #[inline(always)]
 pub fn sys_map_window_buffer(window_id: u32) -> Result<*mut u32, SyscallError> {
-    check(unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) }).map(|addr| addr as *mut u32)
+    syscall_ret_check(unsafe { syscall1(SYS_MAP_WINDOW_BUFFER, window_id as u64) })
+        .map(|addr| addr as *mut u32)
 }
 
 /// Signal the kernel that the back buffer is ready to be presented.
@@ -418,13 +691,13 @@ pub fn sys_present_window(window_id: u32) {
 /// Returns (width, height) of the window.
 #[inline(always)]
 pub fn sys_get_window_size(window_id: u32) -> Result<(u32, u32), SyscallError> {
-    check(unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) })
+    syscall_ret_check(unsafe { syscall1(SYS_GET_WINDOW_SIZE, window_id as u64) })
         .map(|packed| ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32))
 }
 
 // --- Filesystem wrappers ---
 
-/// Open a file or directory by path.
+/// Open a file by path.
 /// flags: FD_FLAG_READ | FD_FLAG_WRITE
 /// Returns a file descriptor index.
 #[inline(always)]
@@ -437,67 +710,101 @@ pub fn sys_open_file(path: &str, flags: u8) -> Result<usize, SyscallError> {
             flags as u64,
         )
     };
-    check(ret).map(|n| n as usize)
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Close a file descriptor.
-/// Returns true on success.
+/// Close a file descriptor
 #[inline(always)]
-pub fn sys_close_file(fd: usize) -> bool {
-    check(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) }).is_ok()
+pub fn sys_close_file(fd: usize) -> Result<(), SyscallError> {
+    syscall_ret_check(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) }).map(|_| ())
 }
 
-/// Read up to buf.len() bytes from an open fd
-/// Returns the number of bytes read.
+/// Reads up to buf.len() bytes from an open fd starting at offset_bytes, the kernel keeps
+/// no position per fd. Returns the number of bytes read, 0 at the end of the file
 #[inline(always)]
-pub fn sys_read_file(fd: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
+pub fn sys_read_file_at(
+    fd: usize,
+    offset_bytes: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_READ_FILE,
             fd as u64,
-            0,
+            offset_bytes as u64,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
         )
     };
-    check(ret).map(|n| n as usize)
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Read up to buf.len() bytes from an open fd at the current offset.
-/// Returns the number of bytes read.
+/// Writes buf to an open fd starting at offset_bytes, which may be at most the file size
+/// Returns the number of bytes written
 #[inline(always)]
-pub fn sys_read_file_at(fd: usize, offset: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
-    let ret = unsafe {
-        syscall4(
-            SYS_READ_FILE,
-            fd as u64,
-            offset as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    check(ret).map(|n| n as usize)
-}
-
-/// Write buf to an open fd at the current offset.
-/// Returns the number of bytes written.
-#[inline(always)]
-pub fn sys_write_file(fd: usize, offset: usize, buf: &[u8]) -> Result<usize, SyscallError> {
+pub fn sys_write_file(fd: usize, offset_bytes: usize, buf: &[u8]) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall4(
             SYS_WRITE_FILE,
             fd as u64,
-            offset as u64,
+            offset_bytes as u64,
             buf.as_ptr() as u64,
             buf.len() as u64,
         )
     };
-    check(ret).map(|n| n as usize)
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Stat a path. Fills out_stat on success. Returns true on success.
+/// An open file with a position kept in userspace, closed on drop
+pub struct File {
+    pub fd: usize,
+    pub offset_bytes: usize,
+}
+
+impl File {
+    pub fn open(path: &str, flags: u8) -> Result<Self, SyscallError> {
+        let fd = sys_open_file(path, flags)?;
+
+        Ok(Self {
+            fd,
+            offset_bytes: 0,
+        })
+    }
+
+    /// Reads at the current position and advances it by the bytes read
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        let read = sys_read_file_at(self.fd, self.offset_bytes, buf)?;
+        self.offset_bytes += read;
+
+        Ok(read)
+    }
+
+    /// Writes at the current position and advances it by the bytes written
+    pub fn write(&mut self, buf: &[u8]) -> Result<usize, SyscallError> {
+        let written = sys_write_file(self.fd, self.offset_bytes, buf)?;
+        self.offset_bytes += written;
+
+        Ok(written)
+    }
+
+    pub fn read_at(&self, offset_bytes: usize, buf: &mut [u8]) -> Result<usize, SyscallError> {
+        sys_read_file_at(self.fd, offset_bytes, buf)
+    }
+
+    pub fn write_at(&self, offset_bytes: usize, buf: &[u8]) -> Result<usize, SyscallError> {
+        sys_write_file(self.fd, offset_bytes, buf)
+    }
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        let _ = sys_close_file(self.fd);
+    }
+}
+
+/// Stat a path, fills out_stat on success
 #[inline(always)]
-pub fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
+pub fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> Result<(), SyscallError> {
     let ret = unsafe {
         syscall3(
             SYS_STAT_FILE,
@@ -506,7 +813,7 @@ pub fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> bool {
             out_stat as *mut StatFlat as u64,
         )
     };
-    check(ret).is_ok()
+    syscall_ret_check(ret).map(|_| ())
 }
 
 #[inline(always)]
@@ -523,7 +830,7 @@ pub fn sys_create_circular_buffer(
             out_buffer_info as *mut CircularBufferInfo as u64,
         )
     };
-    check(ret).is_ok()
+    syscall_ret_check(ret).is_ok()
 }
 
 #[inline(always)]
@@ -535,13 +842,17 @@ pub fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> bool {
             out_info as *mut WindowInfo as u64,
         )
     };
-    check(ret).is_ok()
+    syscall_ret_check(ret).is_ok()
 }
 
-/// List the contents of a directory into out_entries.
-/// Returns the number of entries written.
+/// List the contents of a directory into out_entries, starting at entry start_index.
+/// Returns the number of entries written, fewer than out_entries.len() means the end
 #[inline(always)]
-pub fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> Result<usize, SyscallError> {
+pub fn sys_list_dir(
+    path: &str,
+    start_index: usize,
+    out_entries: &mut [DirEntryFlat],
+) -> Result<usize, SyscallError> {
     let byte_len = core::mem::size_of_val(out_entries);
     let ret = unsafe {
         syscall6(
@@ -550,32 +861,32 @@ pub fn sys_list_dir(path: &str, out_entries: &mut [DirEntryFlat]) -> Result<usiz
             path.len() as u64,
             out_entries.as_mut_ptr() as u64,
             byte_len as u64,
-            0,
+            start_index as u64,
             0,
         )
     };
-    check(ret).map(|n| n as usize)
+    syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Create a new file at the given path. Returns true on success.
+/// Create a new empty file at the given path
 #[inline(always)]
-pub fn sys_create_file(path: &str) -> bool {
+pub fn sys_create_file(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_CREATE_FILE, path.as_ptr() as u64, path.len() as u64, 0) };
-    check(ret).is_ok()
+    syscall_ret_check(ret).map(|_| ())
 }
 
-/// Create a new directory at the given path. Returns true on success.
+/// Create a new directory at the given path
 #[inline(always)]
-pub fn sys_create_dir(path: &str) -> bool {
+pub fn sys_create_dir(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_CREATE_DIR, path.as_ptr() as u64, path.len() as u64, 0) };
-    check(ret).is_ok()
+    syscall_ret_check(ret).map(|_| ())
 }
 
-/// Delete a file or directory at the given path. Returns true on success.
+/// Delete a file or directory at the given path
 #[inline(always)]
-pub fn sys_delete(path: &str) -> bool {
+pub fn sys_delete(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0) };
-    check(ret).is_ok()
+    syscall_ret_check(ret).map(|_| ())
 }
 
 #[inline(always)]
@@ -1004,8 +1315,6 @@ impl EventReader {
         Self { buffer }
     }
 
-    /// Current state, not the state at the event being processed. For that use
-    /// InputEvent::key_modifiers. All keys read as up while the window is unfocused
     pub fn is_key_down(&self, key: KeyCode) -> bool {
         let index = key as usize;
         let word = self.buffer.key_down[index / BITS_PER_WORD].load(Ordering::Acquire);
@@ -1100,11 +1409,12 @@ impl core::fmt::Write for Serial {
     }
 }
 
+/// Straight into the stdout channel when the process has one, a Write syscall otherwise
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = core::fmt::write(&mut $crate::Serial, core::format_args!($($arg)*));
+        let mut stdout = $crate::channel::StdoutWriter::begin();
+        let _ = core::fmt::Write::write_fmt(&mut stdout, core::format_args!($($arg)*));
     }};
 }
 
@@ -1112,9 +1422,9 @@ macro_rules! print {
 macro_rules! println {
     () => { $crate::print!("\n") };
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = core::fmt::write(&mut $crate::Serial, core::format_args!($($arg)*));
-        unsafe { $crate::sys_write(1, b"\n".as_ptr(), 1) };
+        let mut stdout = $crate::channel::StdoutWriter::begin();
+        let _ = core::fmt::Write::write_fmt(&mut stdout, core::format_args!($($arg)*));
+        stdout.write_bytes(b"\n");
     }};
 }
 
@@ -1136,104 +1446,6 @@ impl WindowInfo {
             front_buffer_offset: 0,
         }
     }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct CacheStatsFlat {
-    pub total_files: u64,
-    pub total_bytes: u64,
-    pub max_bytes: u64,
-    pub dirty_files: u64,
-}
-
-impl CacheStatsFlat {
-    pub const fn zeroed() -> Self {
-        Self {
-            total_files: 0,
-            total_bytes: 0,
-            max_bytes: 0,
-            dirty_files: 0,
-        }
-    }
-}
-
-// Cache importance enum
-#[repr(u8)]
-pub enum CacheImportance {
-    Minimal = 0,
-    Low = 1,
-    Normal = 2,
-    High = 3,
-    VeryHigh = 4,
-    Critical = 5,
-    Resident = 6,
-}
-
-// Cache syscall wrappers
-pub fn sys_pin_file(path: &str) -> u64 {
-    unsafe {
-        let path_bytes = path.as_bytes();
-        syscall4(
-            30,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            0,
-            0,
-        )
-    }
-}
-
-pub fn sys_unpin_file(path: &str) -> u64 {
-    unsafe {
-        let path_bytes = path.as_bytes();
-        syscall4(
-            31,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            0,
-            0,
-        )
-    }
-}
-
-pub fn sys_reserve_cache(path: &str, importance: u8) -> u64 {
-    unsafe {
-        let path_bytes = path.as_bytes();
-        syscall4(
-            32,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            importance as u64,
-            0,
-        )
-    }
-}
-
-pub fn sys_evict_directory(path: &str) -> u64 {
-    unsafe {
-        let path_bytes = path.as_bytes();
-        syscall4(
-            33,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            0,
-            0,
-        )
-    }
-}
-
-pub fn sys_get_cache_stats(stats: &mut CacheStatsFlat) -> bool {
-    unsafe {
-        let ret = syscall4(34, stats as *mut CacheStatsFlat as u64, 0, 0, 0);
-        ret == 0
-    }
-}
-
-/// Flush all dirty cached files belonging to the calling process's open fds.
-/// Returns true on success.
-pub fn sys_flush_file_cache() -> bool {
-    unsafe { syscall1(35, 0) == 0 }
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, PartialOrd, Ord)]
