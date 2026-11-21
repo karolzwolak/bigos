@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::process::elf_loader::{BIGPROC_ELF, SHELL_ELF, load_elf_from_path};
-use crate::process::process_manager::{ARCHE_PID, BIGPROC_NAME, BIGPROC_PID};
+use crate::process::process_manager::{BIGPROC_NAME, BIGPROC_PID, NO_PARENT_PID};
 use crate::process::shared_state::init_shared_state;
 use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
 use crate::{RUN_SHELL, serial_println};
@@ -65,7 +65,7 @@ pub fn create_userspace_process_from_path(
 pub fn init_userspace() {
     init_shared_state();
 
-    let pid = create_userspace_process(BIGPROC_ELF, BIGPROC_NAME, ARCHE_PID, BIGPROC_PRIORITY)
+    let pid = create_userspace_process(BIGPROC_ELF, BIGPROC_NAME, NO_PARENT_PID, BIGPROC_PRIORITY)
         .unwrap_or_else(|error| panic!("bigproc failed to start: {}", error));
     assert!(
         pid == BIGPROC_PID,

@@ -42,7 +42,6 @@ use x86_64::{
 // Marks terminated children
 pub const INVALID_PID: usize = usize::MAX;
 
-pub const MAX_PRIORITY: u8 = 8;
 pub const RFLAGS_DEFAULT: u64 = 0x202;
 pub const DEFAULT_NEW_PROCESS_STACK_SIZE: u64 = 1024 * 1024;
 
@@ -336,35 +335,6 @@ impl Process {
 
     pub fn close_all_fds(&mut self) {
         self.file_descriptors = [FileDescriptor::CLOSED; MAX_OPEN_FILES];
-    }
-
-    pub fn new(
-        pid: usize,
-        parent_pid: usize,
-        priority: u8,
-        name: String,
-        is_out: bool,
-        resources: ProcessResources,
-        page_table_base_phys: u64,
-    ) -> Result<Self, MapToError<Size4KiB>> {
-        let memory_layout =
-            ProcessMemoryLayout::with_page_table(x86_64::PhysAddr::new(page_table_base_phys));
-
-        Ok(Self {
-            pid,
-            parent_pid,
-            priority,
-            state: ProcessState::Ready,
-            name,
-            children: Vec::new(),
-            file_descriptors: [FileDescriptor::CLOSED; MAX_OPEN_FILES],
-            channels: [ChannelMapping::NONE; MAX_CHANNELS_PER_PROCESS],
-            stdout_write_syscall_count: 0,
-            resources,
-            exit_code: None,
-            is_out,
-            memory_layout,
-        })
     }
 
     pub fn create_with_elf(

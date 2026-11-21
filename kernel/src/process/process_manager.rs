@@ -1,6 +1,5 @@
 use crate::data_structures::vector::Vec;
 use crate::ipc::channel::{self, ChannelId, NO_CHANNEL};
-use crate::process::ProcessResources;
 //use alloc::vec::Vec;
 use crate::process::core_pool::CORE_POOL;
 use crate::process::elf_loader::ElfLoadError;
@@ -8,24 +7,21 @@ use crate::process::scheduler;
 use crate::process::syscall::SyscallError;
 use crate::process::task::{self, TaskState};
 use crate::process::{
-    ChildPolicy, FileDescriptor, INVALID_PID, MAX_OPEN_FILES, MAX_PRIORITY, MAX_PROCESS_NAME_LEN,
-    PID, Process, ProcessState,
+    ChildPolicy, FileDescriptor, INVALID_PID, MAX_OPEN_FILES, MAX_PROCESS_NAME_LEN, PID, Process,
+    ProcessState,
 };
 use crate::serial_println;
-use alloc::string::String;
 use spin::Mutex;
 use x86_64::PhysAddr;
 
-pub const ARCHE_PID: usize = 0;
 /// The first userspace process, it adopts orphans and lives as long as the kernel
 pub const BIGPROC_PID: usize = 1;
 pub const BIGPROC_NAME: &str = "bigproc";
+pub const NO_PARENT_PID: PID = INVALID_PID;
 
 lazy_static::lazy_static! {
     pub static ref PROCESS_MANAGER: Mutex<ProcessManager> = {
-        let mut pm = ProcessManager::new();
-        pm.init_arche();
-        Mutex::new(pm)
+        Mutex::new(ProcessManager::new())
     };
 }
 
@@ -73,25 +69,6 @@ impl ProcessManager {
         }
     }
 
-    pub fn init_arche(&mut self) -> usize {
-        let arche = Process::new(
-            ARCHE_PID,
-            ARCHE_PID,
-            MAX_PRIORITY,
-            String::from("arche"),
-            true,
-            ProcessResources {
-                memory_limit: usize::MAX,
-                memory_used: 0,
-                cpu_time_slice: 0,
-            },
-            0,
-        );
-        serial_println!("Initialized arche process with PID 0");
-        self.processes.push(arche.unwrap());
-        0
-    }
-
     /// Spawn without arguments and without open files
     pub fn create_process_from_elf(
         &mut self,
@@ -129,9 +106,14 @@ impl ProcessManager {
             serial_println!("spawn");
         }
 
-        let _parent = self
-            .get_process(parent_pid)
-            .map_err(|_| ProcessError::ParentNotFound)?;
+        debug_assert!(
+            parent_pid != NO_PARENT_PID || self.new_pid == BIGPROC_PID,
+            "only bigproc starts without a parent"
+        );
+        if parent_pid != NO_PARENT_PID {
+            self.get_process(parent_pid)
+                .map_err(|_| ProcessError::ParentNotFound)?;
+        }
 
         let new_pid = self.new_pid;
         self.new_pid += 1;
@@ -204,7 +186,9 @@ impl ProcessManager {
         // Store the process and link it to its parent BEFORE enqueuing to the scheduler,
         // an AP core can pick the task up the instant it is queued
         self.processes.push(process);
-        self.get_process_mut(parent_pid)?.children.push(new_pid);
+        if parent_pid != NO_PARENT_PID {
+            self.get_process_mut(parent_pid)?.children.push(new_pid);
+        }
 
         task::slot(slot_index).set_state(TaskState::Ready);
         scheduler::core_enqueue_ready_task(core_id, slot_index, priority);
@@ -302,6 +286,19 @@ impl ProcessManager {
         }
 
         Ok(())
+    }
+
+    pub fn remove_terminated_process(&mut self, pid: PID) {
+        let index = self.processes.iter().position(|process| process.pid == pid);
+        debug_assert!(
+            index.is_some_and(|index| self.processes[index].state == ProcessState::Terminated),
+            "remove_terminated_process called on pid {} which is missing or alive",
+            pid
+        );
+
+        if let Some(index) = index {
+            self.processes.remove(index);
+        }
     }
 
     pub fn cleanup_dead(&mut self) {
