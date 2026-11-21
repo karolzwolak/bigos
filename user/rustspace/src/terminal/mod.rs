@@ -363,7 +363,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
 
     /// The recalled line is copied out, the history stays borrowed otherwise
     fn recall_older_command(&mut self) {
-        let Some(recalled) = self.history.older() else {
+        let Some(recalled) = self.history.step_to_older() else {
             return;
         };
         let mut line = [0u8; HISTORY_ENTRY_MAX_BYTES];
@@ -374,7 +374,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
     }
 
     fn recall_newer_command(&mut self) {
-        let Some(recalled) = self.history.newer() else {
+        let Some(recalled) = self.history.step_to_newer() else {
             return;
         };
         let mut line = [0u8; HISTORY_ENTRY_MAX_BYTES];
@@ -713,7 +713,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             input::InputAction::DeleteWord => self.delete_word(),
             input::InputAction::Enter => {
                 self.capture_last_command();
-                self.history.push(self.last_command_buf.trim_ascii());
+                self.history.push_line(self.last_command_buf.trim_ascii());
                 self.newline();
                 self.execute_command();
                 if !self.job.is_running() {
