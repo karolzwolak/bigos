@@ -3,15 +3,13 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use rustspace::{sys_present_window, sys_sleep_ms, EventReader, EventType, InputEvent, KeyState};
+use rustspace::{EventReader, EventType, InputEvent, KeyState, sys_present_window, sys_sleep_ms};
 
-use crate::keys::{doom_key_for_keycodeval, DOOM_KEY_UNMAPPED};
+use crate::keys::{DOOM_KEY_UNMAPPED, doom_key_for_keycodeval};
 
 const MILLISECONDS_PER_SECOND: u128 = 1000;
 pub const DOOM_STRAFE_KEY: c_int = b'v' as c_int;
 pub const DOOM_FIRE_KEY: c_int = b'c' as c_int;
-pub const DOOM_SCREEN_WIDTH: u32 = 640;
-pub const DOOM_SCREEN_HEIGHT: u32 = 400;
 const KEY_EVENT_PRESSED: c_int = 1;
 const KEY_EVENT_RELEASED: c_int = 0;
 const DG_NO_KEY: c_int = 0;

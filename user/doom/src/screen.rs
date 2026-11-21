@@ -1,0 +1,2 @@
+pub const DOOM_SCREEN_WIDTH: u32 = 640;
+pub const DOOM_SCREEN_HEIGHT: u32 = 400;

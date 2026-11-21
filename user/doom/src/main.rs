@@ -16,7 +16,8 @@ mod libc;
 mod platform;
 mod screen;
 
-use platform::{PLATFORM, PlatformState, read_tsc, DOOM_SCREEN_HEIGHT, DOOM_SCREEN_WIDTH};
+use platform::{PLATFORM, PlatformState, read_tsc};
+use screen::{DOOM_SCREEN_HEIGHT, DOOM_SCREEN_WIDTH};
 
 const SHELL_WINDOW_RIGHT_EDGE_X: i32 = 590;
 const DOOM_WINDOW_GAP_X: i32 = 50;
