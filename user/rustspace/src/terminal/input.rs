@@ -1,4 +1,9 @@
-use crate::{InputEvent, KeyCode, KeyState};
+use crate::{InputEvent, KeyCode, KeyModifiers, KeyState};
+
+pub const SCROLL_LINE_UP_KEY: char = 'u';
+pub const SCROLL_PAGE_UP_KEY: char = 'i';
+pub const SCROLL_LINE_DOWN_KEY: char = 'j';
+pub const SCROLL_PAGE_DOWN_KEY: char = 'k';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollAmount {
@@ -14,7 +19,6 @@ pub enum ScrollDir {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputAction {
-    ToggleCommandMode,
     Scroll {
         dir: ScrollDir,
         amount: ScrollAmount,
@@ -34,75 +38,11 @@ pub enum InputAction {
     Ignore,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct InputState {
-    pub command_mode: bool,
-}
-
-impl InputState {
-    pub const fn new() -> Self {
-        Self {
-            command_mode: false,
-        }
-    }
-
-    pub fn is_command_mode(&self) -> bool {
-        self.command_mode
-    }
-
-    pub fn toggle_command_mode(&mut self) {
-        self.command_mode = !self.command_mode;
-    }
-}
-
-impl Default for InputState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub fn translate(event: InputEvent, state: &mut InputState) -> Option<InputAction> {
+pub fn translate(event: InputEvent) -> Option<InputAction> {
     match event.event_type {
         crate::EventType::KeyEvent => {
             let keycode = unsafe { core::mem::transmute::<u8, KeyCode>(event.value as u8) };
             let key_state = unsafe { core::mem::transmute::<u8, KeyState>(event.extra as u8) };
-
-            if (keycode == KeyCode::LControl || keycode == KeyCode::RControl)
-                && key_state == KeyState::Pressed
-            {
-                state.toggle_command_mode();
-                return Some(InputAction::ToggleCommandMode);
-            }
-
-            if state.command_mode && key_state == KeyState::Pressed {
-                match keycode {
-                    KeyCode::Q => {
-                        return Some(InputAction::Scroll {
-                            dir: ScrollDir::Up,
-                            amount: ScrollAmount::Page,
-                        });
-                    }
-                    KeyCode::E => {
-                        return Some(InputAction::Scroll {
-                            dir: ScrollDir::Down,
-                            amount: ScrollAmount::Page,
-                        });
-                    }
-                    KeyCode::A => {
-                        return Some(InputAction::Scroll {
-                            dir: ScrollDir::Up,
-                            amount: ScrollAmount::Line,
-                        });
-                    }
-                    KeyCode::D => {
-                        return Some(InputAction::Scroll {
-                            dir: ScrollDir::Down,
-                            amount: ScrollAmount::Line,
-                        });
-                    }
-                    _ => {}
-                }
-            }
 
             if key_state == KeyState::Pressed {
                 match keycode {
@@ -125,41 +65,26 @@ pub fn translate(event: InputEvent, state: &mut InputState) -> Option<InputActio
             let v = event.value;
             let c = char::from_u32(v)?;
 
-            // In command mode, q/e/a/d via char
-            if state.command_mode {
-                let lower = c.to_ascii_lowercase();
-                match lower {
-                    'q' => {
-                        return Some(InputAction::Scroll {
-                            dir: ScrollDir::Up,
-                            amount: ScrollAmount::Page,
-                        });
-                    }
-                    'e' => {
-                        return Some(InputAction::Scroll {
-                            dir: ScrollDir::Down,
-                            amount: ScrollAmount::Page,
-                        });
-                    }
-                    'a' => {
-                        return Some(InputAction::Scroll {
-                            dir: ScrollDir::Up,
-                            amount: ScrollAmount::Line,
-                        });
-                    }
-                    'd' => {
-                        return Some(InputAction::Scroll {
-                            dir: ScrollDir::Down,
-                            amount: ScrollAmount::Line,
-                        });
-                    }
-                    _ => {}
-                }
-                if c == '\u{11}' || c == '\u{03}' {
-                    return Some(InputAction::Ignore);
-                }
-                // Block other typing in command mode
-                return Some(InputAction::Ignore);
+            if event.key_modifiers().contains(KeyModifiers::LCTRL) {
+                return Some(match c.to_ascii_lowercase() {
+                    SCROLL_LINE_UP_KEY => InputAction::Scroll {
+                        dir: ScrollDir::Up,
+                        amount: ScrollAmount::Line,
+                    },
+                    SCROLL_PAGE_UP_KEY => InputAction::Scroll {
+                        dir: ScrollDir::Up,
+                        amount: ScrollAmount::Page,
+                    },
+                    SCROLL_LINE_DOWN_KEY => InputAction::Scroll {
+                        dir: ScrollDir::Down,
+                        amount: ScrollAmount::Line,
+                    },
+                    SCROLL_PAGE_DOWN_KEY => InputAction::Scroll {
+                        dir: ScrollDir::Down,
+                        amount: ScrollAmount::Page,
+                    },
+                    _ => InputAction::Ignore,
+                });
             }
 
             match c {

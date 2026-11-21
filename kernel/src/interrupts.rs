@@ -469,6 +469,10 @@ pub fn tsc_read() -> u64 {
 
 unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32, core_id: u8) {
     let tsc_freq = TSC_FREQUENCY_HZ.load(Ordering::Relaxed);
+    debug_assert!(
+        tsc_freq != 0,
+        "init_tsc_globals must run before the timer setup"
+    );
     serial_println!("Core {}: init_timer_periodic_mode", core_id);
     serial_println!("TSC Frequency: {} Hz", tsc_freq);
 
@@ -500,6 +504,8 @@ unsafe fn init_timer_periodic_mode(local_apic_ptr: *mut u32, core_id: u8) {
         let divider = 16;
         let apic_timer_freq = apic_bus_freq / divider;
         let ticks_needed = (apic_timer_freq / tick_freq) as u32;
+        // TICR = 0 stops the timer
+        debug_assert!(ticks_needed != 0);
 
         let svr = local_apic_ptr.offset(APICOffset::Svr as isize / 4);
         let current_svr = svr.read_volatile();

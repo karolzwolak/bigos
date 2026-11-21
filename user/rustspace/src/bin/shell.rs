@@ -23,7 +23,7 @@ global_asm!(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
-    let Ok(window_id) = rustspace::sys_create_window(600, 400, 50, 50) else {
+    let Ok(window_id) = rustspace::sys_create_window(600, 400, 20, 50) else {
         rustspace::println!("shell: create_window failed");
         rustspace::sys_exit(1)
     };

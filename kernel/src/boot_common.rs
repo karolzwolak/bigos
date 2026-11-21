@@ -217,6 +217,8 @@ pub unsafe fn bsp_early_init() {
             cpu.processor_id
         );
     }
+    // the core 0 timer setup reads the TSC frequency
+    unsafe { interrupts::init_tsc_globals() };
     unsafe { init_core(0) };
 
     serial_println!("Mapping lapic for core 0");
@@ -234,8 +236,6 @@ pub unsafe fn bsp_early_init() {
     serial_println_core!("Global memory managers initialized");
 
     memory::init_memory_globals(frame_allocator, user_memory_manager, mapper);
-
-    unsafe { interrupts::init_tsc_globals() };
 
     for (core_id, cpu) in cpus.iter().enumerate().skip(1) {
         serial_println_core!("Bootstrapping AP core {}", core_id);

@@ -6,4 +6,5 @@ logs/
 /test_logs
 *.iso
 *.hdd
-storage/
+storage/*
+!storage/.gitkeep
