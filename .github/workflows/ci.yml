@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       # trigger installation from rust-toolchain.toml
       - name: Setup rust toolchain
@@ -34,6 +36,9 @@ jobs:
           sudo apt-get install --no-upgrade --no-install-recommends -y \
             clang lld llvm xorriso ovmf qemu-system-x86 \
             mtools dosfstools
+
+      - name: Build doom and the libc
+        run: cargo xtask doom
 
       - name: Run tests
         run: cargo xtask test

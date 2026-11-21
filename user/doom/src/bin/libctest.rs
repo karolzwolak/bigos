@@ -102,7 +102,7 @@ fn run_to_completion(job: &mut ShellJob, capture: &mut Capture) {
                 capture.len += copy_len;
             }
             JobPoll::NothingYet => sys_yield(),
-            JobPoll::Finished | JobPoll::NoJob => return,
+            JobPoll::Finished { .. } | JobPoll::NoJob => return,
         }
     }
 }
@@ -118,7 +118,7 @@ fn expected_print_output(out: &mut Capture) {
         out.len += bytes.len();
     };
     push(&line[..LONG_LINE_BYTES]);
-    push(b"|42\nsecond\nend\n!\n");
+    push(b"|54\nsecond\nend\n!\n");
 }
 
 fn check_stdout_through_a_job(job: &mut ShellJob) {

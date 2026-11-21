@@ -92,7 +92,7 @@ fn run_to_completion(job: &mut ShellJob, scanner: &mut LineScanner) {
         match job.poll(&mut chunk) {
             JobPoll::Output(read_len) => scanner.feed(&chunk[..read_len]),
             JobPoll::NothingYet => sys_yield(),
-            JobPoll::Finished | JobPoll::NoJob => return,
+            JobPoll::Finished { .. } | JobPoll::NoJob => return,
         }
     }
 }
