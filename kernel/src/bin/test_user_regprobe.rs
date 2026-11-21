@@ -3,8 +3,10 @@
 
 extern crate alloc;
 
+use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::PROCESS_MANAGER;
+use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
 use kernel::process::{PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{AP_CORE_COUNT, boot_common, bsp_init, serial_println_core};
@@ -16,6 +18,9 @@ const TIMEOUT_MS: u64 = 20000;
 const NS_PER_MS: u64 = 1_000_000;
 const PROCESS_PRIORITY: u8 = 5;
 
+const COUNTER_INSTANCE_COUNT: usize = 0;
+const COUNTER_PROBES_DONE: usize = 1;
+
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     test_panic_handler(info)
@@ -25,6 +30,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 extern "C" fn kmain() -> ! {
     unsafe { boot_common::bsp_early_init() };
     test_main();
+}
+
+fn counter(index: usize) -> &'static AtomicU32 {
+    debug_assert!(index < TEST_COUNTER_COUNT);
+
+    // SAFETY: the shared page lives forever and the counters are atomics
+    unsafe { &get_shared_program_data_buffer_mut().test_counters[index] }
 }
 
 fn test_main() -> ! {
@@ -42,6 +54,10 @@ fn test_main() -> ! {
             exit_qemu(QemuExitCode::Failed);
         }
     };
+
+    // set before any instance exists, every instance waits at the barrier for all of them
+    counter(COUNTER_PROBES_DONE).store(0, Ordering::Release);
+    counter(COUNTER_INSTANCE_COUNT).store(PROCESS_COUNT as u32, Ordering::Release);
 
     let mut pids: [PID; PROCESS_COUNT] = [0; PROCESS_COUNT];
 

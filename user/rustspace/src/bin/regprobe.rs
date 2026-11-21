@@ -4,9 +4,10 @@
 use core::arch::asm;
 use core::arch::x86_64::_rdtsc;
 use core::mem::{offset_of, size_of};
+use core::sync::atomic::Ordering;
 use rustspace::{
-    CpuInfoFlat, SYS_GET_PID, SYS_YIELD, sys_exit, sys_get_cpu_info, sys_get_handoff_count,
-    sys_get_pid, sys_write, sys_yield,
+    CpuInfoFlat, SYS_GET_PID, SYS_YIELD, program_shared_data, sys_exit, sys_get_cpu_info,
+    sys_get_handoff_count, sys_get_pid, sys_write, sys_yield,
 };
 
 const SYSCALL_PROBE_ROUNDS: u32 = 16;
@@ -19,9 +20,6 @@ const MS_PER_SECOND: u64 = 1000;
 /// Longer than a scheduler slice, so a waiting task preempts the spin
 const SPIN_DURATION_MS: u64 = 150;
 const HANDOFF_TIMEOUT_MS: u64 = 5000;
-/// Keeps the core busy once the probes are done, an idle core would steal the partner
-/// of a task that still probes and leave it alone on its core
-const LINGER_MS: u64 = 3000;
 /// Probes that must see another task run on the core while the registers are loaded
 const REQUIRED_HANDOFFS: u32 = 3;
 const CALIBRATION_SPIN_ITERATIONS: u64 = 1 << 16;
@@ -45,6 +43,9 @@ const EXIT_CODE_YIELD_RETURNED_NONZERO: i32 = 102;
 const EXIT_CODE_LOST_REGISTER_ON_PREEMPTION: i32 = 103;
 const EXIT_CODE_GET_PID_RETURNED_WRONG: i32 = 104;
 const EXIT_CODE_NO_HANDOFF: i32 = 105;
+
+const COUNTER_INSTANCE_COUNT: usize = 0;
+const COUNTER_PROBES_DONE: usize = 1;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -209,7 +210,32 @@ macro_rules! probe_with_loaded_registers {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    sys_exit(EXIT_CODE_PANIC)
+    exit_failed(EXIT_CODE_PANIC)
+}
+
+fn check_in_probes_done() {
+    program_shared_data().test_counters[COUNTER_PROBES_DONE].fetch_add(1, Ordering::AcqRel);
+}
+
+/// A failed instance still checks in, so the others leave the barrier and the kernel test
+/// reports this exit code instead of a timeout
+fn exit_failed(exit_code: i32) -> ! {
+    check_in_probes_done();
+    sys_exit(exit_code)
+}
+
+/// Keeps the core busy until every instance is done probing. An instance that exits
+/// earlier leaves a task that still probes alone, either on its own core or after an idle
+/// core steals its partner. Run without the kernel test the instance count is 0 and
+/// nobody waits
+fn wait_for_all_instances() {
+    let counters = &program_shared_data().test_counters;
+    check_in_probes_done();
+
+    let instance_count = counters[COUNTER_INSTANCE_COUNT].load(Ordering::Acquire);
+    while counters[COUNTER_PROBES_DONE].load(Ordering::Acquire) < instance_count {
+        sys_yield();
+    }
 }
 
 #[inline(never)]
@@ -352,13 +378,13 @@ fn probe_get_pid(pid: u64) {
     unsafe { probe_syscall() };
 
     if count_lost_registers(b"sysret lost", SYSCALL_PRESERVED_GPRS) != 0 {
-        sys_exit(EXIT_CODE_LOST_REGISTER_ON_SYSRET)
+        exit_failed(EXIT_CODE_LOST_REGISTER_ON_SYSRET)
     }
 
     let get_pid_result = observed_rax();
     if get_pid_result != pid {
         report(b"get_pid returned", b"rax", get_pid_result);
-        sys_exit(EXIT_CODE_GET_PID_RETURNED_WRONG)
+        exit_failed(EXIT_CODE_GET_PID_RETURNED_WRONG)
     }
 }
 
@@ -367,13 +393,13 @@ fn probe_yield(pid: u64) {
     unsafe { probe_syscall() };
 
     if count_lost_registers(b"yield lost", SYSCALL_PRESERVED_GPRS) != 0 {
-        sys_exit(EXIT_CODE_LOST_REGISTER_ON_YIELD)
+        exit_failed(EXIT_CODE_LOST_REGISTER_ON_YIELD)
     }
 
     let yield_result = observed_rax();
     if yield_result != 0 {
         report(b"yield returned", b"rax", yield_result);
-        sys_exit(EXIT_CODE_YIELD_RETURNED_NONZERO)
+        exit_failed(EXIT_CODE_YIELD_RETURNED_NONZERO)
     }
 }
 
@@ -387,7 +413,7 @@ fn probe_preemption(pid: u64, spin_iterations: u64) {
     }
 
     if count_lost_registers(b"preemption lost", ALL_GPRS) != 0 {
-        sys_exit(EXIT_CODE_LOST_REGISTER_ON_PREEMPTION)
+        exit_failed(EXIT_CODE_LOST_REGISTER_ON_PREEMPTION)
     }
 }
 
@@ -417,7 +443,7 @@ fn run_phase_across_handoffs(phase_name: &[u8], timeout_tsc: u64, mut probe: imp
             line.push(phase_name);
             line.push(b"\n");
             line.write();
-            sys_exit(EXIT_CODE_NO_HANDOFF)
+            exit_failed(EXIT_CODE_NO_HANDOFF)
         }
 
         let handoffs_before = sys_get_handoff_count();
@@ -440,7 +466,6 @@ pub extern "C" fn _start() -> ! {
 }
 
 extern "C" fn start_checked() -> ! {
-    let start_tsc = read_tsc();
     let ticks_per_ms = tsc_ticks_per_ms();
     let pid = sys_get_pid() as u64;
 
@@ -457,10 +482,7 @@ extern "C" fn start_checked() -> ! {
         probe_preemption(pid, spin_iterations)
     });
 
-    let linger_end_tsc = start_tsc + LINGER_MS * ticks_per_ms;
-    while read_tsc() < linger_end_tsc {
-        sys_yield();
-    }
+    wait_for_all_instances();
 
     write_bytes(b"regprobe: ok\n");
     sys_exit(0)
