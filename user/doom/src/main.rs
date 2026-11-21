@@ -128,6 +128,11 @@ extern "C" fn doom_main(argc: usize, argv: *const ArgSlice) -> ! {
         start_tsc: read_tsc(),
     });
 
+    rustspace::println!("Controls:");
+    for line in keys::CONTROLS_HELP {
+        rustspace::println!("  {}", line);
+    }
+
     let mut doom_argv = [core::ptr::null_mut(); MAX_DOOM_ARGC + 1];
     let doom_argc = build_doom_argv(args, &mut doom_argv);
 

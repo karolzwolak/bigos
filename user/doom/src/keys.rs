@@ -23,6 +23,17 @@ const DOOM_KEY_F12: u8 = DOOM_KEY_FUNCTION_BASE + 0x58;
 
 pub const KEY_CODE_COUNT: usize = KeyCode::RAlt2 as usize + 1;
 
+pub const CONTROLS_HELP: [&str; 8] = [
+    "move: arrows",
+    "strafe: , . or hold v",
+    "run: shift",
+    "fire: c",
+    "use: space",
+    "weapons: 1-7",
+    "map: tab",
+    "menu: esc",
+];
+
 const LETTER_KEY_CODES: [KeyCode; 26] = [
     KeyCode::A,
     KeyCode::B,
