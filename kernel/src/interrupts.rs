@@ -701,6 +701,7 @@ pub unsafe fn init_acpi(
         unsafe { AcpiTables::from_rsdp(handler, rsdp_addr).expect("Failed to parse ACPI") };
 
     serial_println!("AcpiTables initialized");
+    crate::power::init_from_acpi(&acpi_tables, &handler);
 
     let acpi_platform: AcpiPlatform<IdentityAcpiHandler> =
         AcpiPlatform::new(acpi_tables, handler).expect("Cannot create AcpiPlatform");

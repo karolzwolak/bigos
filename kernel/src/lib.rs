@@ -29,6 +29,7 @@ pub mod graphics;
 pub mod interrupts;
 pub mod io;
 pub mod ipc;
+pub mod power;
 pub mod process;
 pub mod process_start;
 pub mod stack_guard;
