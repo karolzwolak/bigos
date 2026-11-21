@@ -1335,7 +1335,32 @@ fn ovmf(root: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
-fn run_iso(root: &Path) {
+/// CPU backend for interactive runs. Tests always use KVM
+#[derive(Clone, Copy)]
+enum QemuAccel {
+    Kvm,
+    /// Software emulation, for hosts without /dev/kvm. Has no TSC-deadline timer,
+    /// so the kernel falls back to the periodic LAPIC timer
+    Tcg,
+}
+
+impl QemuAccel {
+    fn accel_arg(self) -> &'static str {
+        match self {
+            QemuAccel::Kvm => "kvm",
+            QemuAccel::Tcg => "tcg,thread=multi",
+        }
+    }
+
+    fn cpu_arg(self) -> &'static str {
+        match self {
+            QemuAccel::Kvm => "host,+tsc-deadline,+apic",
+            QemuAccel::Tcg => "max,+apic",
+        }
+    }
+}
+
+fn run_iso(root: &Path, accel: QemuAccel) {
     build_iso(root);
     let (code, vars) = ovmf(root);
     let iso = root.join("target/template-x86_64.iso");
@@ -1364,11 +1389,11 @@ fn run_iso(root: &Path) {
         "-M",
         "q35",
         "-accel",
-        "kvm",
+        accel.accel_arg(),
         "-smp",
         &smp,
         "-cpu",
-        "host,+tsc-deadline,+apic",
+        accel.cpu_arg(),
     ])
     .args([
         "-drive",
@@ -1505,7 +1530,7 @@ fn clippy(root: &Path, extra: &[String]) {
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  doom [build|fmt|clippy]  Set up, build and stage the optional doom programs\n  disk         Build the user programs and the FAT32 disk images in storage/ when out of date\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + user crates)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + user crates)  [cargo args | -- lint flags]\n\nDoom is optional and not part of build, test, fmt or clippy. `cargo xtask doom` fetches the
+        "Usage: cargo xtask <TASK>\n\nTasks:\n  build        Build kernel and user programs\n  iso          Build bootable ISO image (default)\n  hdd          Build bootable HDD image\n  run          Build ISO and launch in QEMU (sockets + log_splitter)\n  run-tcg      Same as run, but with TCG software emulation instead of KVM\n  run-nologs   Build ISO and launch in QEMU (stdio, no log splitter)\n  test [--release] [filter…]  Build and run integration tests (kernel/src/bin/test_*.rs)\n  doom [build|fmt|clippy]  Set up, build and stage the optional doom programs\n  disk         Build the user programs and the FAT32 disk images in storage/ when out of date\n  clean        Remove all build artefacts\n  fmt          Format all code (workspace + xtask + user crates)  [extra args forwarded]\n  clippy       Lint all code (workspace + xtask + user crates)  [cargo args | -- lint flags]\n\nDoom is optional and not part of build, test, fmt or clippy. `cargo xtask doom` fetches the
 doomgeneric submodule, builds user/doom (needs clang) and adds it to the disk images. Put the shareware
 DOOM1.WAD at {DOOM_WAD_SOURCE} to stage it as /{DOOM_WAD_DISK_NAME}. `cargo xtask doom fmt` and
 `cargo xtask doom clippy` check the doom crate. test_user_doom runs once doom is built\n\nEnvironment variables:\n  QEMUFLAGS    Extra flags appended to QEMU (default: -m 2G)\n  CC, LD, AR   Tool overrides for user program build\n"
@@ -1528,7 +1553,8 @@ fn main() {
         }
         Some("iso") | None => build_iso(&root),
         Some("hdd") => build_hdd(&root),
-        Some("run") => run_iso(&root),
+        Some("run") => run_iso(&root, QemuAccel::Kvm),
+        Some("run-tcg") => run_iso(&root, QemuAccel::Tcg),
         Some("run-nologs") => run_nologs(&root),
         Some("test") => run_tests(&root, &extra),
         Some("disk") => {
