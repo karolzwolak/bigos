@@ -968,7 +968,7 @@ extern "x86-interrupt" fn double_fault_handler(
 extern "C" fn timer_interrupt_handler(frame: &mut TrapFrame) {
     let core_id = get_current_core_id();
     if is_user_frame(frame) {
-        crate::gdt::assert_rsp_in_task_stack(core_id);
+        crate::gdt::assert_rsp_in_thread_stack(core_id);
     }
 
     if TIMER_DEBUG_PRINT {

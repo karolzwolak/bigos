@@ -10,7 +10,7 @@ pub mod process_syscalls;
 pub mod scheduler;
 pub mod shared_state;
 pub mod syscall;
-pub mod task;
+pub mod thread;
 pub mod user_access;
 pub mod wait;
 
@@ -23,7 +23,7 @@ use crate::ipc::channel::{ChannelMapping, ChannelRole, MAX_CHANNELS_PER_PROCESS}
 use crate::memory::paging::PAGE_SIZE;
 use crate::memory::usermem::USER_STACK_TOP;
 use crate::process::syscall::SyscallError;
-use crate::process::task::UserEntry;
+use crate::process::thread::UserEntry;
 use crate::{
     data_structures::vector::Vec,
     process::{

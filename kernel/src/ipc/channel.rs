@@ -18,8 +18,8 @@ use crate::{
         INVALID_PID, PID, PROCESS_STDOUT_CHANNEL_BASE, Process,
         process_mem::{FrameOwnership, ProcessMemoryLayout},
         syscall::SyscallError,
-        task,
-        wait::{FUTEX_WAIT_QUEUE, block_current_task_until_event},
+        thread,
+        wait::{FUTEX_WAIT_QUEUE, block_current_thread_until_event},
     },
     util::cpuinfo::get_current_core_id,
 };
@@ -596,7 +596,7 @@ pub fn write_stdout(mapping: &ChannelMapping, bytes: &[u8]) -> Result<usize, Sys
         let free = data_size - fill;
         if free == 0 {
             wait_for_reader(header, read_idx);
-            if task::core_current_task_kill_pending(get_current_core_id()) {
+            if thread::core_current_thread_kill_pending(get_current_core_id()) {
                 return Ok(written_bytes);
             }
             continue;
@@ -648,7 +648,7 @@ fn wait_for_reader(header: &ChannelHeader, seen_read_idx: u32) {
         .store(WAITING, Ordering::Relaxed);
     fence(Ordering::SeqCst);
 
-    block_current_task_until_event(&FUTEX_WAIT_QUEUE, || {
+    block_current_thread_until_event(&FUTEX_WAIT_QUEUE, || {
         header.reader.read_idx.load(Ordering::Acquire) != seen_read_idx
             || header.writer.status.load(Ordering::Acquire) != ChannelStatus::Active as u32
     });

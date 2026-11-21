@@ -8,7 +8,7 @@ lazy_static::lazy_static! {
 pub static mut TOTAL_CORE_COUNT: u8 = 1;
 
 /// How many cores the machine has and which LAPIC each of them is
-/// Core 0 is the boot core and runs no tasks
+/// Core 0 is the boot core and runs no threads
 pub struct CorePool {
     total_cores: u8,
     lapic_ids: [u8; MAX_CORES as usize],
