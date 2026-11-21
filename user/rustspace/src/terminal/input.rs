@@ -25,6 +25,7 @@ pub enum InputAction {
     },
     Char(char),
     Backspace,
+    DeleteWord,
     Enter,
     ArrowUp,
     ArrowDown,
@@ -88,6 +89,11 @@ pub fn translate(event: InputEvent) -> Option<InputAction> {
             }
 
             match c {
+                crate::AsciiChar::BACKSPACE
+                    if event.key_modifiers().intersects(KeyModifiers::ALT) =>
+                {
+                    Some(InputAction::DeleteWord)
+                }
                 crate::AsciiChar::BACKSPACE => Some(InputAction::Backspace),
                 crate::AsciiChar::NEWLINE | crate::AsciiChar::CARRIAGE_RETURN => {
                     Some(InputAction::Enter)
@@ -98,4 +104,17 @@ pub fn translate(event: InputEvent) -> Option<InputAction> {
         }
         _ => None,
     }
+}
+
+pub fn word_start_before(typed: &[u8]) -> usize {
+    let mut word_start = typed.len();
+
+    while word_start > 0 && typed[word_start - 1].is_ascii_whitespace() {
+        word_start -= 1;
+    }
+    while word_start > 0 && !typed[word_start - 1].is_ascii_whitespace() {
+        word_start -= 1;
+    }
+
+    word_start
 }

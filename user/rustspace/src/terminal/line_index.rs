@@ -4,6 +4,8 @@ const SPLIT_LINE_AT: usize = 4096;
 pub struct LineMeta {
     pub first_pos: u64,
     pub one_past_last_pos: u64,
+    /// The bytes before this position are prompt text, equal to first_pos when there are none
+    pub prompt_end_pos: u64,
 }
 
 impl LineMeta {
@@ -11,7 +13,14 @@ impl LineMeta {
         Self {
             first_pos: pos,
             one_past_last_pos: pos,
+            prompt_end_pos: pos,
         }
+    }
+
+    /// How many bytes at the start of the line are prompt text
+    pub fn prompt_len(&self) -> usize {
+        debug_assert!(self.prompt_end_pos >= self.first_pos);
+        (self.prompt_end_pos.min(self.one_past_last_pos) - self.first_pos) as usize
     }
 
     pub fn len(&self) -> usize {
@@ -110,6 +119,48 @@ impl LineIndex {
         let cur = self.lines[self.current].first_pos;
         debug_assert!(new_end >= cur);
         self.lines[self.current].one_past_last_pos = new_end;
+    }
+
+    /// Drops the lines that start after `pos` and ends the remaining last line at `pos`
+    pub fn rewind_to(&mut self, pos: u64) {
+        while self.lines[self.current].first_pos > pos && self.count > 1 {
+            if self.count < self.max {
+                debug_assert!(self.count == self.current + 1);
+                self.count -= 1;
+            } else {
+                // the ring is full: the freed slot becomes the oldest line, its old text is gone
+                let oldest_pos = self.lines[(self.current + 1) % self.max].first_pos;
+                self.lines[self.current] = LineMeta::empty(oldest_pos);
+            }
+
+            self.current = if self.current == 0 {
+                self.max - 1
+            } else {
+                self.current - 1
+            };
+        }
+
+        self.truncate_last(pos);
+    }
+
+    pub fn mark_prompt(&mut self, prompt_start: u64, prompt_end: u64) {
+        debug_assert!(prompt_start <= prompt_end);
+
+        let mut physical_idx = self.current;
+        for _ in 0..self.count {
+            let line = &mut self.lines[physical_idx];
+            if line.first_pos < prompt_end && line.one_past_last_pos > prompt_start {
+                line.prompt_end_pos = prompt_end.min(line.one_past_last_pos);
+            }
+            if line.first_pos <= prompt_start {
+                break;
+            }
+            physical_idx = if physical_idx == 0 {
+                self.max - 1
+            } else {
+                physical_idx - 1
+            };
+        }
     }
 
     pub fn clear(&mut self, pos: u64) {

@@ -4,6 +4,7 @@ pub mod scrollback;
 
 use alloc::vec::Vec;
 use core::cmp::{max, min};
+use core::fmt::Write;
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
@@ -13,6 +14,11 @@ use embedded_graphics::{
 
 use crate::gfx::{color::Rgba8888UNORM, surface::UserSurface};
 use crate::job::{JobPoll, ShellJob};
+use crate::shell::history::{CommandHistory, HISTORY_ENTRY_MAX_BYTES};
+use crate::shell::{
+    self, CommandOutcome, EXIT_CODE_FAILURE, EXIT_CODE_NOT_FOUND, ShellOutput, ShellState,
+};
+use crate::{SyscallError, sys_wait_process};
 use line_index::LineIndex;
 use scrollback::Scrollback;
 
@@ -21,6 +27,7 @@ const MARGIN_TOP: i32 = 16;
 const LINE_SPACING: i32 = 15;
 
 const CHARACTER_STYLE: MonoTextStyle<Rgb888> = MonoTextStyle::new(&FONT_8X13, Rgb888::WHITE);
+const PROMPT_CHARACTER_STYLE: MonoTextStyle<Rgb888> = MonoTextStyle::new(&FONT_8X13, Rgb888::CYAN);
 const TEXT_STYLE: TextStyle = TextStyleBuilder::new()
     .alignment(Alignment::Left)
     .line_height(LineHeight::Percent(150))
@@ -28,23 +35,12 @@ const TEXT_STYLE: TextStyle = TextStyleBuilder::new()
 
 const DEFAULT_MAX_LINES: usize = 4096;
 
-const PROMPT: &str = "> ";
+const PROMPT: &str = " > ";
 const JOB_DRAIN_CHUNK_BYTES: usize = 1024;
 /// a frame takes at most one ring of job output, so a chatty program cannot stall the window
 const JOB_DRAIN_MAX_BYTES_PER_FRAME: usize = crate::channel::STDOUT_CHANNEL_DATA_SIZE_BYTES;
-const UNPRINTABLE_REPLACEMENT: u8 = b'?';
-
-/// Job output is untrusted and the renderer expects ASCII: keep printable ASCII and line
-/// breaks, turn tabs into spaces and everything else into UNPRINTABLE_REPLACEMENT
-fn sanitize_job_output(bytes: &mut [u8]) {
-    for byte in bytes {
-        *byte = match *byte {
-            b' '..=b'~' | b'\n' | b'\r' => *byte,
-            b'\t' => b' ',
-            _ => UNPRINTABLE_REPLACEMENT,
-        };
-    }
-}
+/// File contents shown by cat are copied through a buffer of this size to be sanitized
+const SANITIZE_CHUNK_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FontMetrics {
@@ -85,6 +81,8 @@ pub struct Terminal<D: DrawTarget<Color = Rgb888>> {
     /// scrollback position right after the last prompt, typed input starts here
     pub input_start_abs: u64,
     pub job: ShellJob,
+    pub shell_state: ShellState,
+    pub history: CommandHistory,
 }
 
 impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
@@ -119,6 +117,8 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             scroll_offset: 0,
             input_start_abs: start_abs,
             job: ShellJob::Idle,
+            shell_state: ShellState::new(),
+            history: CommandHistory::new(),
         }
     }
 
@@ -308,22 +308,80 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 continue;
             }
             let s = unsafe { core::str::from_utf8_unchecked(bytes) };
-            let pos = Point::new(MARGIN_LEFT, MARGIN_TOP + vis_idx as i32 * LINE_SPACING);
-            let _ = Text::with_text_style(s, pos, CHARACTER_STYLE, TEXT_STYLE)
-                .draw(&mut self.draw_target);
+            let (prompt, rest) = s.split_at(meta.prompt_len().min(s.len()));
+            let mut pos = Point::new(MARGIN_LEFT, MARGIN_TOP + vis_idx as i32 * LINE_SPACING);
+            if !prompt.is_empty() {
+                pos = Text::with_text_style(prompt, pos, PROMPT_CHARACTER_STYLE, TEXT_STYLE)
+                    .draw(&mut self.draw_target)
+                    .unwrap_or(pos);
+            }
+            if !rest.is_empty() {
+                let _ = Text::with_text_style(rest, pos, CHARACTER_STYLE, TEXT_STYLE)
+                    .draw(&mut self.draw_target);
+            }
         }
     }
 
     pub fn backspace(&mut self) {
-        let cur = *self.lines.current_ref();
+        let end_abs = self.scrollback.current_absolute();
         // never eat into the prompt
-        if cur.is_empty() || self.scrollback.current_absolute() <= self.input_start_abs {
+        if end_abs <= self.input_start_abs {
             return;
         }
-        let new_end = cur.one_past_last_pos - 1;
-        self.lines.truncate_last(new_end);
-        self.scrollback.remove_last_byte();
+
+        self.rewind_input_to(end_abs - 1);
+    }
+
+    pub fn delete_word(&mut self) {
+        let end_abs = self.scrollback.current_absolute();
+        debug_assert!(end_abs >= self.input_start_abs);
+        let typed_len = (end_abs - self.input_start_abs) as usize;
+        if typed_len == 0 {
+            return;
+        }
+
+        let typed_line = self.scrollback.read_at(self.input_start_abs, typed_len);
+        let word_start = input::word_start_before(typed_line);
+        self.rewind_input_to(self.input_start_abs + word_start as u64);
+    }
+
+    /// Drops typed input from `abs_pos` on, wrapped lines included
+    fn rewind_input_to(&mut self, abs_pos: u64) {
+        debug_assert!(abs_pos >= self.input_start_abs);
+
+        self.scrollback.truncate_to(abs_pos);
+        self.lines.rewind_to(abs_pos);
         self.needs_redraw = true;
+    }
+
+    /// Swaps everything typed after the prompt for `line`
+    fn replace_input(&mut self, line: &[u8]) {
+        self.rewind_input_to(self.input_start_abs);
+        self.write_bytes_internal(line);
+        self.scroll_offset = 0;
+    }
+
+    /// The recalled line is copied out, the history stays borrowed otherwise
+    fn recall_older_command(&mut self) {
+        let Some(recalled) = self.history.older() else {
+            return;
+        };
+        let mut line = [0u8; HISTORY_ENTRY_MAX_BYTES];
+        let line_len = recalled.len();
+        line[..line_len].copy_from_slice(recalled);
+
+        self.replace_input(&line[..line_len]);
+    }
+
+    fn recall_newer_command(&mut self) {
+        let Some(recalled) = self.history.newer() else {
+            return;
+        };
+        let mut line = [0u8; HISTORY_ENTRY_MAX_BYTES];
+        let line_len = recalled.len();
+        line[..line_len].copy_from_slice(recalled);
+
+        self.replace_input(&line[..line_len]);
     }
 
     /// Everything typed since the prompt, wrapped lines included
@@ -347,8 +405,12 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         if !self.lines.current_ref().is_empty() {
             self.newline();
         }
+        let prompt_start = self.scrollback.current_absolute();
+        let cwd = self.shell_state.cwd;
+        self.write_str(cwd.as_str());
         self.write_str(PROMPT);
         self.input_start_abs = self.scrollback.current_absolute();
+        self.lines.mark_prompt(prompt_start, self.input_start_abs);
     }
 
     /// Moves the output of the running job into the scrollback
@@ -360,12 +422,14 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         while drained_bytes < JOB_DRAIN_MAX_BYTES_PER_FRAME {
             match self.job.poll(&mut chunk) {
                 JobPoll::Output(read_len) => {
-                    sanitize_job_output(&mut chunk[..read_len]);
+                    // job output is untrusted and the renderer expects ASCII
+                    shell::sanitize_for_screen(&mut chunk[..read_len]);
                     self.write_bytes_internal(&chunk[..read_len]);
                     drained_bytes += read_len;
                 }
                 JobPoll::NothingYet | JobPoll::NoJob => return,
-                JobPoll::Finished => {
+                JobPoll::Finished { pid } => {
+                    self.remove_job(pid);
                     self.write_prompt();
                     return;
                 }
@@ -373,28 +437,36 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         }
     }
 
-    fn run_job(&mut self, command_line: &str) {
-        if command_line.is_empty() {
-            self.write_line("run: usage: run <program> [args]");
-            return;
-        }
-
-        if let Err(error) = self.job.start(command_line) {
-            let _ = core::fmt::Write::write_fmt(
-                self,
-                format_args!("run: cannot start {}: error {}", command_line, error.0),
-            );
-            self.newline();
+    fn remove_job(&mut self, pid: u32) {
+        match sys_wait_process(pid) {
+            Ok(exit_code) => {
+                self.shell_state.last_exit_code = exit_code;
+                if exit_code != 0 {
+                    if !self.lines.current_ref().is_empty() {
+                        self.newline();
+                    }
+                    let _ = writeln!(self, "[exit code {}]", exit_code);
+                }
+            }
+            Err(error) => {
+                self.shell_state.last_exit_code = EXIT_CODE_FAILURE;
+                let _ = writeln!(self, "wait for pid {}: {}", pid, error);
+            }
         }
     }
 
-    fn recall_last_command(&mut self) {
-        if self.last_command_buf.is_empty() {
-            return;
+    fn start_program(&mut self, name: &str, path: &str, args: &str) {
+        match self.job.start_program(path, args) {
+            Ok(_) => {}
+            Err(SyscallError::NOT_FOUND) if !name.contains('/') => {
+                self.shell_state.last_exit_code = EXIT_CODE_NOT_FOUND;
+                let _ = writeln!(self, "{}: command not found", name);
+            }
+            Err(error) => {
+                self.shell_state.last_exit_code = EXIT_CODE_FAILURE;
+                let _ = writeln!(self, "{}: {}", name, error);
+            }
         }
-        let buf = self.last_command_buf.clone();
-        self.write_bytes_internal(&buf);
-        self.needs_redraw = true;
     }
 
     fn det_flow_demo(&mut self, count: usize) {
@@ -556,12 +628,6 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         };
         let args = args_raw.trim();
         match cmd {
-            "deb" => {
-                self.write_line("deb!");
-            }
-            "clear" => {
-                self.clear();
-            }
             "flow" => {
                 let count = if args.is_empty() {
                     1600
@@ -606,11 +672,19 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 };
                 self.det_flow_demo(count);
             }
-            "run" => self.run_job(args),
             _ => {
-                let _ =
-                    core::fmt::Write::write_fmt(self, format_args!("{}: command not found", cmd));
-                self.newline();
+                // the state is copied out, the terminal itself is the output
+                let mut shell_state = self.shell_state;
+                let outcome = shell::run_command_line(&mut shell_state, s_trimmed, self);
+                self.shell_state = shell_state;
+
+                match outcome {
+                    CommandOutcome::Done => {}
+                    CommandOutcome::Clear => self.clear(),
+                    CommandOutcome::Program { name, path, args } => {
+                        self.start_program(name, path.as_str(), args)
+                    }
+                }
             }
         }
     }
@@ -629,13 +703,17 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             },
             // no stdin yet: while a job runs typed input is dropped, scrolling still works
             input::InputAction::Backspace
+            | input::InputAction::DeleteWord
             | input::InputAction::Enter
             | input::InputAction::Char(_)
             | input::InputAction::ArrowUp
+            | input::InputAction::ArrowDown
                 if self.job.is_running() => {}
             input::InputAction::Backspace => self.backspace(),
+            input::InputAction::DeleteWord => self.delete_word(),
             input::InputAction::Enter => {
                 self.capture_last_command();
+                self.history.push(self.last_command_buf.trim_ascii());
                 self.newline();
                 self.execute_command();
                 if !self.job.is_running() {
@@ -650,9 +728,9 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 let b = c as u8;
                 self.write_bytes_internal(&[b]);
             }
-            input::InputAction::ArrowUp => self.recall_last_command(),
-            input::InputAction::ArrowDown
-            | input::InputAction::ArrowLeft
+            input::InputAction::ArrowUp => self.recall_older_command(),
+            input::InputAction::ArrowDown => self.recall_newer_command(),
+            input::InputAction::ArrowLeft
             | input::InputAction::ArrowRight
             | input::InputAction::Home
             | input::InputAction::End
@@ -675,5 +753,18 @@ impl<D: DrawTarget<Color = Rgb888>> core::fmt::Write for Terminal<D> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write_str(s);
         Ok(())
+    }
+}
+
+impl<D: DrawTarget<Color = Rgb888>> ShellOutput for Terminal<D> {
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        let mut chunk = [0u8; SANITIZE_CHUNK_BYTES];
+
+        for source in bytes.chunks(SANITIZE_CHUNK_BYTES) {
+            let chunk = &mut chunk[..source.len()];
+            chunk.copy_from_slice(source);
+            shell::sanitize_for_screen(chunk);
+            self.write_bytes_internal(chunk);
+        }
     }
 }
