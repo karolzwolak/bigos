@@ -15,5 +15,12 @@ path = "src/main.rs"
 name = "libctest"
 path = "src/bin/libctest.rs"
 
+[[bin]]
+name = "doomtest"
+path = "src/bin/doomtest.rs"
+
 [dependencies]
 rustspace = { path = "../rustspace" }
+
+[build-dependencies]
+cc = "1.11.0"

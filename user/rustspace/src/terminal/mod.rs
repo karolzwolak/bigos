@@ -81,7 +81,6 @@ pub struct Terminal<D: DrawTarget<Color = Rgb888>> {
     pub font_metrics: FontMetrics,
     pub last_command_abs: Option<(u64, u64)>,
     pub last_command_buf: Vec<u8>,
-    pub input_state: input::InputState,
     pub scroll_offset: usize,
     /// scrollback position right after the last prompt, typed input starts here
     pub input_start_abs: u64,
@@ -117,7 +116,6 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             font_metrics,
             last_command_abs: None,
             last_command_buf: Vec::new(),
-            input_state: input::InputState::new(),
             scroll_offset: 0,
             input_start_abs: start_abs,
             job: ShellJob::Idle,
@@ -619,9 +617,6 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
 
     fn apply_action(&mut self, action: input::InputAction) {
         match action {
-            input::InputAction::ToggleCommandMode => {
-                self.needs_redraw = true;
-            }
             input::InputAction::Scroll { dir, amount } => match (dir, amount) {
                 (input::ScrollDir::Up, input::ScrollAmount::Page) => {
                     self.scroll_up_lines(self.viewport_rows)
@@ -655,11 +650,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 let b = c as u8;
                 self.write_bytes_internal(&[b]);
             }
-            input::InputAction::ArrowUp => {
-                if !self.input_state.command_mode {
-                    self.recall_last_command();
-                }
-            }
+            input::InputAction::ArrowUp => self.recall_last_command(),
             input::InputAction::ArrowDown
             | input::InputAction::ArrowLeft
             | input::InputAction::ArrowRight
@@ -674,7 +665,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
     }
 
     pub fn handle_event(&mut self, event: crate::InputEvent) {
-        if let Some(action) = input::translate(event, &mut self.input_state) {
+        if let Some(action) = input::translate(event) {
             self.apply_action(action);
         }
     }

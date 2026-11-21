@@ -71,6 +71,8 @@ pub struct Compositor {
     mouse_x: AtomicI32,
     mouse_y: AtomicI32,
     cursor_visible: AtomicBool,
+    // a destroyed window leaves its pixels in the framebuffer, the next compose wipes them
+    needs_framebuffer_clear: AtomicBool,
 
     mouse_last_drawn_x: i32,
     mouse_last_drawn_y: i32,
@@ -90,6 +92,7 @@ impl Compositor {
             mouse_x: AtomicI32::new(0),
             mouse_y: AtomicI32::new(0),
             cursor_visible: AtomicBool::new(true),
+            needs_framebuffer_clear: AtomicBool::new(false),
             mouse_last_drawn_x: 0,
             mouse_last_drawn_y: 0,
             keyboard_state: KeyboardState::new(),
@@ -358,6 +361,7 @@ impl Compositor {
             )
         };
         self.free_window_ids.lock().push(window_id);
+        self.needs_framebuffer_clear.store(true, Ordering::Release);
 
         // the dead window kept the focus, without this no window would get keys again
         if was_focused {
@@ -524,9 +528,6 @@ impl Compositor {
                 self.focus_window(new_focused_window_id);
             }
         }
-        if self.keyboard_state.is_down(KeyCode::LAlt) {
-            serial_println_core!("Compositor: LAlt is down, key {} state {:?}", key, state);
-        }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
             let _ = event_buffer.push(event);
@@ -666,6 +667,22 @@ impl Compositor {
         }
     }
 
+    fn clear_framebuffer(framebuffer: &FrameBufferTarget) {
+        let framebuffer_ptr = framebuffer.address();
+        let row_bytes = framebuffer.width as usize * FRAMEBUFFER_BYTES_PER_PIXEL as usize;
+
+        for y in 0..framebuffer.height as usize {
+            // SAFETY: every row of the framebuffer is pitch bytes apart and holds width pixels
+            unsafe {
+                let row_ptr = framebuffer_ptr
+                    .add(y * framebuffer.pitch as usize)
+                    .cast::<u32>();
+                core::slice::from_raw_parts_mut(row_ptr, row_bytes / size_of::<u32>())
+                    .fill(CLEAR_COLOR_XRGB);
+            }
+        }
+    }
+
     //TODO:compositor should own the framebuffer
     //TODO: alpha blending
     pub fn compose(&mut self, framebuffer: &mut FrameBufferTarget) {
@@ -687,7 +704,9 @@ impl Compositor {
         );
         // serial_println!("Composing frame with {} visible windows", visible_windows.len());
 
-        // TODO: clear the framebuffer
+        if self.needs_framebuffer_clear.swap(false, Ordering::AcqRel) {
+            Self::clear_framebuffer(framebuffer);
+        }
 
         for window in visible_windows {
             if window.is_visible {
