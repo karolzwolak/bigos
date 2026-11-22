@@ -85,6 +85,7 @@ impl From<ElfLoadError> for SyscallError {
             ElfLoadError::FileSystem(error) => Self::from(error),
             ElfLoadError::NoFilesystem => Self::NotFound,
             ElfLoadError::ImageTooLarge => Self::OutOfMemory,
+            ElfLoadError::NotExecutable => Self::PermissionDenied,
             ElfLoadError::InvalidMagic
             | ElfLoadError::InvalidHeader
             | ElfLoadError::InvalidArch
@@ -644,9 +645,15 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             {
                 w.buffer.present();
             }
-            //serial_println_core!("sys_present_window: window_id={} presented", window_id);
             drop(windows);
             drop(compositor);
+
+            // userspace flips its back buffer pointer once per present, returning before the swap
+            // would let it draw into the buffer that is on screen
+            crate::process::wait::block_current_thread_until_event(
+                &crate::process::wait::WINDOW_SWAP_WAIT_QUEUE,
+                || !crate::graphics::compositor::get_compositor().is_present_pending(window_id),
+            );
             Ok(0)
         }
         SyscallNumber::GetWindowSize => {

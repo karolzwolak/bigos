@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ./scripts/create_disk_image.sh -i <template_dir> -o <output_file> [-s <size_mb>] [-p <pattern_bytes>]
+# Usage: ./scripts/create_disk_image.sh -i <template_dir> -o <output_file> [-s <size_mb>] [-p <pattern_bytes>] [-x <dir>]... [-r <file>]...
 set -euo pipefail
 
 VOLUME_LABEL="BIGOS"
@@ -10,22 +10,28 @@ INPUT_TEMPLATE=""
 OUTPUT=""
 SIZE_MB=64
 PATTERN_BYTES=0
+EXECUTABLE_DIRS=()
+READ_ONLY_FILES=()
 
 usage() {
-    echo "Usage: $0 -i <template_dir> -o <output_file> [-s <size_mb>] [-p <pattern_bytes>]"
+    echo "Usage: $0 -i <template_dir> -o <output_file> [-s <size_mb>] [-p <pattern_bytes>] [-x <dir>]... [-r <file>]..."
     echo "  -i  Template directory copied into the image root (required)"
     echo "  -o  Output image path (required)"
     echo "  -s  Image size in MiB (default: ${SIZE_MB})"
     echo "  -p  Also create ${PATTERN_FILE_NAME} of this many bytes, byte i = i % ${PATTERN_PERIOD}"
+    echo "  -x  Make every file in this template directory r-x (FAT ReadOnly + System, bigOS reads System as execute)"
+    echo "  -r  Make this template file r-- (FAT ReadOnly)"
     echo "  -h  Show this help message"
 }
 
-while getopts "i:o:s:p:h" opt; do
+while getopts "i:o:s:p:x:r:h" opt; do
     case $opt in
         i) INPUT_TEMPLATE="$OPTARG" ;;
         o) OUTPUT="$OPTARG" ;;
         s) SIZE_MB="$OPTARG" ;;
         p) PATTERN_BYTES="$OPTARG" ;;
+        x) EXECUTABLE_DIRS+=("$OPTARG") ;;
+        r) READ_ONLY_FILES+=("$OPTARG") ;;
         h) usage; exit 0 ;;
         *) usage >&2; exit 1 ;;
     esac
@@ -77,6 +83,19 @@ copy_to_image() {
 }
 
 copy_to_image "$INPUT_TEMPLATE" "::"
+
+for dir in "${EXECUTABLE_DIRS[@]+"${EXECUTABLE_DIRS[@]}"}"; do
+    for item in "$INPUT_TEMPLATE/$dir"/*; do
+        [ -f "$item" ] || continue
+        mattrib -i "$OUTPUT" +r +s "::/${dir}/$(basename "$item")"
+    done
+    echo "  Marked the files in ${dir} r-x"
+done
+
+for file in "${READ_ONLY_FILES[@]+"${READ_ONLY_FILES[@]}"}"; do
+    mattrib -i "$OUTPUT" +r "::/${file}"
+    echo "  Marked ${file} r--"
+done
 
 if [ "$PATTERN_BYTES" -gt 0 ]; then
     PATTERN_TMP=$(mktemp -d)

@@ -10,7 +10,7 @@ pub enum FatFileAttributes {
     None = 0x00,
     ReadOnly = 0x01,  // reject changes to the file (write, delete, rename)
     Hidden = 0x02,    // listing should hide the file unless -a flag
-    System = 0x04,    // indicates that its a system file (means nothing for now)
+    System = 0x04,    // indicates that its a system file, bigOS reads it as the execute permission
     VolumeId = 0x08, // indicates that this entry has the volume label of the volume, only one such entry can exist in the root directory
     Directory = 0x10, // indicates that this entry is a directory, otherwise its a file
     Archive = 0x20, // for backup utilities - Set by FAT driver on new creation, or when modifying/renaming the file. The backup utilities able to easily find the file to be backed up and it clears the attribute after the back up process

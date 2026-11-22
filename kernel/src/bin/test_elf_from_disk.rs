@@ -24,8 +24,9 @@ const BUSYLOOP_PATH: &str = "/BIN/busyloop";
 const MISSING_PATH: &str = "/BIN/nope";
 const DIRECTORY_PATH: &str = "/BIN";
 const LONG_NAME_PATH: &str = "/BIN/toolongname";
-const SHORT_TEXT_PATH: &str = "/HELLO.TXT";
-const NOT_ELF_PATH: &str = "/BIG.BIN";
+const NOT_EXECUTABLE_PATH: &str = "/HELLO.TXT";
+const SHORT_TEXT_PATH: &str = "/BIN/SHORT.TXT";
+const NOT_ELF_PATH: &str = "/BIN/NOTELF.BIN";
 const HEADER_ONLY_PATH: &str = "/BIN/HDRONLY.ELF";
 const TRUNCATED_PATH: &str = "/BIN/TRUNC.ELF";
 
@@ -115,6 +116,9 @@ fn test_path_and_file_errors() {
             error,
             ElfLoadError::FileSystem(FileSystemError::InvalidFilename)
         )
+    });
+    expect_error(NOT_EXECUTABLE_PATH, |error| {
+        matches!(error, ElfLoadError::NotExecutable)
     });
     expect_error(SHORT_TEXT_PATH, |error| {
         matches!(error, ElfLoadError::Truncated)

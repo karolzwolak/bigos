@@ -1,5 +1,5 @@
 use crate::filesystem::fat32::FileNodeHandle;
-use crate::filesystem::vfs::{FileSystemError, VFS, Vfs};
+use crate::filesystem::vfs::{FileAttributes, FileSystemError, VFS, Vfs};
 use crate::memory::paging::PAGE_SIZE;
 use crate::process::PROCESS_USER_VADDR_ALLOC_START;
 use alloc::vec::Vec;
@@ -65,6 +65,7 @@ pub enum ElfLoadError {
     TooManyProgramHeaders,
     SegmentOutOfBounds,
     ImageTooLarge,
+    NotExecutable,
 }
 
 impl From<elf::ParseError> for ElfLoadError {
@@ -256,6 +257,9 @@ impl ElfLoadInfo {
     /// Loads an ELF through the VFS and never reads more than the headers and the segments
     pub fn from_vfs(vfs: &mut Vfs, path: &str) -> Result<Self, ElfLoadError> {
         let node = vfs.open_file(path)?;
+        if !node.attributes.contains(FileAttributes::EXECUTE) {
+            return Err(ElfLoadError::NotExecutable);
+        }
         let file_size = node.size as u64;
 
         let mut header_bytes = [0u8; ELF64_HEADER_SIZE];

@@ -35,7 +35,7 @@ const DETACHED_NAME: &str = "treeleaf";
 const PROGRAM_PRIORITY: u8 = 5;
 const STARTUP_DEADLINE_US: u64 = 5_000_000;
 const DEADLINE_US: u64 = 20_000_000;
-const EXPECTED_PASSED_CHECKS: u32 = 19;
+const EXPECTED_PASSED_CHECKS: u32 = 20;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {

@@ -155,6 +155,9 @@ pub fn sleep_current_thread_ms(duration_ms: u64) {
 /// Woken whenever input reaches the event buffer of a window
 pub static INPUT_WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
+/// Woken after the compositor swapped window buffers, PresentWindow callers recheck their window
+pub static WINDOW_SWAP_WAIT_QUEUE: WaitQueue = WaitQueue::new();
+
 /// Woken by FutexWake, waiters recheck the word they sleep on
 pub static FUTEX_WAIT_QUEUE: WaitQueue = WaitQueue::new();
 

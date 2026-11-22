@@ -157,12 +157,18 @@ fn to_fat32_name(name: &str) -> FileSystemResult<[u8; MAX_FULL_NAME_LENGTH]> {
 
 const fn file_attributes_from_fat_attributes(fat_attributes: u8) -> FileAttributes {
     if is_directory(fat_attributes) {
-        FileAttributes::DIR_DEFAULT
-    } else if fat_attributes & FatFileAttributes::ReadOnly as u8 == 0 {
-        FileAttributes::FILE_READ_WRITE
-    } else {
-        FileAttributes::FILE_READONLY
+        return FileAttributes::DIR_DEFAULT;
     }
+
+    let mut attributes = FileAttributes::READ;
+    if fat_attributes & FatFileAttributes::ReadOnly as u8 == 0 {
+        attributes = attributes.union(FileAttributes::WRITE);
+    }
+    if fat_attributes & FatFileAttributes::System as u8 != 0 {
+        attributes = attributes.union(FileAttributes::EXECUTE);
+    }
+
+    attributes
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
@@ -949,6 +955,9 @@ impl Fat32Driver {
 
         let parent_cluster = decode_node_id(node_id).parent_cluster;
         let (mut entry, entry_index) = self.load_entry(node_id)?;
+        if entry.attributes & FatFileAttributes::ReadOnly as u8 != 0 {
+            return Err(FileSystemError::PermissionDenied);
+        }
         let first_cluster = entry.get_first_cluster();
 
         if entry.is_directory() {

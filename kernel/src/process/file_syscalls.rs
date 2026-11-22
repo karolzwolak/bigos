@@ -1,4 +1,5 @@
 use crate::filesystem::fat32::direntry::{MAX_EXT_LENGTH, MAX_NAME_LENGTH};
+use crate::filesystem::vfs::FileAttributes;
 use crate::filesystem::{FileNode, FileType, get_vfs};
 use crate::process::process_manager::PROCESS_MANAGER;
 use crate::process::syscall::{SyscallError, SyscallFrame};
@@ -82,6 +83,9 @@ pub fn open_file(frame: &SyscallFrame) -> Result<u64, SyscallError> {
     }
 
     let node = get_vfs().open_file(path.as_str())?;
+    if flags & FD_FLAG_WRITE as u64 != 0 && !node.attributes.contains(FileAttributes::WRITE) {
+        return Err(SyscallError::PermissionDenied);
+    }
 
     let mut process_manager = PROCESS_MANAGER.lock();
     let process = process_manager
