@@ -10,6 +10,8 @@ use spin::Mutex;
 use x86_64::structures::paging::PageTableFlags;
 
 pub mod channel;
+pub mod fe;
+pub mod fs;
 pub mod gfx;
 pub mod job;
 pub mod shell;
@@ -879,7 +881,8 @@ pub fn sys_map_window_buffer(window_id: u32) -> Result<*mut u32, SyscallError> {
         .map(|addr| addr as *mut u32)
 }
 
-/// Signal the kernel that the back buffer is ready to be presented.
+/// Signal the kernel that the back buffer is ready to be presented
+/// Returns once the compositor swapped it in, the other buffer is then the back buffer
 #[inline(always)]
 pub fn sys_present_window(window_id: u32) {
     unsafe { syscall1(SYS_PRESENT_WINDOW, window_id as u64) };

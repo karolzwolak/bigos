@@ -3,8 +3,8 @@
 
 use core::fmt::Write;
 use core::sync::atomic::Ordering;
+use rustspace::fs::path::FsPath;
 use rustspace::shell::history::{CommandHistory, HISTORY_CAPACITY, HISTORY_ENTRY_MAX_BYTES};
-use rustspace::shell::path::ShellPath;
 use rustspace::shell::{
     CommandAction, EXIT_CODE_FAILURE, EXIT_CODE_SUCCESS, EXIT_CODE_TERMINATED, ShellOutput,
     ShellState, run_command_line,
@@ -44,6 +44,8 @@ const CHILD_EXIT_ARGC: u32 = 2;
 const CHILD_HANG_ARGS: &[u8] = b"hang\x00";
 const CHILD_HANG_ARGC: u32 = 1;
 const HANG_SLEEP_MS: u64 = 1000;
+const INTERRUPT_POLL_MS: u64 = 10;
+const INTERRUPT_POLL_LIMIT: usize = 500;
 const MISSING_PID: u32 = 1_000_000;
 // the child takes the priority of the test through INHERIT_PRIORITY
 const IGNORED_PRIORITY: u8 = 0;
@@ -200,9 +202,9 @@ impl Shell {
 }
 
 fn check_paths() {
-    let root = ShellPath::ROOT_DIR_PATH;
-    let resolve = |cwd: &ShellPath, input: &str| {
-        ShellPath::resolve_from_cwd(cwd, input).unwrap_or(ShellPath::ROOT_DIR_PATH)
+    let root = FsPath::ROOT_DIR_PATH;
+    let resolve = |cwd: &FsPath, input: &str| {
+        FsPath::resolve_from_cwd(cwd, input).unwrap_or(FsPath::ROOT_DIR_PATH)
     };
 
     check("root is /", root.as_str() == "/");
@@ -221,7 +223,7 @@ fn check_paths() {
 
     let mut too_long = root;
     let mut overflowed = false;
-    for _ in 0..rustspace::shell::path::MAX_PATH_BYTES {
+    for _ in 0..rustspace::fs::path::MAX_PATH_BYTES {
         overflowed |= too_long.push_component("abcdefgh").is_err();
     }
     check("a path past the limit is refused", overflowed);
@@ -451,6 +453,37 @@ impl TestTerminal {
     }
 }
 
+fn ctrl_c(term: &mut TestTerminal) {
+    term.terminal
+        .handle_event(char_event('c', KeyModifiers::LCTRL));
+}
+
+fn check_terminal_interrupt() {
+    let mut term = TestTerminal::new();
+    term.type_text(b"ls /");
+    ctrl_c(&mut term);
+    check("ctrl+c drops the typed line", term.is_at(b"", 0));
+
+    check(
+        "start a job that hangs",
+        term.terminal.job.start_program(OWN_PATH, MODE_HANG).is_ok(),
+    );
+    ctrl_c(&mut term);
+    for _ in 0..INTERRUPT_POLL_LIMIT {
+        term.terminal.poll_job();
+        if !term.terminal.job.is_running() {
+            break;
+        }
+        sys_sleep_ms(INTERRUPT_POLL_MS);
+    }
+    check("ctrl+c ends the job", !term.terminal.job.is_running());
+    check(
+        "the job counts as terminated",
+        term.terminal.shell_state.last_exit_code == EXIT_CODE_TERMINATED,
+    );
+    check("a new prompt follows the job", term.is_at(b"", 0));
+}
+
 fn check_terminal_cursor() {
     let mut term = TestTerminal::new();
     let none = KeyModifiers::empty();
@@ -651,6 +684,14 @@ fn check_listing(shell: &mut Shell) {
     for line in ["A.TXT", "B.TXT", "NEW.TXT", "BIG.BIN", "SUB/"] {
         check(line, shell.capture.has_line(line));
     }
+    check(
+        "ls lists directories first, then names in order",
+        shell
+            .capture
+            .as_str()
+            .lines()
+            .eq(["SUB/", "A.TXT", "B.TXT", "BIG.BIN", "NEW.TXT"]),
+    );
 
     shell.run("ls -l");
     check(
@@ -900,6 +941,7 @@ fn run_checks() -> ! {
     check_history();
     check_line_editing();
     check_terminal_cursor();
+    check_terminal_interrupt();
     check_directories(&mut shell);
     check_files(&mut shell);
     check_copy(&mut shell);

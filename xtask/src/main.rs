@@ -34,6 +34,7 @@ fn kernel_max_cores(root: &Path) -> u8 {
 
 const QEMU_TIMEZONE: &str = "Etc/GMT-1";
 const QEMU_RTC_ARGS: [&str; 2] = ["-rtc", "base=localtime"];
+const QEMU_DISPLAY_ARGS: [&str; 4] = ["-vga", "none", "-device", "VGA,edid=on,xres=1400,yres=900"];
 
 fn qemu_smp_arg(root: &Path) -> String {
     let cores = kernel_max_cores(root);
@@ -151,6 +152,11 @@ const DISK_STAGING_DIR: &str = "target/disk_staging";
 const DISK_BIN_DIR: &str = "BIN";
 const HEADER_ONLY_ELF_NAME: &str = "HDRONLY.ELF";
 const TRUNCATED_ELF_NAME: &str = "TRUNC.ELF";
+/// executable files that are not ELFs, so loading them reaches the ELF checks
+const SHORT_TEXT_EXEC_NAME: &str = "SHORT.TXT";
+const SHORT_TEXT_EXEC_CONTENT: &[u8] = b"not a program\n";
+const NOT_ELF_EXEC_NAME: &str = "NOTELF.BIN";
+const NOT_ELF_EXEC_BYTES: usize = 4096;
 const TRUNCATION_SOURCE_BIN: &str = "rust1st";
 const HEADER_ONLY_ELF_BYTES: usize = 32;
 const ELF64_PHOFF_OFFSET: usize = 0x20;
@@ -265,6 +271,12 @@ fn stage_disk_contents(root: &Path, template_dir: &Path, staging_dir: &Path, is_
             &source[..truncated_elf_length(&source)],
         )
         .unwrap();
+        fs::write(bin_dir.join(SHORT_TEXT_EXEC_NAME), SHORT_TEXT_EXEC_CONTENT).unwrap();
+        fs::write(
+            bin_dir.join(NOT_ELF_EXEC_NAME),
+            vec![b'x'; NOT_ELF_EXEC_BYTES],
+        )
+        .unwrap();
     }
 }
 
@@ -308,7 +320,12 @@ fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u
         .arg(&staging_dir)
         .arg("-o")
         .arg(&output_path)
-        .args(["-s", &DISK_IMAGE_SIZE_MB.to_string()]);
+        .args(["-s", &DISK_IMAGE_SIZE_MB.to_string()])
+        // programs are r-x, game data r--, everything else stays rw-
+        .args(["-x", DISK_BIN_DIR]);
+    if staging_dir.join(DOOM_WAD_DISK_NAME).exists() {
+        cmd.args(["-r", DOOM_WAD_DISK_NAME]);
+    }
     if pattern_bytes > 0 {
         cmd.args(["-p", &pattern_bytes.to_string()]);
     }
@@ -318,7 +335,8 @@ fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u
 const DISK_AIO_ENV: &str = "BIGOS_DISK_AIO";
 const DEFAULT_DISK_AIO: &str = "io_uring";
 const TEST_DISK_COPY_DIR: &str = "target/test_disks";
-const FSCK_TEST_PREFIXES: [&str; 3] = ["test_fs", "test_user_fs", "test_user_shell"];
+const FSCK_TEST_PREFIXES: [&str; 4] =
+    ["test_fs", "test_user_fs", "test_user_shell", "test_user_fe"];
 
 /// QEMU arguments that attach the disk image as a modern virtio-blk PCI device
 fn disk_qemu_args(image: &Path) -> Vec<String> {
@@ -1397,7 +1415,9 @@ fn run_iso(root: &Path, accel: QemuAccel) {
         kernel_max_cores(root)
     );
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.env("TZ", QEMU_TIMEZONE).args(QEMU_RTC_ARGS);
+    cmd.env("TZ", QEMU_TIMEZONE)
+        .args(QEMU_RTC_ARGS)
+        .args(QEMU_DISPLAY_ARGS);
 
     cmd.args([
         "-M",
@@ -1449,7 +1469,9 @@ fn run_nologs(root: &Path) {
         kernel_max_cores(root)
     );
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.env("TZ", QEMU_TIMEZONE).args(QEMU_RTC_ARGS);
+    cmd.env("TZ", QEMU_TIMEZONE)
+        .args(QEMU_RTC_ARGS)
+        .args(QEMU_DISPLAY_ARGS);
     cmd.args([
         "-M",
         "q35",

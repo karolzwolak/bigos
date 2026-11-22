@@ -1,21 +1,22 @@
 #![allow(clippy::result_large_err)]
 
 pub mod history;
-pub mod path;
 
+use crate::fs::dir_listing::{DirListing, ParentEntry};
+use crate::fs::path::{CURRENT_DIR_NAME, FsPath, PARENT_DIR_NAME};
+use crate::fs::time::DateTime;
+use crate::fs::{EntryMode, LIST_PAGE_ENTRIES_COUNT, stat_path};
 use crate::{
     ChildPolicy, CpuInfoFlat, DirEntryFlat, FD_FLAG_READ, FD_FLAG_WRITE, File, FileAttributes,
-    NO_PARENT_PID, PROCESS_NO_CORE_ASSIGNED, ProcessDetailsFlat, ProcessRunState, StatFlat,
-    SyscallError, sys_create_dir, sys_create_file, sys_delete, sys_get_cpu_info,
-    sys_get_process_info, sys_list_dir, sys_shutdown, sys_stat_file, sys_terminate_process,
+    NO_PARENT_PID, PROCESS_NO_CORE_ASSIGNED, ProcessDetailsFlat, ProcessRunState, SyscallError,
+    sys_create_dir, sys_create_file, sys_delete, sys_get_cpu_info, sys_get_process_info,
+    sys_list_dir, sys_shutdown, sys_terminate_process,
 };
 use core::fmt::Write;
-use path::ShellPath;
 
 const BIN_DIR_NAME: &str = "BIN";
 const MAX_COMMAND_ARGUMENTS: usize = 32;
 const COPY_CHUNK_BYTES: usize = 4096;
-const LIST_PAGE_ENTRIES: usize = 16;
 const SIZE_COLUMN_WIDTH: usize = 10;
 const DETAIL_LABEL_WIDTH: usize = 11;
 const BYTES_PER_KIB: u64 = 1024;
@@ -43,8 +44,6 @@ const OPTION_LONG: &str = "-l";
 const OPTION_RECURSIVE: &str = "-r";
 const OPTION_ORPHAN: &str = "-o";
 const PATH_SEPARATOR: char = '/';
-const CURRENT_DIR: &str = ".";
-const PARENT_DIR: &str = "..";
 const UNPRINTABLE_REPLACEMENT: u8 = b'?';
 
 const VENDOR_NAMES: [&str; 3] = ["unknown", "Intel", "AMD"];
@@ -73,14 +72,14 @@ pub trait ShellOutput: Write {
 
 #[derive(Clone, Copy)]
 pub struct ShellState {
-    pub cwd: ShellPath,
+    pub cwd: FsPath,
     pub last_exit_code: i32,
 }
 
 impl ShellState {
     pub const fn new() -> Self {
         Self {
-            cwd: ShellPath::ROOT_DIR_PATH,
+            cwd: FsPath::ROOT_DIR_PATH,
             last_exit_code: EXIT_CODE_SUCCESS,
         }
     }
@@ -109,7 +108,7 @@ pub enum CommandAction<'a> {
     ClearScreen,
     StartProgram {
         name: &'a str,
-        path: ShellPath,
+        path: FsPath,
         args: &'a str,
     },
 }
@@ -186,19 +185,13 @@ pub fn find_builtin(name: &str) -> Option<&'static BuiltinInfo> {
 #[allow(clippy::large_enum_variant)]
 enum CommandError {
     Usage,
-    Path {
-        path: ShellPath,
-        error: SyscallError,
-    },
-    Process {
-        pid: usize,
-        error: SyscallError,
-    },
+    Path { path: FsPath, error: SyscallError },
+    Process { pid: usize, error: SyscallError },
     Syscall(SyscallError),
     Message(&'static str),
 }
 
-fn path_error(path: &ShellPath) -> impl FnOnce(SyscallError) -> CommandError + '_ {
+fn path_error(path: &FsPath) -> impl FnOnce(SyscallError) -> CommandError + '_ {
     move |error| CommandError::Path { path: *path, error }
 }
 
@@ -311,13 +304,14 @@ fn run_program<'a, O: ShellOutput>(
     args: &'a str,
     out: &mut O,
 ) -> CommandAction<'a> {
-    let resolved = if name.contains(PATH_SEPARATOR) || name == CURRENT_DIR || name == PARENT_DIR {
-        ShellPath::resolve_from_cwd(&state.cwd, name)
-    } else {
-        ShellPath::ROOT_DIR_PATH
-            .child_absolute_path(BIN_DIR_NAME)
-            .and_then(|bin_dir| bin_dir.child_absolute_path(name))
-    };
+    let resolved =
+        if name.contains(PATH_SEPARATOR) || name == CURRENT_DIR_NAME || name == PARENT_DIR_NAME {
+            FsPath::resolve_from_cwd(&state.cwd, name)
+        } else {
+            FsPath::ROOT_DIR_PATH
+                .child_absolute_path(BIN_DIR_NAME)
+                .and_then(|bin_dir| bin_dir.child_absolute_path(name))
+        };
 
     match resolved {
         Ok(path) => CommandAction::StartProgram { name, path, args },
@@ -422,32 +416,18 @@ fn execute_command<O: ShellOutput>(
 fn do_for_each_path(
     state: &ShellState,
     args: &[&str],
-    mut action: impl FnMut(&ShellPath) -> Result<(), CommandError>,
+    mut action: impl FnMut(&FsPath) -> Result<(), CommandError>,
 ) -> Result<(), CommandError> {
     if args.is_empty() || args.iter().any(|arg| arg.starts_with(OPTION_PREFIX)) {
         return Err(CommandError::Usage);
     }
 
     for arg in args {
-        let path = ShellPath::resolve_from_cwd(&state.cwd, arg).map_err(CommandError::Syscall)?;
+        let path = FsPath::resolve_from_cwd(&state.cwd, arg).map_err(CommandError::Syscall)?;
         action(&path)?;
     }
 
     Ok(())
-}
-
-fn stat_path(path: &ShellPath) -> Result<StatFlat, SyscallError> {
-    if path.is_root() {
-        let mut root = StatFlat::zeroed();
-        root.is_dir = 1;
-        root.attributes = FileAttributes::DIR_DEFAULT.bits();
-        return Ok(root);
-    }
-
-    let mut stat = StatFlat::zeroed();
-    sys_stat_file(path.as_str(), &mut stat)?;
-
-    Ok(stat)
 }
 
 fn help<O: ShellOutput>(out: &mut O) {
@@ -462,8 +442,8 @@ fn help<O: ShellOutput>(out: &mut O) {
 
 fn cd(state: &mut ShellState, args: &[&str]) -> Result<(), CommandError> {
     let target = match args {
-        [] => ShellPath::ROOT_DIR_PATH,
-        [path] => ShellPath::resolve_from_cwd(&state.cwd, path).map_err(CommandError::Syscall)?,
+        [] => FsPath::ROOT_DIR_PATH,
+        [path] => FsPath::resolve_from_cwd(&state.cwd, path).map_err(CommandError::Syscall)?,
         _ => return Err(CommandError::Usage),
     };
 
@@ -476,10 +456,6 @@ fn cd(state: &mut ShellState, args: &[&str]) -> Result<(), CommandError> {
     Ok(())
 }
 
-const fn permission_char(attributes: FileAttributes, flag: FileAttributes, set: char) -> char {
-    if attributes.contains(flag) { set } else { '-' }
-}
-
 fn write_direntry<O: ShellOutput>(
     out: &mut O,
     name: &str,
@@ -490,14 +466,10 @@ fn write_direntry<O: ShellOutput>(
 ) {
     let dir_suffix = if is_dir { "/" } else { "" };
     let _ = if long {
-        let kind = if is_dir { 'd' } else { '-' };
         writeln!(
             out,
-            "{}{}{}{} {:>width$} {}{}",
-            kind,
-            permission_char(attributes, FileAttributes::READ, 'r'),
-            permission_char(attributes, FileAttributes::WRITE, 'w'),
-            permission_char(attributes, FileAttributes::EXECUTE, 'x'),
+            "{} {:>width$} {}{}",
+            EntryMode::new(is_dir, attributes),
             size,
             name,
             dir_suffix,
@@ -516,7 +488,7 @@ fn ls<O: ShellOutput>(state: &ShellState, args: &[&str], out: &mut O) -> Result<
     let path = match paths {
         [] => state.cwd,
         [path] if !path.starts_with(OPTION_PREFIX) => {
-            ShellPath::resolve_from_cwd(&state.cwd, path).map_err(CommandError::Syscall)?
+            FsPath::resolve_from_cwd(&state.cwd, path).map_err(CommandError::Syscall)?
         }
         _ => return Err(CommandError::Usage),
     };
@@ -534,30 +506,25 @@ fn ls<O: ShellOutput>(state: &ShellState, args: &[&str], out: &mut O) -> Result<
         return Ok(());
     }
 
-    let mut entries = [DirEntryFlat::zeroed(); LIST_PAGE_ENTRIES];
-    let mut start_index = 0;
-    loop {
-        let listed =
-            sys_list_dir(path.as_str(), start_index, &mut entries).map_err(path_error(&path))?;
-        for entry in &entries[..listed] {
-            write_direntry(
-                out,
-                entry.name_str(),
-                entry.is_dir != 0,
-                entry.attributes(),
-                entry.size,
-                long,
-            );
-        }
-
-        if listed < LIST_PAGE_ENTRIES {
-            return Ok(());
-        }
-        start_index += listed;
+    let mut listing = DirListing::new();
+    listing
+        .load(&path, ParentEntry::Skip)
+        .map_err(path_error(&path))?;
+    for entry in &listing.entries {
+        write_direntry(
+            out,
+            entry.name_str(),
+            entry.is_dir != 0,
+            entry.attributes(),
+            entry.size,
+            long,
+        );
     }
+
+    Ok(())
 }
 
-fn cat<O: ShellOutput>(path: &ShellPath, out: &mut O) -> Result<(), CommandError> {
+fn cat<O: ShellOutput>(path: &FsPath, out: &mut O) -> Result<(), CommandError> {
     let mut file = File::open(path.as_str(), FD_FLAG_READ).map_err(path_error(path))?;
     let mut chunk = [0u8; COPY_CHUNK_BYTES];
 
@@ -570,8 +537,8 @@ fn cat<O: ShellOutput>(path: &ShellPath, out: &mut O) -> Result<(), CommandError
     }
 }
 
-fn delete_file_tree(path: &ShellPath) -> Result<(), CommandError> {
-    let mut entries = [DirEntryFlat::zeroed(); LIST_PAGE_ENTRIES];
+fn delete_file_tree(path: &FsPath) -> Result<(), CommandError> {
+    let mut entries = [DirEntryFlat::zeroed(); LIST_PAGE_ENTRIES_COUNT];
 
     loop {
         let listed = sys_list_dir(path.as_str(), 0, &mut entries).map_err(path_error(path))?;
@@ -624,14 +591,13 @@ fn cp(state: &ShellState, args: &[&str]) -> Result<(), CommandError> {
         return Err(CommandError::Usage);
     }
 
-    let source = ShellPath::resolve_from_cwd(&state.cwd, source).map_err(CommandError::Syscall)?;
+    let source = FsPath::resolve_from_cwd(&state.cwd, source).map_err(CommandError::Syscall)?;
     let source_stat = stat_path(&source).map_err(path_error(&source))?;
     if source_stat.is_dir != 0 {
         return Err(path_error(&source)(SyscallError::IS_A_DIRECTORY));
     }
 
-    let mut target =
-        ShellPath::resolve_from_cwd(&state.cwd, target).map_err(CommandError::Syscall)?;
+    let mut target = FsPath::resolve_from_cwd(&state.cwd, target).map_err(CommandError::Syscall)?;
     let mut target_stat = stat_path(&target);
     if let Ok(stat) = target_stat
         && stat.is_dir != 0
@@ -675,59 +641,17 @@ fn cp(state: &ShellState, args: &[&str]) -> Result<(), CommandError> {
     }
 }
 
-// Howard Hinnant's date algorithms
-fn datetime_from_unix_seconds(unix_seconds: u32) -> (u32, u32, u32, u32, u32, u32) {
-    const SECONDS_PER_DAY: u32 = 86_400;
-    const SECONDS_PER_HOUR: u32 = 3600;
-    const SECONDS_PER_MINUTE: u32 = 60;
-    const UNIX_EPOCH_SHIFT_DAYS: u32 = 719468;
-    const DAYS_PER_ERA: u32 = 146097;
-    const YEARS_PER_ERA: u32 = 400;
-
-    let days = unix_seconds / SECONDS_PER_DAY + UNIX_EPOCH_SHIFT_DAYS;
-    let second_of_day = unix_seconds % SECONDS_PER_DAY;
-
-    let era = days / DAYS_PER_ERA;
-    let day_of_era = days - era * DAYS_PER_ERA;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / (DAYS_PER_ERA - 1)) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    let year = year_of_era + era * YEARS_PER_ERA + (month <= 2) as u32;
-
-    (
-        year,
-        month,
-        day,
-        second_of_day / SECONDS_PER_HOUR,
-        second_of_day % SECONDS_PER_HOUR / SECONDS_PER_MINUTE,
-        second_of_day % SECONDS_PER_MINUTE,
-    )
-}
-
 fn write_time<O: ShellOutput>(out: &mut O, label: &str, unix_seconds: u32) {
-    let (year, month, day, hour, minute, second) = datetime_from_unix_seconds(unix_seconds);
     let _ = writeln!(
         out,
-        "{:<width$}{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        "{:<width$}{}",
         label,
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
+        DateTime::from_unix_seconds(unix_seconds),
         width = DETAIL_LABEL_WIDTH
     );
 }
 
-fn stat<O: ShellOutput>(path: &ShellPath, out: &mut O) -> Result<(), CommandError> {
+fn stat<O: ShellOutput>(path: &FsPath, out: &mut O) -> Result<(), CommandError> {
     let stat = stat_path(path).map_err(path_error(path))?;
     let kind = if stat.is_dir != 0 {
         "directory"

@@ -1,6 +1,6 @@
 use super::do_for_each_dir_entry;
 use super::path::{FsPath, PARENT_DIR_NAME};
-use crate::{DirEntryFlat, FileAttributes, SyscallError, FS_NAME_LEN};
+use crate::{DirEntryFlat, FS_NAME_LEN, FileAttributes, SyscallError};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 

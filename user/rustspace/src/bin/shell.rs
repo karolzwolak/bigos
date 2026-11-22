@@ -13,6 +13,9 @@ use rustspace::{
 };
 use x86_64::structures::paging::PageTableFlags;
 
+const WINDOW_BUFFER_COUNT: u8 = 2;
+const JOB_POLL_INTERVAL_MS: u64 = 10;
+
 global_asm!(
     ".section .text.entry",
     ".global _start",
@@ -97,27 +100,28 @@ pub extern "C" fn main() -> ! {
 
     rustspace::sys_yield();
 
-    let mut frame: u32 = 0;
+    let mut buffers_to_redraw: u8 = 0;
     loop {
-        loop {
-            let event = event_reader.try_read(window_id);
-            match event {
-                Some(event) => shell.handle_event(event),
-                None => break,
-            }
+        while let Some(event) = event_reader.try_read(window_id) {
+            shell.handle_event(event);
         }
         shell.poll_job();
 
-        let backbuffer_redraw_required = shell.needs_redraw;
         if shell.needs_redraw {
-            shell.render();
             shell.needs_redraw = false;
+            buffers_to_redraw = WINDOW_BUFFER_COUNT;
         }
-        rustspace::sys_present_window(window_id);
-        shell.draw_target.swap();
-        shell.needs_redraw = backbuffer_redraw_required;
 
-        frame = frame.wrapping_add(1);
+        if buffers_to_redraw > 0 {
+            shell.render();
+            rustspace::sys_present_window(window_id);
+            shell.draw_target.swap();
+            buffers_to_redraw -= 1;
+        } else if shell.job.is_running() {
+            rustspace::sys_sleep_ms(JOB_POLL_INTERVAL_MS);
+        } else {
+            rustspace::sys_wait_for_input();
+        }
     }
 
     // unsafe { rustspace::sys_exit(0) };

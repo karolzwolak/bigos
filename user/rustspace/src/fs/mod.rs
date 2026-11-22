@@ -2,7 +2,7 @@ pub mod dir_listing;
 pub mod path;
 pub mod time;
 
-use crate::{sys_list_dir, sys_stat_file, DirEntryFlat, FileAttributes, StatFlat, SyscallError};
+use crate::{DirEntryFlat, FileAttributes, StatFlat, SyscallError, sys_list_dir, sys_stat_file};
 use path::FsPath;
 
 /// Directory entries fetched per ListDir call
@@ -60,11 +60,7 @@ impl EntryMode {
 
     pub const fn chars(self) -> [u8; Self::TEXT_LEN] {
         const fn flag_char(attributes: FileAttributes, flag: FileAttributes, set: u8) -> u8 {
-            if attributes.contains(flag) {
-                set
-            } else {
-                b'-'
-            }
+            if attributes.contains(flag) { set } else { b'-' }
         }
 
         [

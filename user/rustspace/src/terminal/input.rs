@@ -38,6 +38,10 @@ pub enum InputAction {
     PageUp,
     PageDown,
     Escape,
+    Tab,
+    Delete,
+    /// a Ctrl chord without a binding of its own, holds the lowercase letter
+    Control(char),
     Ignore,
 }
 
@@ -91,7 +95,7 @@ pub fn translate(event: InputEvent) -> Option<InputAction> {
                         dir: ScrollDir::Down,
                         amount: ScrollAmount::Page,
                     },
-                    _ => InputAction::Ignore,
+                    other => InputAction::Control(other),
                 });
             }
 
@@ -102,6 +106,10 @@ pub fn translate(event: InputEvent) -> Option<InputAction> {
                 crate::AsciiChar::NEWLINE | crate::AsciiChar::CARRIAGE_RETURN => {
                     Some(InputAction::Enter)
                 }
+                // the keyboard layout decodes these keys to chars, not raw keys
+                crate::AsciiChar::ESCAPE => Some(InputAction::Escape),
+                crate::AsciiChar::TAB => Some(InputAction::Tab),
+                crate::AsciiChar::DELETE => Some(InputAction::Delete),
                 c if !c.is_control() => Some(InputAction::Char(c)),
                 _ => Some(InputAction::Ignore),
             }

@@ -17,9 +17,10 @@ use crate::gfx::{color::Rgba8888UNORM, surface::UserSurface};
 use crate::job::{JobPoll, ShellJob};
 use crate::shell::history::{CommandHistory, HISTORY_ENTRY_MAX_BYTES};
 use crate::shell::{
-    self, CommandAction, EXIT_CODE_FAILURE, EXIT_CODE_NOT_FOUND, ShellOutput, ShellState,
+    self, CommandAction, EXIT_CODE_FAILURE, EXIT_CODE_NOT_FOUND, EXIT_CODE_TERMINATED, ShellOutput,
+    ShellState,
 };
-use crate::{SyscallError, sys_wait_process};
+use crate::{ChildPolicy, SyscallError, sys_terminate_process, sys_wait_process};
 use line_index::LineIndex;
 use scrollback::Scrollback;
 
@@ -42,6 +43,8 @@ const CURSOR_HEIGHT_PX: u32 = 2;
 const CURSOR_STYLE: PrimitiveStyle<Rgb888> = PrimitiveStyle::with_fill(Rgb888::WHITE);
 
 const PROMPT: &str = " > ";
+pub const INTERRUPT_CONTROL_KEY: char = 'c';
+const INTERRUPT_ECHO: &str = "^C";
 const JOB_DRAIN_CHUNK_BYTES: usize = 1024;
 /// a frame takes at most one ring of job output, so a chatty program cannot stall the window
 const JOB_DRAIN_MAX_BYTES_PER_FRAME: usize = crate::channel::STDOUT_CHANNEL_DATA_SIZE_BYTES;
@@ -790,8 +793,30 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         }
     }
 
+    /// Ctrl+C: terminates the running program, without one it drops the typed line
+    /// poll_job prints the exit code and the prompt once the program is gone
+    pub fn interrupt(&mut self) {
+        if let ShellJob::Running { pid, .. } = self.job {
+            let terminated = sys_terminate_process(
+                pid as usize,
+                EXIT_CODE_TERMINATED,
+                ChildPolicy::KillChildren,
+            );
+            if let Err(error) = terminated {
+                let _ = writeln!(self, "terminate pid {}: {}", pid, error);
+            }
+            return;
+        }
+
+        self.cursor_back = 0;
+        self.scroll_offset = 0;
+        self.write_str(INTERRUPT_ECHO);
+        self.write_prompt();
+    }
+
     fn apply_action(&mut self, action: input::InputAction) {
         match action {
+            input::InputAction::Control(INTERRUPT_CONTROL_KEY) => self.interrupt(),
             input::InputAction::Scroll { dir, amount } => match (dir, amount) {
                 (input::ScrollDir::Up, input::ScrollAmount::Page) => {
                     self.scroll_up_lines(self.viewport_rows)
@@ -844,6 +869,9 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             | input::InputAction::PageUp
             | input::InputAction::PageDown
             | input::InputAction::Escape
+            | input::InputAction::Tab
+            | input::InputAction::Delete
+            | input::InputAction::Control(_)
             | input::InputAction::Ignore => {}
         }
         self.needs_redraw = true;

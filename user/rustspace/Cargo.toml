@@ -115,3 +115,11 @@ path = "src/bin/treeroot.rs"
 [[bin]]
 name = "treeleaf"
 path = "src/bin/treeleaf.rs"
+
+[[bin]]
+name = "fe"
+path = "src/bin/fe.rs"
+
+[[bin]]
+name = "fetest"
+path = "src/bin/fetest.rs"
