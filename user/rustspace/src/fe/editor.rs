@@ -79,7 +79,7 @@ impl Editor {
 
     pub fn load(&mut self, path: &FsPath, stat: &StatFlat) -> Result<(), SyscallError> {
         let file = File::open(path.as_str(), FD_FLAG_READ)?;
-        let area = self.text.load_area_mut(stat.size as usize)?;
+        let area = self.text.prepare_file_load_area(stat.size as usize)?;
 
         let mut loaded = 0;
         while loaded < area.len() {
@@ -92,7 +92,7 @@ impl Editor {
 
         let is_binary = !area[..loaded].iter().all(|&byte| is_text_byte(byte));
         let is_whole_file = loaded < area.len();
-        self.text.set_loaded_len(loaded);
+        self.text.finish_file_load(loaded);
         let is_writable = stat.attributes().contains(FileAttributes::WRITE);
         self.access = if is_writable && !is_binary && is_whole_file {
             EditorAccess::Editable
@@ -120,7 +120,7 @@ impl Editor {
         }
 
         let mut file = File::open(self.path.as_str(), FD_FLAG_WRITE)?;
-        let (before_gap, after_gap) = self.text.segments();
+        let (before_gap, after_gap) = self.text.text_before_and_after_gap();
         write_all(&mut file, before_gap)?;
         write_all(&mut file, after_gap)?;
 
@@ -131,11 +131,11 @@ impl Editor {
     }
 
     pub fn column(&self) -> usize {
-        self.cursor - self.text.line_start(self.cursor)
+        self.cursor - self.text.line_start_at_position(self.cursor)
     }
 
     pub fn cursor_line_number(&self) -> usize {
-        let (before_gap, after_gap) = self.text.segments();
+        let (before_gap, after_gap) = self.text.text_before_and_after_gap();
         let in_before = min(self.cursor, before_gap.len());
         let in_after = self.cursor - in_before;
         let count_newlines = |bytes: &[u8]| bytes.iter().filter(|&&byte| byte == NEWLINE).count();
@@ -148,7 +148,7 @@ impl Editor {
         if !self.access.is_editable() {
             return EditResult::ReadOnly;
         }
-        if !self.text.insert(self.cursor, byte) {
+        if !self.text.insert_byte_at_position(self.cursor, byte) {
             return EditResult::OutOfMemory;
         }
 
@@ -180,7 +180,7 @@ impl Editor {
         }
 
         self.cursor -= 1;
-        self.text.remove(self.cursor);
+        self.text.remove_byte_at_position(self.cursor);
         self.is_modified = true;
         self.target_column = self.column();
 
@@ -195,7 +195,7 @@ impl Editor {
             return EditResult::Done;
         }
 
-        self.text.remove(self.cursor);
+        self.text.remove_byte_at_position(self.cursor);
         self.is_modified = true;
 
         EditResult::Done
@@ -212,37 +212,37 @@ impl Editor {
     }
 
     pub fn move_line_start(&mut self) {
-        self.cursor = self.text.line_start(self.cursor);
+        self.cursor = self.text.line_start_at_position(self.cursor);
         self.target_column = 0;
     }
 
     pub fn move_line_end(&mut self) {
-        self.cursor = self.text.line_end(self.cursor);
+        self.cursor = self.text.line_end_at_position(self.cursor);
         self.target_column = self.column();
     }
 
     pub fn move_up(&mut self, line_count: usize) {
         for _ in 0..line_count {
-            let line_start = self.text.line_start(self.cursor);
+            let line_start = self.text.line_start_at_position(self.cursor);
             if line_start == 0 {
                 return;
             }
 
             let previous_end = line_start - 1;
-            let previous_start = self.text.line_start(previous_end);
+            let previous_start = self.text.line_start_at_position(previous_end);
             self.cursor = previous_start + min(self.target_column, previous_end - previous_start);
         }
     }
 
     pub fn move_down(&mut self, line_count: usize) {
         for _ in 0..line_count {
-            let line_end = self.text.line_end(self.cursor);
+            let line_end = self.text.line_end_at_position(self.cursor);
             if line_end == self.text.len() {
                 return;
             }
 
             let next_start = line_end + 1;
-            let next_end = self.text.line_end(next_start);
+            let next_end = self.text.line_end_at_position(next_start);
             self.cursor = next_start + min(self.target_column, next_end - next_start);
         }
     }
@@ -250,19 +250,19 @@ impl Editor {
     pub fn scroll_to_cursor(&mut self, visible_rows: usize, visible_columns: usize) {
         debug_assert!(visible_rows > 0 && visible_columns > 0);
 
-        let cursor_line_start = self.text.line_start(self.cursor);
+        let cursor_line_start = self.text.line_start_at_position(self.cursor);
         if cursor_line_start < self.top_line_start {
             self.top_line_start = cursor_line_start;
         } else {
             let mut lines_below_top = 0;
             let mut line_start = self.top_line_start;
             while line_start < cursor_line_start {
-                line_start = self.text.line_end(line_start) + 1;
+                line_start = self.text.line_end_at_position(line_start) + 1;
                 lines_below_top += 1;
             }
 
             for _ in visible_rows..=lines_below_top {
-                self.top_line_start = self.text.line_end(self.top_line_start) + 1;
+                self.top_line_start = self.text.line_end_at_position(self.top_line_start) + 1;
             }
         }
 
@@ -280,7 +280,7 @@ impl Editor {
         first_row: usize,
         row_count: usize,
     ) {
-        debug_assert!(self.top_line_start == self.text.line_start(self.top_line_start));
+        debug_assert!(self.top_line_start == self.text.line_start_at_position(self.top_line_start));
 
         let len = self.text.len();
         let mut line_start = self.top_line_start;
@@ -293,11 +293,11 @@ impl Editor {
                 continue;
             }
 
-            let line_end = self.text.line_end(line_start);
+            let line_end = self.text.line_end_at_position(line_start);
             let first_visible = min(line_start + self.left_column, line_end);
             let last_visible = min(first_visible + grid.columns, line_end);
             for position in first_visible..last_visible {
-                writer.put_byte(display_byte(self.text.byte_at(position)));
+                writer.put_byte(display_byte(self.text.byte_at_position(position)));
             }
 
             if (line_start..=line_end).contains(&self.cursor) {

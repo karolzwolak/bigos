@@ -291,7 +291,7 @@ fn check_entry_mode() {
 fn text_buffer_bytes(buffer: &TextBuffer) -> ([u8; READ_BACK_BYTES], usize) {
     let mut text = [0u8; READ_BACK_BYTES];
     for (position, byte) in text[..buffer.len()].iter_mut().enumerate() {
-        *byte = buffer.byte_at(position);
+        *byte = buffer.byte_at_position(position);
     }
 
     (text, buffer.len())
@@ -302,27 +302,39 @@ fn check_text_buffer() {
     check("text buffer starts empty", buffer.is_empty());
 
     for (position, &byte) in b"ac\nef".iter().enumerate() {
-        buffer.insert(position, byte);
+        buffer.insert_byte_at_position(position, byte);
     }
-    buffer.insert(1, b'b');
-    buffer.insert(4, b'd');
+    buffer.insert_byte_at_position(1, b'b');
+    buffer.insert_byte_at_position(4, b'd');
     let (text, len) = text_buffer_bytes(&buffer);
     check("inserts in the middle", &text[..len] == b"abc\ndef");
 
-    buffer.remove(0);
-    buffer.remove(5);
+    buffer.remove_byte_at_position(0);
+    buffer.remove_byte_at_position(5);
     let (text, len) = text_buffer_bytes(&buffer);
     check("removes at both ends", &text[..len] == b"bc\nde");
 
-    let (before_gap, after_gap) = buffer.segments();
+    let (before_gap, after_gap) = buffer.text_before_and_after_gap();
     check(
-        "segments cover the text",
+        "text before and after the gap covers the text",
         before_gap.len() + after_gap.len() == len,
     );
-    check("line start of the first line", buffer.line_start(1) == 0);
-    check("line start after a newline", buffer.line_start(4) == 3);
-    check("line end stops at the newline", buffer.line_end(0) == 2);
-    check("line end of the last line", buffer.line_end(3) == len);
+    check(
+        "line start of the first line",
+        buffer.line_start_at_position(1) == 0,
+    );
+    check(
+        "line start after a newline",
+        buffer.line_start_at_position(4) == 3,
+    );
+    check(
+        "line end stops at the newline",
+        buffer.line_end_at_position(0) == 2,
+    );
+    check(
+        "line end of the last line",
+        buffer.line_end_at_position(3) == len,
+    );
 
     check_text_buffer_growth();
 }
@@ -335,13 +347,13 @@ fn check_text_buffer_growth() {
 
     let mut all_inserted = true;
     for index in (0..byte_count).rev() {
-        all_inserted &= buffer.insert(0, pattern_byte(index));
+        all_inserted &= buffer.insert_byte_at_position(0, pattern_byte(index));
     }
     check("text buffer grows on demand", all_inserted);
     check("grown buffer holds every byte", buffer.len() == byte_count);
     check(
         "grown buffer keeps the order",
-        (0..byte_count).all(|index| buffer.byte_at(index) == pattern_byte(index)),
+        (0..byte_count).all(|index| buffer.byte_at_position(index) == pattern_byte(index)),
     );
 }
 
