@@ -3,8 +3,8 @@
 Write a file of an exact byte size filled with a repeating ASCII pattern
 
 Examples:
-    scripts/make_pattern_file.py disk_templates/default/FILES/ABCD4M.TXT 4194304
-    scripts/make_pattern_file.py disk_templates/default/FILES/ABCD8M.TXT 8388608
+    scripts/make_pattern_file.py disk_templates/default/BIGFILES/ABCD4M.TXT 4194304
+    scripts/make_pattern_file.py disk_templates/default/BIGFILES/ABCD8M.TXT 8388608
     scripts/make_pattern_file.py out.txt 1000 --pattern 0123456789 --line-length 0
 """
 

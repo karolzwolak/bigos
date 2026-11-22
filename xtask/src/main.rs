@@ -125,6 +125,54 @@ const TEST_DISK_TEMPLATE: &str = "disk_templates/test";
 const DEFAULT_DISK_IMAGE: &str = "storage/disk.img";
 const TEST_DISK_IMAGE: &str = "storage/test_disk.img";
 const TEST_DISK_PATTERN_BYTES: u32 = 100_000;
+const DEFAULT_DISK_BIG_FILES_DIR: &str = "disk_templates/default/BIGFILES";
+const BIG_FILE_PATTERN: &[u8] = b"ABCD";
+const BIG_FILE_LINE_CHARS: usize = 60;
+const BYTES_PER_MIB: usize = 1 << 20;
+const BIG_FILES: [GeneratedFile; 1] = [
+    GeneratedFile::new("ABCD4M.TXT", 4 * BYTES_PER_MIB),
+];
+
+struct GeneratedFile {
+    name: &'static str,
+    size_bytes: usize,
+}
+
+impl GeneratedFile {
+    const fn new(name: &'static str, size_bytes: usize) -> Self {
+        Self { name, size_bytes }
+    }
+}
+
+fn generate_big_files(root: &Path) {
+    let big_files_dir = root.join(DEFAULT_DISK_BIG_FILES_DIR);
+    fs::create_dir_all(&big_files_dir).unwrap();
+
+    let line: Vec<u8> = BIG_FILE_PATTERN
+        .iter()
+        .copied()
+        .cycle()
+        .take(BIG_FILE_LINE_CHARS)
+        .chain(std::iter::once(b'\n'))
+        .collect();
+
+    for big_file in &BIG_FILES {
+        let path = big_files_dir.join(big_file.name);
+        let is_current =
+            fs::metadata(&path).is_ok_and(|meta| meta.len() == big_file.size_bytes as u64);
+        if is_current {
+            continue;
+        }
+
+        let content: Vec<u8> = line
+            .iter()
+            .copied()
+            .cycle()
+            .take(big_file.size_bytes)
+            .collect();
+        fs::write(&path, content).unwrap_or_else(|e| panic!("can't write {}: {e}", path.display()));
+    }
+}
 
 /// newest modification time of any file or directory under path, including path itself
 fn newest_modification_time(path: &Path) -> std::time::SystemTime {
@@ -379,6 +427,7 @@ fn fsck_report_if_dirty(image: &Path) -> Option<String> {
 }
 
 fn build_disk_images(root: &Path) {
+    generate_big_files(root);
     ensure_disk_image(root, DEFAULT_DISK_TEMPLATE, DEFAULT_DISK_IMAGE, 0);
     ensure_disk_image(
         root,

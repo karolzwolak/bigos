@@ -8,3 +8,4 @@ logs/
 *.hdd
 storage/*
 !storage/.gitkeep
+disk_templates/default/BIGFILES/
