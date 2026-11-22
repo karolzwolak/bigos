@@ -12,6 +12,7 @@ use x86_64::structures::paging::PageTableFlags;
 pub mod channel;
 pub mod gfx;
 pub mod job;
+pub mod shell;
 pub mod terminal;
 
 pub const SYS_CREATE_PROCESS: u64 = 0;
@@ -21,6 +22,7 @@ pub const SYS_READ: u64 = 3;
 pub const SYS_GET_LINE: u64 = 4;
 pub const SYS_ALLOCATE: u64 = 5;
 pub const SYS_LIST_PROCESSES: u64 = 6;
+pub const SYS_WAIT_PROCESS: u64 = 7;
 pub const SYS_LOAD_FILE: u64 = 8;
 pub const SYS_UNLOAD_FILE: u64 = 9;
 pub const SYS_CREATE_WINDOW: u64 = 10;
@@ -46,12 +48,14 @@ pub const SYS_CREATE_CHANNEL: u64 = 601;
 pub const SYS_CLOSE_CHANNEL: u64 = 602;
 
 pub const SYS_GET_CPU_INFO: u64 = 970;
+pub const SYS_SHUTDOWN: u64 = 980;
 
 pub const SYS_SLEEP_MS: u64 = 990;
 pub const SYS_WAIT_FOR_INPUT: u64 = 991;
 pub const SYS_FUTEX_WAIT: u64 = 992;
 pub const SYS_FUTEX_WAKE: u64 = 993;
 pub const SYS_GET_HANDOFF_COUNT: u64 = 995;
+pub const SYS_GET_PROCESS_INFO: u64 = 996;
 pub const SYS_YIELD: u64 = 998;
 pub const SYS_EXIT: u64 = 999;
 pub const SYS_GET_PID: u64 = 997;
@@ -81,6 +85,37 @@ impl SyscallError {
     pub const TOO_MANY_OPEN_FILES: Self = Self(16);
     pub const INVALID_EXECUTABLE: Self = Self(17);
     pub const SYSCALL_NOT_FOUND: Self = Self(999);
+
+    /// Short lowercase text for messages
+    pub const fn description(self) -> &'static str {
+        match self.0 {
+            1 => "invalid pointer",
+            2 => "permission denied",
+            3 => "out of memory",
+            4 => "no such process",
+            5 => "invalid file descriptor",
+            6 => "not implemented",
+            7 => "invalid argument",
+            8 => "not found",
+            9 => "already exists",
+            10 => "not a directory",
+            11 => "is a directory",
+            12 => "directory not empty",
+            13 => "no space left",
+            14 => "invalid path",
+            15 => "i/o error",
+            16 => "too many open files",
+            17 => "not an executable",
+            999 => "unknown syscall",
+            _ => "unknown error",
+        }
+    }
+}
+
+impl core::fmt::Display for SyscallError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.description())
+    }
 }
 
 // No successful return (address, id, count, packed size) sets the top bit.
@@ -115,6 +150,21 @@ pub const FD_FLAG_WRITE: u8 = 0x02;
 pub const MAX_OPEN_FILES: usize = 32;
 
 pub const FS_NAME_LEN: usize = 16;
+
+bitflags::bitflags! {
+    /// Mirrors the kernel VFS `FileAttributes`
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FileAttributes: u8 {
+        const READ = 0b00000001;
+        const WRITE = 0b00000010;
+        const EXECUTE = 0b00000100;
+        const HIDDEN = 0b00001000;
+    }
+}
+
+impl FileAttributes {
+    pub const DIR_DEFAULT: Self = Self::READ;
+}
 
 //NOTE: using a vec to be at least somewhat dynamic with the paths
 pub struct ProgramEntry {
@@ -152,11 +202,15 @@ pub struct DirEntryFlat {
     pub name: [u8; FS_NAME_LEN],
     pub name_len: u8,
     pub is_dir: u8,
-    pub _pad: [u8; 6],
+    /// `FileAttributes` bits
+    pub attributes: u8,
+    pub _pad: [u8; 5],
     pub size: u64,
     pub created_time: u32,
     pub modified_time: u32,
 }
+
+static_assertions::const_assert!(core::mem::size_of::<DirEntryFlat>() == 40);
 
 impl DirEntryFlat {
     pub const fn zeroed() -> Self {
@@ -164,7 +218,8 @@ impl DirEntryFlat {
             name: [0u8; FS_NAME_LEN],
             name_len: 0,
             is_dir: 0,
-            _pad: [0u8; 6],
+            attributes: 0,
+            _pad: [0u8; 5],
             size: 0,
             created_time: 0,
             modified_time: 0,
@@ -174,6 +229,10 @@ impl DirEntryFlat {
     pub fn name_str(&self) -> &str {
         let len = self.name_len as usize;
         core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+
+    pub fn attributes(&self) -> FileAttributes {
+        FileAttributes::from_bits_truncate(self.attributes)
     }
 }
 
@@ -200,10 +259,15 @@ pub struct StatFlat {
     pub name: [u8; FS_NAME_LEN],
     pub name_len: u8,
     pub is_dir: u8,
+    /// `FileAttributes` bits
+    pub attributes: u8,
+    pub _pad: [u8; 5],
     pub size: u64,
     pub created_time: u32,
     pub modified_time: u32,
 }
+
+static_assertions::const_assert!(core::mem::size_of::<StatFlat>() == 40);
 
 impl CircularBufferInfo {
     pub const fn zeroed() -> Self {
@@ -221,6 +285,8 @@ impl StatFlat {
             name: [0u8; FS_NAME_LEN],
             name_len: 0,
             is_dir: 0,
+            attributes: 0,
+            _pad: [0u8; 5],
             size: 0,
             created_time: 0,
             modified_time: 0,
@@ -230,6 +296,10 @@ impl StatFlat {
     pub fn name_str(&self) -> &str {
         let len = self.name_len as usize;
         core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+
+    pub fn attributes(&self) -> FileAttributes {
+        FileAttributes::from_bits_truncate(self.attributes)
     }
 }
 
@@ -420,7 +490,7 @@ pub fn sys_get_pid() -> usize {
     unsafe { syscall1(SYS_GET_PID, 0) as usize }
 }
 
-/// Returns how many runs of the calling task began right after another task ran on that
+/// Returns how many runs of the calling thread began right after another thread ran on that
 /// core, a growing count proves its registers and fpu state went through the save areas
 #[inline(always)]
 pub fn sys_get_handoff_count() -> u64 {
@@ -593,6 +663,133 @@ pub fn sys_list_processes(
     syscall_ret_check(ret).map(|n| n as usize)
 }
 
+/// Blocks until the child exits, then removes it from the process list
+/// returns the exit code of the child
+#[inline(always)]
+pub fn sys_wait_process(pid: u32) -> Result<i32, SyscallError> {
+    let ret = unsafe { syscall1(SYS_WAIT_PROCESS, pid as u64) };
+
+    syscall_ret_check(ret).map(|exit_code| exit_code as u32 as i32)
+}
+
+/// Mirrors the kernel's `ProcessRunState`
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessRunState {
+    Ready = 0,
+    Running = 1,
+    Blocked = 2,
+    Terminated = 3,
+}
+
+impl ProcessRunState {
+    pub const fn from_raw(raw: u8) -> Self {
+        debug_assert!(raw <= ProcessRunState::Terminated as u8);
+
+        match raw {
+            0 => ProcessRunState::Ready,
+            1 => ProcessRunState::Running,
+            2 => ProcessRunState::Blocked,
+            _ => ProcessRunState::Terminated,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            ProcessRunState::Ready => "ready",
+            ProcessRunState::Running => "running",
+            ProcessRunState::Blocked => "blocked",
+            ProcessRunState::Terminated => "terminated",
+        }
+    }
+}
+
+/// Mirrors the kernel's `PROCESS_NO_CORE_ASSIGNED`
+pub const PROCESS_NO_CORE_ASSIGNED: u8 = u8::MAX;
+/// Mirrors the kernel's `NO_PARENT_PID`
+pub const NO_PARENT_PID: u64 = u64::MAX;
+
+/// layout shared with the kernel's `ProcessDetailsFlat`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessDetailsFlat {
+    pub pid: u64,
+    pub parent_pid: u64,
+    /// sum of every mapped user region, shared mappings included
+    pub mapped_bytes: u64,
+    /// ProcessRunState
+    pub run_state: u8,
+    pub priority: u8,
+    pub assigned_core: u8,
+    pub name_len: u8,
+    pub exit_code: i32,
+    pub child_count: u32,
+    pub open_fd_count: u32,
+    pub channel_count: u32,
+    pub stdout_write_syscall_count: u32,
+    pub core_migration_count: u32,
+    pub handoff_count: u32,
+    pub name: [u8; MAX_PROCESS_NAME_LEN],
+}
+
+static_assertions::const_assert!(core::mem::size_of::<ProcessDetailsFlat>() == 88);
+
+impl ProcessDetailsFlat {
+    pub const EMPTY: Self = Self {
+        pid: 0,
+        parent_pid: 0,
+        mapped_bytes: 0,
+        run_state: ProcessRunState::Ready as u8,
+        priority: 0,
+        assigned_core: PROCESS_NO_CORE_ASSIGNED,
+        name_len: 0,
+        exit_code: 0,
+        child_count: 0,
+        open_fd_count: 0,
+        channel_count: 0,
+        stdout_write_syscall_count: 0,
+        core_migration_count: 0,
+        handoff_count: 0,
+        name: [0; MAX_PROCESS_NAME_LEN],
+    };
+
+    pub fn name(&self) -> &str {
+        let name_len = min(self.name_len as usize, MAX_PROCESS_NAME_LEN);
+        core::str::from_utf8(&self.name[..name_len]).unwrap_or("?")
+    }
+
+    pub const fn run_state(&self) -> ProcessRunState {
+        ProcessRunState::from_raw(self.run_state)
+    }
+}
+
+#[inline(always)]
+pub fn sys_get_process_info(
+    pid: usize,
+    out_details: &mut ProcessDetailsFlat,
+) -> Result<(), SyscallError> {
+    let ret = unsafe {
+        syscall3(
+            SYS_GET_PROCESS_INFO,
+            pid as u64,
+            out_details as *mut ProcessDetailsFlat as u64,
+            core::mem::size_of::<ProcessDetailsFlat>() as u64,
+        )
+    };
+
+    syscall_ret_check(ret).map(|_| ())
+}
+
+#[inline(always)]
+pub fn sys_shutdown() -> SyscallError {
+    let ret = unsafe { syscall1(SYS_SHUTDOWN, 0) };
+
+    match syscall_ret_check(ret) {
+        Ok(_) => SyscallError::IO_ERROR,
+        Err(error) => error,
+    }
+}
+
 /// One argument as the kernel lays it out on the stack, the string excludes its NUL
 /// Layout shared with the kernel's `ArgSlice`
 #[repr(C)]
@@ -695,11 +892,6 @@ pub fn sys_get_window_size(window_id: u32) -> Result<(u32, u32), SyscallError> {
         .map(|packed| ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32))
 }
 
-// --- Filesystem wrappers ---
-
-/// Open a file by path.
-/// flags: FD_FLAG_READ | FD_FLAG_WRITE
-/// Returns a file descriptor index.
 #[inline(always)]
 pub fn sys_open_file(path: &str, flags: u8) -> Result<usize, SyscallError> {
     let ret = unsafe {
@@ -713,14 +905,13 @@ pub fn sys_open_file(path: &str, flags: u8) -> Result<usize, SyscallError> {
     syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Close a file descriptor
 #[inline(always)]
 pub fn sys_close_file(fd: usize) -> Result<(), SyscallError> {
     syscall_ret_check(unsafe { syscall1(SYS_CLOSE_FILE, fd as u64) }).map(|_| ())
 }
 
-/// Reads up to buf.len() bytes from an open fd starting at offset_bytes, the kernel keeps
-/// no position per fd. Returns the number of bytes read, 0 at the end of the file
+/// Reads up to buf.len() bytes from an open fd starting at offset_bytes,
+/// Returns the number of bytes read
 #[inline(always)]
 pub fn sys_read_file_at(
     fd: usize,
@@ -739,7 +930,7 @@ pub fn sys_read_file_at(
     syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Writes buf to an open fd starting at offset_bytes, which may be at most the file size
+/// Writes buf to an open fd starting at offset_bytes
 /// Returns the number of bytes written
 #[inline(always)]
 pub fn sys_write_file(fd: usize, offset_bytes: usize, buf: &[u8]) -> Result<usize, SyscallError> {
@@ -755,7 +946,6 @@ pub fn sys_write_file(fd: usize, offset_bytes: usize, buf: &[u8]) -> Result<usiz
     syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// An open file with a position kept in userspace, closed on drop
 pub struct File {
     pub fd: usize,
     pub offset_bytes: usize,
@@ -802,7 +992,6 @@ impl Drop for File {
     }
 }
 
-/// Stat a path, fills out_stat on success
 #[inline(always)]
 pub fn sys_stat_file(path: &str, out_stat: &mut StatFlat) -> Result<(), SyscallError> {
     let ret = unsafe {
@@ -846,7 +1035,7 @@ pub fn sys_get_window_info(window_id: u32, out_info: &mut WindowInfo) -> bool {
 }
 
 /// List the contents of a directory into out_entries, starting at entry start_index.
-/// Returns the number of entries written, fewer than out_entries.len() means the end
+/// Returns the number of entries written
 #[inline(always)]
 pub fn sys_list_dir(
     path: &str,
@@ -868,21 +1057,18 @@ pub fn sys_list_dir(
     syscall_ret_check(ret).map(|n| n as usize)
 }
 
-/// Create a new empty file at the given path
 #[inline(always)]
 pub fn sys_create_file(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_CREATE_FILE, path.as_ptr() as u64, path.len() as u64, 0) };
     syscall_ret_check(ret).map(|_| ())
 }
 
-/// Create a new directory at the given path
 #[inline(always)]
 pub fn sys_create_dir(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_CREATE_DIR, path.as_ptr() as u64, path.len() as u64, 0) };
     syscall_ret_check(ret).map(|_| ())
 }
 
-/// Delete a file or directory at the given path
 #[inline(always)]
 pub fn sys_delete(path: &str) -> Result<(), SyscallError> {
     let ret = unsafe { syscall3(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0) };
@@ -1451,278 +1637,146 @@ impl WindowInfo {
 #[derive(Debug, PartialEq, Eq, Copy, Clone, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum KeyCode {
-    // ========= Row 1 (the F-keys) =========
-    /// Top Left of the Keyboard
     Escape,
-    /// Function Key F1
     F1,
-    /// Function Key F2
     F2,
-    /// Function Key F3
     F3,
-    /// Function Key F4
     F4,
-    /// Function Key F5
     F5,
-    /// Function Key F6
     F6,
-    /// Function Key F7
     F7,
-    /// Function Key F8
     F8,
-    /// Function Key F9
     F9,
-    /// Function Key F10
     F10,
-    /// Function Key F11
     F11,
-    /// Function Key F12
     F12,
 
-    /// The Print Screen Key
     PrintScreen,
-    /// The Sys Req key (you get this keycode with Alt + PrintScreen)
     SysRq,
-    /// The Scroll Lock key
     ScrollLock,
-    /// The Pause/Break key
     PauseBreak,
 
-    // ========= Row 2 (the numbers) =========
-    /// Symbol key to the left of `Key1`
     Oem8,
-    /// Number Line, Digit 1
     Key1,
-    /// Number Line, Digit 2
     Key2,
-    /// Number Line, Digit 3
     Key3,
-    /// Number Line, Digit 4
     Key4,
-    /// Number Line, Digit 5
     Key5,
-    /// Number Line, Digit 6
     Key6,
-    /// Number Line, Digit 7
     Key7,
-    /// Number Line, Digit 8
     Key8,
-    /// Number Line, Digit 9
     Key9,
-    /// Number Line, Digit 0
     Key0,
-    /// US Minus/Underscore Key (right of 'Key0')
     OemMinus,
-    /// US Equals/Plus Key (right of 'OemMinus')
     OemPlus,
-    /// Backspace
     Backspace,
 
-    /// Top Left of the Extended Block
     Insert,
-    /// Top Middle of the Extended Block
     Home,
-    /// Top Right of the Extended Block
     PageUp,
 
-    /// The Num Lock key
     NumpadLock,
-    /// The Numpad Divide (or Slash) key
     NumpadDivide,
-    /// The Numpad Multiple (or Star) key
     NumpadMultiply,
-    /// The Numpad Subtract (or Minus) key
     NumpadSubtract,
 
-    // ========= Row 3 (QWERTY) =========
-    /// The Tab Key
     Tab,
-    /// Letters, Top Row #1
     Q,
-    /// Letters, Top Row #2
     W,
-    /// Letters, Top Row #3
     E,
-    /// Letters, Top Row #4
     R,
-    /// Letters, Top Row #5
     T,
-    /// Letters, Top Row #6
     Y,
-    /// Letters, Top Row #7
     U,
-    /// Letters, Top Row #8
     I,
-    /// Letters, Top Row #9
     O,
-    /// Letters, Top Row #10
     P,
-    /// US ANSI Left-Square-Bracket key
     Oem4,
-    /// US ANSI Right-Square-Bracket key
     Oem6,
-    /// US ANSI Backslash Key / UK ISO Backslash Key
     Oem5,
-    /// The UK/ISO Hash/Tilde key (ISO layout only)
     Oem7,
 
-    /// The Delete key - bottom Left of the Extended Block
     Delete,
-    /// The End key - bottom Middle of the Extended Block
     End,
-    /// The Page Down key - -bottom Right of the Extended Block
     PageDown,
 
-    /// The Numpad 7/Home key
     Numpad7,
-    /// The Numpad 8/Up Arrow key
     Numpad8,
-    /// The Numpad 9/Page Up key
     Numpad9,
-    /// The Numpad Add/Plus key
     NumpadAdd,
 
-    // ========= Row 4 (ASDF) =========
-    /// Caps Lock
     CapsLock,
-    /// Letters, Middle Row #1
     A,
-    /// Letters, Middle Row #2
     S,
-    /// Letters, Middle Row #3
     D,
-    /// Letters, Middle Row #4
     F,
-    /// Letters, Middle Row #5
     G,
-    /// Letters, Middle Row #6
     H,
-    /// Letters, Middle Row #7
     J,
-    /// Letters, Middle Row #8
     K,
-    /// Letters, Middle Row #9
     L,
-    /// The US ANSI Semicolon/Colon key
     Oem1,
-    /// The US ANSI Single-Quote/At key
     Oem3,
 
-    /// The Return Key
     Return,
 
-    /// The Numpad 4/Left Arrow key
     Numpad4,
-    /// The Numpad 5 Key
     Numpad5,
-    /// The Numpad 6/Right Arrow key
     Numpad6,
 
-    // ========= Row 5 (ZXCV) =========
-    /// Left Shift
     LShift,
-    /// Letters, Bottom Row #1
     Z,
-    /// Letters, Bottom Row #2
     X,
-    /// Letters, Bottom Row #3
     C,
-    /// Letters, Bottom Row #4
     V,
-    /// Letters, Bottom Row #5
     B,
-    /// Letters, Bottom Row #6
     N,
-    /// Letters, Bottom Row #7
     M,
-    /// US ANSI `,<` key
     OemComma,
-    /// US ANSI `.>` Key
     OemPeriod,
-    /// US ANSI `/?` Key
     Oem2,
-    /// Right Shift
     RShift,
 
-    /// The up-arrow in the inverted-T
     ArrowUp,
 
-    /// Numpad 1/End Key
     Numpad1,
-    /// Numpad 2/Arrow Down Key
     Numpad2,
-    /// Numpad 3/Page Down Key
     Numpad3,
-    /// Numpad Enter
     NumpadEnter,
 
-    // ========= Row 6 (modifers and space bar) =========
-    /// The left-hand Control key
     LControl,
-    /// The left-hand 'Windows' key
     LWin,
-    /// The left-hand Alt key
     LAlt,
-    /// The Space Bar
     Spacebar,
-    /// The right-hand AltGr key
     RAltGr,
-    /// The right-hand Win key
     RWin,
-    /// The 'Apps' key (aka 'Menu' or 'Right-Click')
     Apps,
-    /// The right-hand Control key
     RControl,
 
-    /// The left-arrow in the inverted-T
     ArrowLeft,
-    /// The down-arrow in the inverted-T
     ArrowDown,
-    /// The right-arrow in the inverted-T
     ArrowRight,
 
-    /// The Numpad 0/Insert Key
     Numpad0,
-    /// The Numppad Period/Delete Key
     NumpadPeriod,
 
-    // ========= JIS 109-key extra keys =========
-    /// Extra JIS key (0x7B)
     Oem9,
-    /// Extra JIS key (0x79)
     Oem10,
-    /// Extra JIS key (0x70)
     Oem11,
-    /// Extra JIS symbol key (0x73)
     Oem12,
-    /// Extra JIS symbol key (0x7D)
     Oem13,
 
-    // ========= Extra Keys =========
-    /// Multi-media keys - Previous Track
     PrevTrack,
-    /// Multi-media keys - Next Track
     NextTrack,
-    /// Multi-media keys - Volume Mute Toggle
     Mute,
-    /// Multi-media keys - Open Calculator
     Calculator,
-    /// Multi-media keys - Play
     Play,
-    /// Multi-media keys - Stop
     Stop,
-    /// Multi-media keys - Increase Volume
     VolumeDown,
-    /// Multi-media keys - Decrease Volume
     VolumeUp,
-    /// Multi-media keys - Open Browser
     WWWHome,
-    /// Sent when the keyboard boots
     PowerOnTestOk,
-    /// Sent by the keyboard when too many keys are pressed
     TooManyKeys,
-    /// Used as a 'hidden' Right Control Key (Pause = RControl2 + Num Lock)
     RControl2,
-    /// Used as a 'hidden' Right Alt Key (Print Screen = RAlt2 + PrntScr)
     RAlt2,
 }
