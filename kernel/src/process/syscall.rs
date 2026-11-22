@@ -436,17 +436,18 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
                 return Err(SyscallError::InvalidArgument);
             }
 
-            let (window_id, _buffer, _event_buffer) =
+            let (window_id, buffer, _event_buffer) =
                 compositor.create_window(width, height, x, y, pid);
             serial_println_core!(
-                "sys_create_window: {}x{} at ({},{}) -> id={}",
+                "sys_create_window: {}x{} asked for ({},{}), placed at ({},{}) -> id={}",
                 width,
                 height,
                 x,
                 y,
+                buffer.x,
+                buffer.y,
                 window_id
             );
-            compositor.set_z_index(window_id, 7);
             drop(compositor);
 
             Ok(window_id as u64)

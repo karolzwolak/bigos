@@ -262,7 +262,7 @@ impl UserMemoryManager {
                     Err(MapToError::PageAlreadyMapped(_existing_frame)) => {
                         frame_allocator.deallocate_frame(phys_frame);
                         // This page was already mapped by a previous segment whose
-                        // virtual range overlaps ours at a page boundary.
+                        // virtual range overlaps_window ours at a page boundary.
                         //
                         // Capability flags (PRESENT, WRITABLE, USER_ACCESSIBLE) are
                         // unioned: grant the permission if either segment needs it.

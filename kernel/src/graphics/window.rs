@@ -36,6 +36,12 @@ pub struct Window {
     pub event_buffer_phys: PhysAddr,
 }
 
+impl Window {
+    pub fn bounds(&self) -> WindowBounds {
+        WindowBounds::new(self.x, self.y, self.buffer.width, self.buffer.height)
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct WindowInfo {
@@ -43,6 +49,69 @@ pub struct WindowInfo {
     pub height: u32,
     pub event_buffer_vaddr: u64,
     pub front_buffer_offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WindowBounds {
+    pub const EMPTY: Self = Self::new(0, 0, 0, 0);
+
+    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub const fn right(&self) -> i32 {
+        self.x.saturating_add(self.width as i32)
+    }
+
+    pub const fn bottom(&self) -> i32 {
+        self.y.saturating_add(self.height as i32)
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    pub fn clipped_to_area(&self, area: &WindowBounds) -> WindowBounds {
+        let left = self.x.max(area.x);
+        let top = self.y.max(area.y);
+        let right = self.right().min(area.right());
+        let bottom = self.bottom().min(area.bottom());
+        if left >= right || top >= bottom {
+            return Self::EMPTY;
+        }
+
+        Self::new(left, top, (right - left) as u32, (bottom - top) as u32)
+    }
+
+    pub const fn moved_to(self, x: i32, y: i32) -> Self {
+        Self { x, y, ..self }
+    }
+
+    pub const fn overlaps_window(&self, other: &WindowBounds) -> bool {
+        self.x < other.right()
+            && other.x < self.right()
+            && self.y < other.bottom()
+            && other.y < self.bottom()
+    }
+
+    pub const fn contains_window(&self, other: &WindowBounds) -> bool {
+        other.x >= self.x
+            && other.y >= self.y
+            && other.right() <= self.right()
+            && other.bottom() <= self.bottom()
+    }
 }
 
 #[repr(C)]

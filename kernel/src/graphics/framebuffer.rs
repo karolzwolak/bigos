@@ -7,6 +7,13 @@ use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
 use spin::{Mutex, MutexGuard};
 
+const XRGB_BITS_PER_PIXEL: u16 = 32;
+const XRGB_CHANNEL_BITS: u8 = 8;
+const XRGB_RED_SHIFT: u8 = 16;
+const XRGB_GREEN_SHIFT: u8 = 8;
+const XRGB_BLUE_SHIFT: u8 = 0;
+const MEMORY_MODEL_RGB: u8 = 1;
+
 pub struct FrameBufferTarget {
     address: NonNull<()>,
     pub width: u64,
@@ -40,6 +47,23 @@ impl FrameBufferTarget {
             green_mask_shift: fb.green_mask_shift,
             blue_mask_size: fb.blue_mask_size,
             blue_mask_shift: fb.blue_mask_shift,
+        }
+    }
+
+    pub fn from_xrgb_memory(address: NonNull<u32>, width: u64, height: u64) -> Self {
+        Self {
+            address: address.cast(),
+            width,
+            height,
+            pitch: width * FRAMEBUFFER_BYTES_PER_PIXEL as u64,
+            bpp: XRGB_BITS_PER_PIXEL,
+            memory_model: MEMORY_MODEL_RGB,
+            red_mask_size: XRGB_CHANNEL_BITS,
+            red_mask_shift: XRGB_RED_SHIFT,
+            green_mask_size: XRGB_CHANNEL_BITS,
+            green_mask_shift: XRGB_GREEN_SHIFT,
+            blue_mask_size: XRGB_CHANNEL_BITS,
+            blue_mask_shift: XRGB_BLUE_SHIFT,
         }
     }
 
