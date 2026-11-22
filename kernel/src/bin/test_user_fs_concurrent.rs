@@ -6,9 +6,10 @@ extern crate alloc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::filesystem::{get_vfs, vfs::FileSystemError};
 use kernel::process::elf_loader::load_elf_from_path;
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task;
+use kernel::process::thread;
 use kernel::process::{FileDescriptor, PID};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -62,7 +63,12 @@ fn spawn_worker() -> PID {
     };
 
     let mut process_manager = PROCESS_MANAGER.lock();
-    match process_manager.create_process_from_elf(0, &elf_info, "fsworker", PROGRAM_PRIORITY) {
+    match process_manager.create_process_from_elf(
+        BIGPROC_PID,
+        &elf_info,
+        "fsworker",
+        PROGRAM_PRIORITY,
+    ) {
         Ok(pid) => pid,
         Err(error) => {
             serial_println_core!("create_process_from_elf: {:?}", error);
@@ -115,9 +121,11 @@ fn fail(message: &str) -> ! {
     exit_qemu(QemuExitCode::Failed);
 }
 
-fn home_core_of(pid: PID) -> u8 {
-    let slot_index = task::find_slot_by_pid(pid).expect("a new task has a slot");
-    task::slot(slot_index).home_core.load(Ordering::Relaxed)
+fn assigned_core_of(pid: PID) -> u8 {
+    let slot_index = thread::find_slot_by_pid(pid).expect("a new thread has a slot");
+    thread::slot(slot_index)
+        .assigned_core
+        .load(Ordering::Relaxed)
 }
 
 fn check_worker_directories_are_gone(pids: &[PID; WORKER_COUNT]) {
@@ -139,14 +147,14 @@ fn test_main() -> ! {
     counter(COUNTER_WORKER_MODE).store(MODE_WORK, Ordering::Release);
 
     let pids = [spawn_worker(), spawn_worker()];
-    if home_core_of(pids[0]) == home_core_of(pids[1]) {
+    if assigned_core_of(pids[0]) == assigned_core_of(pids[1]) {
         fail("both workers share a core, so the filesystem is never used in parallel");
     }
 
     let start_us = now_us();
     for pid in pids {
         wait_until("a worker to exit", DEADLINE_US, || {
-            task::find_slot_by_pid(pid).is_none()
+            thread::find_slot_by_pid(pid).is_none()
         });
     }
     serial_println_core!(

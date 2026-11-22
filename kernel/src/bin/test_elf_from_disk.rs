@@ -7,9 +7,10 @@ use alloc::vec;
 use core::sync::atomic::Ordering;
 use kernel::filesystem::vfs::{FileSystemError, VFS, get_vfs};
 use kernel::process::elf_loader::{ElfLoadError, ElfLoadInfo, load_elf_from_path};
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::get_shared_program_data_buffer_mut;
-use kernel::process::task;
+use kernel::process::thread;
 use kernel::process::{ChildPolicy, PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, mount_test_disk, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -148,7 +149,7 @@ fn running_counter() -> u32 {
 fn test_spawn_from_disk_and_kill() {
     let elf_info = load_elf_from_path(BUSYLOOP_PATH).expect("busyloop loads from disk");
     let pid: PID = match PROCESS_MANAGER.lock().create_process_from_elf(
-        0,
+        BIGPROC_PID,
         &elf_info,
         "busyloop",
         BUSYLOOP_PRIORITY,
@@ -168,13 +169,13 @@ fn test_spawn_from_disk_and_kill() {
         core::hint::spin_loop();
     }
 
-    if !task::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
-        fail("request_kill found no task");
+    if !thread::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
+        fail("request_kill found no thread");
     }
     let start_us = kernel::interrupts::tsc_timestamp_us();
-    while task::find_slot_by_pid(pid).is_some() {
+    while thread::find_slot_by_pid(pid).is_some() {
         if kernel::interrupts::tsc_timestamp_us() - start_us > KILL_DEADLINE_US {
-            fail("killed task still alive after the deadline");
+            fail("killed thread still alive after the deadline");
         }
         core::hint::spin_loop();
     }

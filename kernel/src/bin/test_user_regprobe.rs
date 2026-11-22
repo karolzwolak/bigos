@@ -5,6 +5,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::process::elf_loader::load_elf_from_path;
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
 use kernel::process::{PID, ProcessState};
@@ -65,8 +66,12 @@ fn test_main() -> ! {
         let mut pm = PROCESS_MANAGER.lock();
 
         for pid_slot in pids.iter_mut() {
-            *pid_slot = match pm.create_process_from_elf(0, &elf_info, "regprobe", PROCESS_PRIORITY)
-            {
+            *pid_slot = match pm.create_process_from_elf(
+                BIGPROC_PID,
+                &elf_info,
+                "regprobe",
+                PROCESS_PRIORITY,
+            ) {
                 Ok(pid) => pid,
                 Err(e) => {
                     serial_println_core!("FAIL: create_process_from_elf: {:?}", e);

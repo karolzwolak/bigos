@@ -6,9 +6,10 @@ extern crate alloc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::ipc::channel::live_channel_count;
 use kernel::process::elf_loader::load_elf_from_path;
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task;
+use kernel::process::thread;
 use kernel::process::{ElfLoadInfo, PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, mount_test_disk, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -70,7 +71,7 @@ fn wait_until(what: &str, condition: impl Fn() -> bool) {
 }
 
 fn is_gone(pid: PID) -> bool {
-    task::find_slot_by_pid(pid).is_none()
+    thread::find_slot_by_pid(pid).is_none()
 }
 
 fn check_clean_exit(pid: PID, what: &str) {
@@ -98,7 +99,7 @@ fn run_round(round: usize, elf_info: &ElfLoadInfo) {
     }
 
     let runjob_pid = match PROCESS_MANAGER.lock().create_process_from_elf(
-        0,
+        BIGPROC_PID,
         elf_info,
         RUNJOB_NAME,
         PROGRAM_PRIORITY,

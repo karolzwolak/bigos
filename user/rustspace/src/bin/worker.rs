@@ -8,7 +8,7 @@ use rustspace::{program_shared_data, sys_exit};
 // Indexes into the shared test counters, the kernel tests use the same values
 const COUNTER_WORKERS_DONE: usize = 3;
 
-// takes several time slices of a low priority task
+// takes several time slices of a low priority thread
 const WORK_ITERATIONS: u64 = 150_000_000;
 
 const EXIT_CODE_PANIC: i32 = 255;

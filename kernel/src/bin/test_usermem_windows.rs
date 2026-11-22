@@ -6,6 +6,7 @@ extern crate alloc;
 use kernel::graphics::compositor::{get_compositor, init_compositor};
 use kernel::process::ProcessState;
 use kernel::process::elf_loader::load_elf_from_path;
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::scheduler;
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
@@ -59,7 +60,7 @@ fn test_main() -> ! {
 
     let pid = {
         let mut pm = PROCESS_MANAGER.lock();
-        match pm.create_process_from_elf(0, &elf_info, "winstrs", 5) {
+        match pm.create_process_from_elf(BIGPROC_PID, &elf_info, "winstrs", 5) {
             Ok(pid) => pid,
             Err(e) => {
                 serial_println_core!("FAIL: create_process_from_elf: {:?}", e);

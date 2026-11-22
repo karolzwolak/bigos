@@ -5,9 +5,10 @@ extern crate alloc;
 
 use core::sync::atomic::Ordering;
 use kernel::process::elf_loader::{ElfLoadInfo, load_elf_from_path};
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::get_shared_program_data_buffer_mut;
-use kernel::process::task::{self, MAX_TASKS, TaskState};
+use kernel::process::thread::{self, MAX_THREADS, ThreadState};
 use kernel::process::{ChildPolicy, PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -56,7 +57,12 @@ fn running_counter() -> u32 {
 fn spawn_busyloop(elf_info: &ElfLoadInfo) -> PID {
     let mut process_manager = PROCESS_MANAGER.lock();
 
-    match process_manager.create_process_from_elf(0, elf_info, "busyloop", BUSYLOOP_PRIORITY) {
+    match process_manager.create_process_from_elf(
+        BIGPROC_PID,
+        elf_info,
+        "busyloop",
+        BUSYLOOP_PRIORITY,
+    ) {
         Ok(pid) => pid,
         Err(error) => {
             serial_println_core!("create_process_from_elf: {:?}", error);
@@ -76,17 +82,17 @@ fn wait_until_running(deadline_us: u64) {
     }
 }
 
-/// Returns how long the task took to disappear, its slot is released after it died
+/// Returns how long the thread took to disappear, its slot is released after it died
 fn kill_and_wait(pid: PID) -> u64 {
     let start_us = kernel::interrupts::tsc_timestamp_us();
 
-    if !task::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
-        fail("request_kill found no task");
+    if !thread::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
+        fail("request_kill found no thread");
     }
 
-    while task::find_slot_by_pid(pid).is_some() {
+    while thread::find_slot_by_pid(pid).is_some() {
         if kernel::interrupts::tsc_timestamp_us() - start_us > KILL_DEADLINE_US {
-            fail("killed task still alive after the deadline");
+            fail("killed thread still alive after the deadline");
         }
         core::hint::spin_loop();
     }
@@ -114,10 +120,10 @@ fn kill_and_wait(pid: PID) -> u64 {
     elapsed_us
 }
 
-fn free_task_slot_count() -> usize {
-    task::TASKS
+fn free_thread_slot_count() -> usize {
+    thread::THREADS
         .iter()
-        .filter(|slot| slot.state() == TaskState::Free)
+        .filter(|slot| slot.state() == ThreadState::Free)
         .count()
 }
 
@@ -142,16 +148,18 @@ fn test_main() -> ! {
     let pid = spawn_busyloop(&elf_info);
     wait_until_running(STARTUP_DEADLINE_US);
 
-    let slot_index = task::find_slot_by_pid(pid).expect("running task has a slot");
-    let home_core = task::slot(slot_index).home_core.load(Ordering::Relaxed);
-    if home_core == 0 {
+    let slot_index = thread::find_slot_by_pid(pid).expect("running thread has a slot");
+    let assigned_core = thread::slot(slot_index)
+        .assigned_core
+        .load(Ordering::Relaxed);
+    if assigned_core == 0 {
         fail("busyloop was placed on the boot core");
     }
 
     let kill_us = kill_and_wait(pid);
     serial_println_core!(
         "test_user_kill: spinner on core {} gone {} us after the request",
-        home_core,
+        assigned_core,
         kill_us
     );
 
@@ -164,7 +172,7 @@ fn test_main() -> ! {
     PROCESS_MANAGER.lock().cleanup_dead();
 
     let start_free_frames = kernel::memory::get_frame_allocator().free_frame_count();
-    let start_free_slots = free_task_slot_count();
+    let start_free_slots = free_thread_slot_count();
     serial_println_core!(
         "test_user_kill: stress start, free frames {} free slots {}",
         start_free_frames,
@@ -175,7 +183,7 @@ fn test_main() -> ! {
         set_running_counter(0);
         let round_pid = spawn_busyloop(&elf_info);
 
-        // even rounds kill a task that may not have run at all
+        // even rounds kill a thread that may not have run at all
         if round % 2 == 1 {
             wait_until_running(STARTUP_DEADLINE_US);
         }
@@ -185,19 +193,19 @@ fn test_main() -> ! {
     }
 
     let end_free_frames = kernel::memory::get_frame_allocator().free_frame_count();
-    let end_free_slots = free_task_slot_count();
+    let end_free_slots = free_thread_slot_count();
     serial_println_core!(
         "test_user_kill: stress end, free frames {} free slots {} of {}",
         end_free_frames,
         end_free_slots,
-        MAX_TASKS
+        MAX_THREADS
     );
 
     if end_free_frames != start_free_frames {
         fail("free frame count changed over the spawn and kill loop");
     }
     if end_free_slots != start_free_slots {
-        fail("task slots leaked over the spawn and kill loop");
+        fail("thread slots leaked over the spawn and kill loop");
     }
     if kernel::memory::get_frame_allocator().free_list_has_duplicates() {
         fail("a frame was freed more than once");
