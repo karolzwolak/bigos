@@ -9,6 +9,7 @@ use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
     prelude::*,
+    primitives::{PrimitiveStyle, Rectangle},
     text::{Alignment, LineHeight, Text, TextStyle, TextStyleBuilder},
 };
 
@@ -16,7 +17,7 @@ use crate::gfx::{color::Rgba8888UNORM, surface::UserSurface};
 use crate::job::{JobPoll, ShellJob};
 use crate::shell::history::{CommandHistory, HISTORY_ENTRY_MAX_BYTES};
 use crate::shell::{
-    self, CommandOutcome, EXIT_CODE_FAILURE, EXIT_CODE_NOT_FOUND, ShellOutput, ShellState,
+    self, CommandAction, EXIT_CODE_FAILURE, EXIT_CODE_NOT_FOUND, ShellOutput, ShellState,
 };
 use crate::{SyscallError, sys_wait_process};
 use line_index::LineIndex;
@@ -34,6 +35,11 @@ const TEXT_STYLE: TextStyle = TextStyleBuilder::new()
     .build();
 
 const DEFAULT_MAX_LINES: usize = 4096;
+
+/// The cursor is an underline starting this far below the text baseline
+const CURSOR_BASELINE_OFFSET_PX: i32 = 1;
+const CURSOR_HEIGHT_PX: u32 = 2;
+const CURSOR_STYLE: PrimitiveStyle<Rgb888> = PrimitiveStyle::with_fill(Rgb888::WHITE);
 
 const PROMPT: &str = " > ";
 const JOB_DRAIN_CHUNK_BYTES: usize = 1024;
@@ -80,6 +86,10 @@ pub struct Terminal<D: DrawTarget<Color = Rgb888>> {
     pub scroll_offset: usize,
     /// scrollback position right after the last prompt, typed input starts here
     pub input_start_abs: u64,
+    /// How many typed bytes are right of the cursor
+    pub cursor_back: usize,
+    /// Scratch for the typed bytes right of the cursor while the input is rewritten
+    pub edit_tail_buf: Vec<u8>,
     pub job: ShellJob,
     pub shell_state: ShellState,
     pub history: CommandHistory,
@@ -116,6 +126,8 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             last_command_buf: Vec::new(),
             scroll_offset: 0,
             input_start_abs: start_abs,
+            cursor_back: 0,
+            edit_tail_buf: Vec::new(),
             job: ShellJob::Idle,
             shell_state: ShellState::new(),
             history: CommandHistory::new(),
@@ -131,6 +143,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         self.scrollback = scrollback;
         self.lines.clear(abs);
         self.input_start_abs = abs;
+        self.cursor_back = 0;
         self.needs_redraw = true;
     }
 
@@ -293,12 +306,24 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         let max_scroll = total.saturating_sub(visible);
         let offset = core::cmp::min(self.scroll_offset, max_scroll);
         let start_logical = total.saturating_sub(visible + offset);
+        let cursor_abs = self.scrollback.current_absolute() - self.cursor_back as u64;
 
         for vis_idx in 0..visible {
             let logical_idx = start_logical + vis_idx;
             let Some(meta) = self.lines.logical_line_for_index(logical_idx) else {
                 continue;
             };
+            let baseline_y = MARGIN_TOP + vis_idx as i32 * LINE_SPACING;
+
+            // the end of a line is the start of the next one, only the last line owns its end
+            let is_last_line = logical_idx + 1 == total;
+            let is_cursor_line = meta.first_pos <= cursor_abs
+                && (cursor_abs < meta.one_past_last_pos
+                    || (is_last_line && cursor_abs == meta.one_past_last_pos));
+            if is_cursor_line {
+                self.draw_cursor((cursor_abs - meta.first_pos) as i32, baseline_y);
+            }
+
             if meta.is_empty() {
                 continue;
             }
@@ -309,7 +334,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             }
             let s = unsafe { core::str::from_utf8_unchecked(bytes) };
             let (prompt, rest) = s.split_at(meta.prompt_len().min(s.len()));
-            let mut pos = Point::new(MARGIN_LEFT, MARGIN_TOP + vis_idx as i32 * LINE_SPACING);
+            let mut pos = Point::new(MARGIN_LEFT, baseline_y);
             if !prompt.is_empty() {
                 pos = Text::with_text_style(prompt, pos, PROMPT_CHARACTER_STYLE, TEXT_STYLE)
                     .draw(&mut self.draw_target)
@@ -322,27 +347,101 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         }
     }
 
-    pub fn backspace(&mut self) {
-        let end_abs = self.scrollback.current_absolute();
-        // never eat into the prompt
-        if end_abs <= self.input_start_abs {
-            return;
-        }
-
-        self.rewind_input_to(end_abs - 1);
-    }
-
-    pub fn delete_word(&mut self) {
+    pub fn typed_input(&self) -> &[u8] {
         let end_abs = self.scrollback.current_absolute();
         debug_assert!(end_abs >= self.input_start_abs);
         let typed_len = (end_abs - self.input_start_abs) as usize;
-        if typed_len == 0 {
+        let typed = self.scrollback.read_at(self.input_start_abs, typed_len);
+        debug_assert!(typed.len() == typed_len);
+
+        typed
+    }
+
+    pub fn cursor_offset(&self) -> usize {
+        let typed_len = (self.scrollback.current_absolute() - self.input_start_abs) as usize;
+        debug_assert!(self.cursor_back <= typed_len);
+
+        typed_len - self.cursor_back
+    }
+
+    fn insert_char(&mut self, byte: u8) {
+        if self.cursor_back == 0 {
+            self.write_bytes_internal(&[byte]);
             return;
         }
 
-        let typed_line = self.scrollback.read_at(self.input_start_abs, typed_len);
-        let word_start = input::word_start_before(typed_line);
-        self.rewind_input_to(self.input_start_abs + word_start as u64);
+        let cursor_offset = self.cursor_offset();
+        self.replace_input_range(cursor_offset, cursor_offset, &[byte]);
+    }
+
+    fn draw_cursor(&mut self, column: i32, baseline_y: i32) {
+        let char_width = self.font_metrics.char_width;
+        let top_left = Point::new(
+            MARGIN_LEFT + column * char_width as i32,
+            baseline_y + CURSOR_BASELINE_OFFSET_PX,
+        );
+
+        let _ = Rectangle::new(top_left, Size::new(char_width, CURSOR_HEIGHT_PX))
+            .into_styled(CURSOR_STYLE)
+            .draw(&mut self.draw_target);
+    }
+
+    pub fn backspace(&mut self) {
+        let cursor_offset = self.cursor_offset();
+        // never eat into the prompt
+        if cursor_offset == 0 {
+            return;
+        }
+
+        self.replace_input_range(cursor_offset - 1, cursor_offset, &[]);
+    }
+
+    pub fn delete_word(&mut self) {
+        let cursor_offset = self.cursor_offset();
+        let word_start = input::word_start_before(&self.typed_input()[..cursor_offset]);
+
+        self.replace_input_range(word_start, cursor_offset, &[]);
+    }
+
+    /// Replaces the typed bytes in `remove_start..remove_end` with `insert`
+    fn replace_input_range(&mut self, remove_start: usize, remove_end: usize, insert: &[u8]) {
+        debug_assert!(remove_start <= remove_end);
+        debug_assert!(remove_end <= self.typed_input().len());
+
+        let mut tail = core::mem::take(&mut self.edit_tail_buf);
+        tail.clear();
+        tail.extend_from_slice(&self.typed_input()[remove_end..]);
+
+        self.rewind_input_to(self.input_start_abs + remove_start as u64);
+        self.write_bytes_internal(insert);
+        self.write_bytes_internal(&tail);
+        self.cursor_back = tail.len();
+
+        self.edit_tail_buf = tail;
+    }
+
+    fn move_cursor_left(&mut self) {
+        self.cursor_back = min(self.cursor_back + 1, self.typed_input().len());
+    }
+
+    fn move_cursor_right(&mut self) {
+        self.cursor_back = self.cursor_back.saturating_sub(1);
+    }
+
+    fn move_cursor_word_left(&mut self) {
+        let typed = self.typed_input();
+        let cursor_offset = typed.len() - self.cursor_back;
+        let word_start = input::word_start_before(&typed[..cursor_offset]);
+
+        self.cursor_back = typed.len() - word_start;
+    }
+
+    fn move_cursor_word_right(&mut self) {
+        let typed = self.typed_input();
+        let cursor_offset = typed.len() - self.cursor_back;
+        let word_end = input::word_end_after(typed, cursor_offset);
+
+        self.cursor_back = typed.len() - word_end;
     }
 
     /// Drops typed input from `abs_pos` on, wrapped lines included
@@ -358,6 +457,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
     fn replace_input(&mut self, line: &[u8]) {
         self.rewind_input_to(self.input_start_abs);
         self.write_bytes_internal(line);
+        self.cursor_back = 0;
         self.scroll_offset = 0;
     }
 
@@ -410,6 +510,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         self.write_str(cwd.as_str());
         self.write_str(PROMPT);
         self.input_start_abs = self.scrollback.current_absolute();
+        self.cursor_back = 0;
         self.lines.mark_prompt(prompt_start, self.input_start_abs);
     }
 
@@ -679,9 +780,9 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 self.shell_state = shell_state;
 
                 match outcome {
-                    CommandOutcome::Done => {}
-                    CommandOutcome::Clear => self.clear(),
-                    CommandOutcome::Program { name, path, args } => {
+                    CommandAction::Done => {}
+                    CommandAction::ClearScreen => self.clear(),
+                    CommandAction::StartProgram { name, path, args } => {
                         self.start_program(name, path.as_str(), args)
                     }
                 }
@@ -708,10 +809,15 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             | input::InputAction::Char(_)
             | input::InputAction::ArrowUp
             | input::InputAction::ArrowDown
+            | input::InputAction::ArrowLeft
+            | input::InputAction::ArrowRight
+            | input::InputAction::WordLeft
+            | input::InputAction::WordRight
                 if self.job.is_running() => {}
             input::InputAction::Backspace => self.backspace(),
             input::InputAction::DeleteWord => self.delete_word(),
             input::InputAction::Enter => {
+                self.cursor_back = 0;
                 self.capture_last_command();
                 self.history.push_line(self.last_command_buf.trim_ascii());
                 self.newline();
@@ -725,14 +831,15 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 if self.scroll_offset != 0 {
                     self.scroll_offset = 0;
                 }
-                let b = c as u8;
-                self.write_bytes_internal(&[b]);
+                self.insert_char(c as u8);
             }
             input::InputAction::ArrowUp => self.recall_older_command(),
             input::InputAction::ArrowDown => self.recall_newer_command(),
-            input::InputAction::ArrowLeft
-            | input::InputAction::ArrowRight
-            | input::InputAction::Home
+            input::InputAction::ArrowLeft => self.move_cursor_left(),
+            input::InputAction::ArrowRight => self.move_cursor_right(),
+            input::InputAction::WordLeft => self.move_cursor_word_left(),
+            input::InputAction::WordRight => self.move_cursor_word_right(),
+            input::InputAction::Home
             | input::InputAction::End
             | input::InputAction::PageUp
             | input::InputAction::PageDown

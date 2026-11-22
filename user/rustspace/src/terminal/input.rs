@@ -31,6 +31,8 @@ pub enum InputAction {
     ArrowDown,
     ArrowLeft,
     ArrowRight,
+    WordLeft,
+    WordRight,
     Home,
     End,
     PageUp,
@@ -45,8 +47,12 @@ pub fn translate(event: InputEvent) -> Option<InputAction> {
             let keycode = unsafe { core::mem::transmute::<u8, KeyCode>(event.value as u8) };
             let key_state = unsafe { core::mem::transmute::<u8, KeyState>(event.extra as u8) };
 
+            let is_lalt_held = event.key_modifiers().contains(KeyModifiers::LALT);
+
             if key_state == KeyState::Pressed {
                 match keycode {
+                    KeyCode::ArrowLeft if is_lalt_held => return Some(InputAction::WordLeft),
+                    KeyCode::ArrowRight if is_lalt_held => return Some(InputAction::WordRight),
                     KeyCode::ArrowUp => return Some(InputAction::ArrowUp),
                     KeyCode::ArrowDown => return Some(InputAction::ArrowDown),
                     KeyCode::ArrowLeft => return Some(InputAction::ArrowLeft),
@@ -65,6 +71,7 @@ pub fn translate(event: InputEvent) -> Option<InputAction> {
         crate::EventType::CharEvent => {
             let v = event.value;
             let c = char::from_u32(v)?;
+            let is_lalt_held = event.key_modifiers().contains(KeyModifiers::LALT);
 
             if event.key_modifiers().contains(KeyModifiers::LCTRL) {
                 return Some(match c.to_ascii_lowercase() {
@@ -89,12 +96,9 @@ pub fn translate(event: InputEvent) -> Option<InputAction> {
             }
 
             match c {
-                crate::AsciiChar::BACKSPACE
-                    if event.key_modifiers().intersects(KeyModifiers::ALT) =>
-                {
-                    Some(InputAction::DeleteWord)
-                }
+                crate::AsciiChar::BACKSPACE if is_lalt_held => Some(InputAction::DeleteWord),
                 crate::AsciiChar::BACKSPACE => Some(InputAction::Backspace),
+                _ if is_lalt_held => Some(InputAction::Ignore),
                 crate::AsciiChar::NEWLINE | crate::AsciiChar::CARRIAGE_RETURN => {
                     Some(InputAction::Enter)
                 }
@@ -117,4 +121,19 @@ pub fn word_start_before(typed: &[u8]) -> usize {
     }
 
     word_start
+}
+
+/// Where the word after `from` in `typed` ends
+pub fn word_end_after(typed: &[u8], from: usize) -> usize {
+    debug_assert!(from <= typed.len());
+    let mut word_end = from;
+
+    while word_end < typed.len() && typed[word_end].is_ascii_whitespace() {
+        word_end += 1;
+    }
+    while word_end < typed.len() && !typed[word_end].is_ascii_whitespace() {
+        word_end += 1;
+    }
+
+    word_end
 }

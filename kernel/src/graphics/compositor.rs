@@ -53,6 +53,8 @@ pub fn get_input_event_buffer() -> &'static EventBuffer {
 const NORMALIZE_Z_INDEX_THRESHOLD: u8 = 250;
 
 const MOUSE_DEBUG_PRINT: bool = false;
+const FOCUS_PREVIOUS_WINDOW_KEY: KeyCode = KeyCode::N;
+const FOCUS_NEXT_WINDOW_KEY: KeyCode = KeyCode::M;
 const CURSOR_COLOR_XRGB: u32 = 0xFFAAAAFF;
 const CLEAR_COLOR_XRGB: u32 = 0xFF000000;
 const CURSOR_SIZE_X: i32 = 3;
@@ -497,11 +499,15 @@ impl Compositor {
 
     fn handle_key_state_event(&mut self, event: InputEvent) {
         debug_assert!((event.value as usize) < KEY_COUNT);
-        self.keyboard_state.update(
-            event.value as u8,
-            KeyState::from_raw(event.extra),
-            event.key_modifiers(),
-        );
+        let key = event.value as u8;
+        let state = KeyState::from_raw(event.extra);
+        self.keyboard_state
+            .update(key, state, event.key_modifiers());
+
+        // letters reach the compositor only as key states and chars, so focus hotkeys are handled here
+        if self.keyboard_state.is_down(KeyCode::LAlt) && state == KeyState::Pressed {
+            self.handle_focus_hotkey(key);
+        }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
             event_buffer.publish_keyboard_state(
@@ -512,22 +518,20 @@ impl Compositor {
         }
     }
 
+    fn handle_focus_hotkey(&mut self, key: u8) {
+        if key == FOCUS_PREVIOUS_WINDOW_KEY as u8 {
+            let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
+            let new_focused_window_id = focused_window_id.saturating_sub(1);
+            self.focus_window(new_focused_window_id);
+        } else if key == FOCUS_NEXT_WINDOW_KEY as u8 {
+            let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
+            let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
+            self.focus_window(new_focused_window_id);
+        }
+    }
+
     pub fn handle_keyboard_event(&mut self, event: InputEvent) {
         debug_assert!((event.value as usize) < KEY_COUNT);
-        let key = event.value as u8;
-        let state = KeyState::from_raw(event.extra);
-
-        if self.keyboard_state.is_down(KeyCode::LAlt) && state == KeyState::Pressed {
-            if key == KeyCode::ArrowLeft as u8 {
-                let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
-                let new_focused_window_id = focused_window_id.saturating_sub(1);
-                self.focus_window(new_focused_window_id);
-            } else if key == KeyCode::ArrowRight as u8 {
-                let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
-                let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
-                self.focus_window(new_focused_window_id);
-            }
-        }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
             let _ = event_buffer.push(event);
