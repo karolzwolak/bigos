@@ -129,9 +129,7 @@ const DEFAULT_DISK_BIG_FILES_DIR: &str = "disk_templates/default/BIGFILES";
 const BIG_FILE_PATTERN: &[u8] = b"ABCD";
 const BIG_FILE_LINE_CHARS: usize = 60;
 const BYTES_PER_MIB: usize = 1 << 20;
-const BIG_FILES: [GeneratedFile; 1] = [
-    GeneratedFile::new("ABCD4M.TXT", 4 * BYTES_PER_MIB),
-];
+const BIG_FILES: [GeneratedFile; 1] = [GeneratedFile::new("ABCD4M.TXT", 4 * BYTES_PER_MIB)];
 
 struct GeneratedFile {
     name: &'static str,
