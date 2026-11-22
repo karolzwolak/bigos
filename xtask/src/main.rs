@@ -318,7 +318,7 @@ fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u
 const DISK_AIO_ENV: &str = "BIGOS_DISK_AIO";
 const DEFAULT_DISK_AIO: &str = "io_uring";
 const TEST_DISK_COPY_DIR: &str = "target/test_disks";
-const FSCK_TEST_PREFIXES: [&str; 2] = ["test_fs", "test_user_fs"];
+const FSCK_TEST_PREFIXES: [&str; 3] = ["test_fs", "test_user_fs", "test_user_shell"];
 
 /// QEMU arguments that attach the disk image as a modern virtio-blk PCI device
 fn disk_qemu_args(image: &Path) -> Vec<String> {
@@ -380,6 +380,9 @@ const RESET: &str = "\x1b[0m";
 const TESTS_NEEDING_DOOM: [&str; 2] = ["test_user_doom", "test_user_libc"];
 /// Tests that also need storage/doom1.wad on the test image
 const TESTS_NEEDING_WAD: [&str; 1] = ["test_user_doom"];
+
+const TESTS_ENDING_IN_POWER_OFF: [&str; 1] = ["test_power_off"];
+const QEMU_POWER_OFF_EXIT: i32 = 0;
 
 const TEST_SUCCESS_EXIT: i32 = 33;
 const TEST_FAILED_EXIT: i32 = 35;
@@ -671,6 +674,11 @@ fn run_test_with_timeout(
 fn run_test(root: &Path, name: &str, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
     let disk_image = prepare_test_disk(root, name);
     let mut result = run_test_with_timeout(root, iso, ovmf_code, ovmf_vars, &disk_image, "30");
+    if TESTS_ENDING_IN_POWER_OFF.contains(&name) {
+        let marker = format!("=== {name}: power request sent ===");
+        result.passed =
+            result.exit_code == Some(QEMU_POWER_OFF_EXIT) && result.serial.contains(&marker);
+    }
 
     let needs_fsck = FSCK_TEST_PREFIXES
         .iter()

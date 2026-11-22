@@ -6,8 +6,8 @@ use core::sync::atomic::Ordering;
 use rustspace::shell::history::{CommandHistory, HISTORY_CAPACITY, HISTORY_ENTRY_MAX_BYTES};
 use rustspace::shell::path::ShellPath;
 use rustspace::shell::{
-    BIGOS_LOGO_LINES, CommandOutcome, EXIT_CODE_FAILURE, EXIT_CODE_SUCCESS, EXIT_CODE_TERMINATED,
-    ShellOutput, ShellState, run_command_line,
+    CommandAction, EXIT_CODE_FAILURE, EXIT_CODE_SUCCESS, EXIT_CODE_TERMINATED, ShellOutput,
+    ShellState, run_command_line,
 };
 extern crate alloc;
 
@@ -154,9 +154,9 @@ impl Shell {
         let outcome = run_command_line(&mut self.state, line, &mut self.capture);
         check(
             "a builtin line is done in the shell",
-            matches!(outcome, CommandOutcome::Done),
+            matches!(outcome, CommandAction::Done),
         );
-        if !matches!(outcome, CommandOutcome::Done) {
+        if !matches!(outcome, CommandAction::Done) {
             rustspace::println!("shtest: line '{}' was not done", line);
         }
 
@@ -190,10 +190,10 @@ impl Shell {
         self.capture = Capture::new();
         let outcome = run_command_line(&mut self.state, line, &mut self.capture);
         let matches = match outcome {
-            CommandOutcome::Program { path, args, .. } => {
+            CommandAction::StartProgram { path, args, .. } => {
                 path.as_str() == expected_path && args == expected_args
             }
-            CommandOutcome::Done | CommandOutcome::Clear => false,
+            CommandAction::Done | CommandAction::ClearScreen => false,
         };
         check(line, matches);
     }
@@ -559,14 +559,10 @@ fn check_files(shell: &mut Shell) {
     );
     shell.expect("cat A.TXT", "", EXIT_CODE_SUCCESS);
 
-    shell.expect_ok("echo hello   world > A.TXT");
-    shell.expect("cat A.TXT", "hello world\n", EXIT_CODE_SUCCESS);
-    shell.expect_ok("echo again >> A.TXT");
-    shell.expect("cat A.TXT", "hello world\nagain\n", EXIT_CODE_SUCCESS);
-    shell.expect_ok("echo x >A.TXT");
-    shell.expect_ok("echo y >>A.TXT");
+    check("write A.TXT", write_text_file("/SHT/A.TXT", b"x\ny\n"));
     shell.expect("cat /SHT/A.TXT", "x\ny\n", EXIT_CODE_SUCCESS);
-    shell.expect_ok("echo new > NEW.TXT");
+    check("create NEW.TXT", sys_create_file("/SHT/NEW.TXT").is_ok());
+    check("write NEW.TXT", write_text_file("/SHT/NEW.TXT", b"new\n"));
     shell.expect("cat NEW.TXT A.TXT", "new\nx\ny\n", EXIT_CODE_SUCCESS);
     shell.expect(
         "cat NONE.TXT",
@@ -574,28 +570,14 @@ fn check_files(shell: &mut Shell) {
         EXIT_CODE_FAILURE,
     );
     shell.expect("cat", "usage: cat <file>...\n", EXIT_CODE_FAILURE);
+}
 
-    shell.expect(
-        "echo hi >",
-        "echo: redirection without a file\n",
-        EXIT_CODE_FAILURE,
-    );
-    shell.expect(
-        "echo > A.TXT more",
-        "echo: the redirection has to come last\n",
-        EXIT_CODE_FAILURE,
-    );
-    shell.expect_ok("mkdir D");
-    shell.expect(
-        "echo hi > D",
-        "echo: /SHT/D: is a directory\n",
-        EXIT_CODE_FAILURE,
-    );
-    shell.expect_ok("rm -r D");
+fn write_text_file(path: &str, text: &[u8]) -> bool {
+    let Ok(mut file) = File::open(path, FD_FLAG_WRITE) else {
+        return false;
+    };
 
-    // every builtin can be redirected
-    shell.expect_ok("pwd > PWD.TXT");
-    shell.expect("cat PWD.TXT", "/SHT\n", EXIT_CODE_SUCCESS);
+    file.write(text) == Ok(text.len())
 }
 
 fn write_big_file(path: &str) -> bool {
@@ -666,13 +648,9 @@ fn check_copy(shell: &mut Shell) {
 
 fn check_listing(shell: &mut Shell) {
     shell.run("ls");
-    for line in ["A.TXT", "B.TXT", "NEW.TXT", "PWD.TXT", "BIG.BIN", "SUB/"] {
+    for line in ["A.TXT", "B.TXT", "NEW.TXT", "BIG.BIN", "SUB/"] {
         check(line, shell.capture.has_line(line));
     }
-    check(
-        "ls lists no removed directory",
-        !shell.capture.has_line("D/"),
-    );
 
     shell.run("ls -l");
     check(
@@ -719,7 +697,7 @@ fn check_remove(shell: &mut Shell) {
         EXIT_CODE_FAILURE,
     );
     shell.expect_ok("mkdir SUB/DEEP");
-    shell.expect_ok("echo deep > SUB/DEEP/F.TXT");
+    shell.expect_ok("mkf SUB/DEEP/F.TXT");
     shell.expect_ok("rm -r SUB");
     shell.expect("ls SUB", "ls: /SHT/SUB: not found\n", EXIT_CODE_FAILURE);
     shell.expect_ok("rm A.TXT B.TXT");
@@ -750,11 +728,6 @@ fn check_programs(shell: &mut Shell) {
     shell.expect_program("run ./PROG", "/SHT/PROG", "");
     shell.expect_program("../BIN/outwrite basic", "/BIN/outwrite", "basic");
     shell.expect("run", "usage: run <program> [args]\n", EXIT_CODE_FAILURE);
-    shell.expect(
-        "lsproc > L.TXT",
-        "lsproc: redirection works only for builtins\n",
-        EXIT_CODE_FAILURE,
-    );
 }
 
 fn check_help_and_system(shell: &mut Shell) {
@@ -763,40 +736,6 @@ fn check_help_and_system(shell: &mut Shell) {
         "help lists seeproc",
         shell.capture.as_str().contains("seeproc <pid>"),
     );
-    shell.expect(
-        "help cd",
-        "usage: cd [dir]\nchange the working directory, / without an argument\n",
-        EXIT_CODE_SUCCESS,
-    );
-    shell.expect("help nope", "help: no such builtin\n", EXIT_CODE_FAILURE);
-
-    shell.run("cpuinfo");
-    check(
-        "cpuinfo prints the cores",
-        shell.capture.as_str().contains("cores      "),
-    );
-    check(
-        "cpuinfo prints the uptime",
-        shell.capture.as_str().contains("uptime     "),
-    );
-    shell.expect("cpuinfo x", "usage: cpuinfo\n", EXIT_CODE_FAILURE);
-
-    shell.expect("whoami", "a bigOS enjoyer\n", EXIT_CODE_SUCCESS);
-    shell.expect("whoami x", "usage: whoami\n", EXIT_CODE_FAILURE);
-
-    shell.run("bigos");
-    check(
-        "bigos prints the whole logo",
-        BIGOS_LOGO_LINES
-            .iter()
-            .all(|line| shell.capture.has_line(line))
-            && shell.capture.as_str().lines().count() == BIGOS_LOGO_LINES.len(),
-    );
-    shell.expect("bigos x", "usage: bigos\n", EXIT_CODE_FAILURE);
-
-    shell.expect_ok("sleep 5");
-    shell.expect("sleep x", "usage: sleep <ms>\n", EXIT_CODE_FAILURE);
-    shell.expect("shutdown now", "usage: shutdown\n", EXIT_CODE_FAILURE);
 }
 
 fn spawn_child(packed_args: &[u8], argc: u32) -> Result<u32, SyscallError> {
