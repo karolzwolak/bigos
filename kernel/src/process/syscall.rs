@@ -18,7 +18,7 @@ use crate::util::msr::msr_write;
 use crate::{
     process::{
         ChildPolicy, INVALID_PID,
-        process_manager::{ARCHE_PID, BIGPROC_PID, PROCESS_MANAGER},
+        process_manager::{BIGPROC_PID, PROCESS_MANAGER},
         scheduler,
     },
     serial_println_core,
@@ -85,6 +85,7 @@ impl From<ElfLoadError> for SyscallError {
             ElfLoadError::FileSystem(error) => Self::from(error),
             ElfLoadError::NoFilesystem => Self::NotFound,
             ElfLoadError::ImageTooLarge => Self::OutOfMemory,
+            ElfLoadError::NotExecutable => Self::PermissionDenied,
             ElfLoadError::InvalidMagic
             | ElfLoadError::InvalidHeader
             | ElfLoadError::InvalidArch
@@ -106,7 +107,7 @@ impl From<ProcessError> for SyscallError {
             ProcessError::ElfLoadError(error) => Self::from(error),
             ProcessError::NoCoresAvailable
             | ProcessError::SchedulerError
-            | ProcessError::OutOfTaskSlots => Self::OutOfMemory,
+            | ProcessError::OutOfThreadSlots => Self::OutOfMemory,
             ProcessError::DoubleDelete => Self::InvalidArgument,
             ProcessError::Channel(error) => error,
         }
@@ -130,6 +131,7 @@ pub enum SyscallNumber {
     GetLine = 4,
     Allocate = 5,
     ListProcesses = 6,
+    WaitProcess = 7,
     LoadFile = 8,
     UnloadFile = 9,
     CreateWindow = 10,
@@ -160,6 +162,7 @@ pub enum SyscallNumber {
     FutexWake = 993,
 
     GetCpuInfo = 970,
+    Shutdown = 980,
     GetHandoffCount = 995,
     GetProcessInfo = 996,
     GetPID = 997,
@@ -170,7 +173,7 @@ pub enum SyscallNumber {
 /// Reached through GS after swapgs, the offsets are used by syscall_handler
 #[repr(C, align(64))]
 struct PerCoreSyscallData {
-    /// Kernel stack top of the task running on this core, set on every dispatch
+    /// Kernel stack top of the thread running on this core, set on every dispatch
     stack_top: u64,
     user_rsp_scratch: u64,
 }
@@ -251,7 +254,7 @@ pub unsafe extern "C" fn syscall_handler() -> ! {
 
         "mov rdi, rsp",
 
-        // the task stack top is 16 aligned and 16 regs were pushed, so rsp is aligned for the call
+        // the thread stack top is 16 aligned and 16 regs were pushed, so rsp is aligned for the call
         "call {handle_syscall}",
 
         // RSP will point at the user stack while still in ring 0, sysretq restores IF from r11
@@ -289,7 +292,7 @@ unsafe extern "C" fn handle_syscall_inner(frame: *mut SyscallFrame) -> u64 {
     x86_64::instructions::interrupts::enable();
     {
         let core_id = get_current_core_id();
-        crate::gdt::assert_rsp_in_task_stack(core_id);
+        crate::gdt::assert_rsp_in_thread_stack(core_id);
     }
 
     let result = unsafe { dispatch_syscall(frame) };
@@ -315,6 +318,8 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
     match syscall {
         SyscallNumber::CreateProcess => process_syscalls::create_process(frame),
         SyscallNumber::ListProcesses => process_syscalls::list_processes(frame),
+        SyscallNumber::WaitProcess => process_syscalls::wait_process(frame),
+        SyscallNumber::GetProcessInfo => process_syscalls::get_process_info(frame),
         SyscallNumber::TerminateProcess => {
             let target_pid = frame.arg1 as usize;
             let exit_code = frame.arg2 as i32;
@@ -322,7 +327,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             let caller_core = get_current_core_id();
             let caller_pid = scheduler::get_current_process_for_core(caller_core);
 
-            if target_pid == INVALID_PID || target_pid == ARCHE_PID {
+            if target_pid == INVALID_PID {
                 serial_println_core!("TerminateProcess: invalid target pid {}", target_pid);
                 return Err(SyscallError::InvalidArgument);
             }
@@ -345,8 +350,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
                 }
             };
 
-            let allowed =
-                target_pid == caller_pid || target_parent == caller_pid || caller_pid == ARCHE_PID;
+            let allowed = target_pid == caller_pid || target_parent == caller_pid;
             if !allowed {
                 serial_println_core!(
                     "TerminateProcess: pid {} denied to kill {} (parent {})",
@@ -358,12 +362,12 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             }
 
             if target_pid == caller_pid {
-                crate::process::task::exit_current(exit_code, child_policy);
+                crate::process::thread::exit_current(exit_code, child_policy);
             }
 
             // the target tears itself down once it is back at the edge of ring 3
-            if !crate::process::task::request_kill(target_pid, exit_code, child_policy) {
-                serial_println_core!("TerminateProcess: target {} has no task", target_pid);
+            if !crate::process::thread::request_kill(target_pid, exit_code, child_policy) {
+                serial_println_core!("TerminateProcess: target {} has no thread", target_pid);
                 return Err(SyscallError::ProcessNotFound);
             }
 
@@ -432,17 +436,18 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
                 return Err(SyscallError::InvalidArgument);
             }
 
-            let (window_id, _buffer, _event_buffer) =
+            let (window_id, buffer, _event_buffer) =
                 compositor.create_window(width, height, x, y, pid);
             serial_println_core!(
-                "sys_create_window: {}x{} at ({},{}) -> id={}",
+                "sys_create_window: {}x{} asked for ({},{}), placed at ({},{}) -> id={}",
                 width,
                 height,
                 x,
                 y,
+                buffer.x,
+                buffer.y,
                 window_id
             );
-            compositor.set_z_index(window_id, 7);
             drop(compositor);
 
             Ok(window_id as u64)
@@ -459,9 +464,9 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             Ok(pid as u64)
         }
         SyscallNumber::GetHandoffCount => {
-            let task_ref = crate::process::task::core_current_task_ref(get_current_core_id());
-            let task = crate::process::task::slot(task_ref.slot as usize);
-            Ok(task.handoff_count.load(Ordering::Relaxed) as u64)
+            let thread_ref = crate::process::thread::core_current_thread_ref(get_current_core_id());
+            let thread = crate::process::thread::slot(thread_ref.slot as usize);
+            Ok(thread.handoff_count.load(Ordering::Relaxed) as u64)
         }
         SyscallNumber::Yield => {
             if SYSCALL_DEBUG_PRINT {
@@ -470,7 +475,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
                 serial_println_core!("sys_yield: PID {} yielding", pid);
             }
 
-            scheduler::core_yield_executing_tasks(get_current_core_id());
+            scheduler::core_yield_executing_threads(get_current_core_id());
             Ok(0)
         }
         SyscallNumber::Exit => {
@@ -480,7 +485,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             let pid = scheduler::get_current_process_for_core(core_id);
             serial_println_core!("sys_exit: PID {} exiting with code {}", pid, exit_code);
 
-            crate::process::task::exit_current(exit_code as i32, child_policy);
+            crate::process::thread::exit_current(exit_code as i32, child_policy);
         }
         SyscallNumber::Allocate => {
             let size = frame.arg1 as usize;
@@ -641,9 +646,15 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             {
                 w.buffer.present();
             }
-            //serial_println_core!("sys_present_window: window_id={} presented", window_id);
             drop(windows);
             drop(compositor);
+
+            // userspace flips its back buffer pointer once per present, returning before the swap
+            // would let it draw into the buffer that is on screen
+            crate::process::wait::block_current_thread_until_event(
+                &crate::process::wait::WINDOW_SWAP_WAIT_QUEUE,
+                || !crate::graphics::compositor::get_compositor().is_present_pending(window_id),
+            );
             Ok(0)
         }
         SyscallNumber::GetWindowSize => {
@@ -787,14 +798,25 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             Ok(0)
         }
 
+        SyscallNumber::Shutdown => {
+            if crate::power::power_info().sleep_control.is_none() {
+                return Err(SyscallError::NotImplemented);
+            }
+
+            let pid = scheduler::get_current_process_for_core(get_current_core_id());
+            serial_println_core!("Shutdown requested by pid {}", pid);
+            crate::power::enter_s5();
+            Err(SyscallError::IoError)
+        }
+
         SyscallNumber::SleepMs => {
-            crate::process::wait::sleep_current_task_ms(frame.arg1);
+            crate::process::wait::sleep_current_thread_ms(frame.arg1);
             Ok(0)
         }
         SyscallNumber::WaitForInput => {
             let core_id = get_current_core_id();
             let pid = scheduler::get_current_process_for_core(core_id);
-            crate::process::wait::block_current_task_until_event(
+            crate::process::wait::block_current_thread_until_event(
                 &crate::process::wait::INPUT_WAIT_QUEUE,
                 || crate::graphics::compositor::get_compositor().process_has_pending_input(pid),
             );
@@ -840,7 +862,7 @@ unsafe fn dispatch_syscall(frame: &mut SyscallFrame) -> Result<u64, SyscallError
             }
 
             // blocks while the word still holds the expected value
-            crate::process::wait::block_current_task_until_event(
+            crate::process::wait::block_current_thread_until_event(
                 &crate::process::wait::FUTEX_WAIT_QUEUE,
                 || unsafe { core::ptr::read_volatile(word_ptr as *const u32) } != expected,
             );

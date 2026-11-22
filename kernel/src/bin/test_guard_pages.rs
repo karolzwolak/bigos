@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use kernel::gdt;
-use kernel::process::task::MAX_TASKS;
+use kernel::process::thread::MAX_THREADS;
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{MAX_CORES, boot_common, serial_println_core};
 use x86_64::VirtAddr;
@@ -164,16 +164,16 @@ fn test_main() -> ! {
         }
     }
 
-    // every task kernel stack has an unmapped guard right below a mapped stack
-    for slot_index in 0..MAX_TASKS {
-        let guard = gdt::task_guard_page(slot_index);
-        let (bottom, top) = gdt::task_stack_bounds(slot_index);
+    // every thread kernel stack has an unmapped guard right below a mapped stack
+    for slot_index in 0..MAX_THREADS {
+        let guard = gdt::thread_guard_page(slot_index);
+        let (bottom, top) = gdt::thread_stack_bounds(slot_index);
         let last_byte = VirtAddr::new(top.as_u64() - 1);
 
         total_checks += 1;
         if is_kernel_page_mapped(guard) {
             serial_println_core!(
-                "FAIL: task slot {} guard {:#x} should be UNMAPPED but is mapped",
+                "FAIL: thread slot {} guard {:#x} should be UNMAPPED but is mapped",
                 slot_index,
                 guard.as_u64()
             );
@@ -184,7 +184,7 @@ fn test_main() -> ! {
         total_checks += 1;
         if !is_kernel_page_mapped(bottom) {
             serial_println_core!(
-                "FAIL: task slot {} stack bottom {:#x} should be MAPPED but is not",
+                "FAIL: thread slot {} stack bottom {:#x} should be MAPPED but is not",
                 slot_index,
                 bottom.as_u64()
             );
@@ -195,7 +195,7 @@ fn test_main() -> ! {
         total_checks += 1;
         if !is_kernel_page_mapped(last_byte) {
             serial_println_core!(
-                "FAIL: task slot {} stack top-1 {:#x} should be MAPPED but is not",
+                "FAIL: thread slot {} stack top-1 {:#x} should be MAPPED but is not",
                 slot_index,
                 last_byte.as_u64()
             );
@@ -206,7 +206,7 @@ fn test_main() -> ! {
         total_checks += 1;
         if guard.as_u64() & 0xFFF != 0 || bottom.as_u64() & 0xFFF != 0 {
             serial_println_core!(
-                "FAIL: task slot {} guard or bottom not page aligned",
+                "FAIL: thread slot {} guard or bottom not page aligned",
                 slot_index
             );
             success = false;
@@ -216,7 +216,7 @@ fn test_main() -> ! {
         total_checks += 1;
         if guard + 4096u64 != bottom {
             serial_println_core!(
-                "FAIL: task slot {} guard {:#x} +4096 != bottom {:#x}",
+                "FAIL: thread slot {} guard {:#x} +4096 != bottom {:#x}",
                 slot_index,
                 guard.as_u64(),
                 bottom.as_u64()
@@ -228,7 +228,7 @@ fn test_main() -> ! {
         total_checks += 1;
         if top.as_u64() % 16 != 0 {
             serial_println_core!(
-                "FAIL: task slot {} stack top not 16 byte aligned",
+                "FAIL: thread slot {} stack top not 16 byte aligned",
                 slot_index
             );
             success = false;

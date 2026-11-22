@@ -6,9 +6,10 @@ extern crate alloc;
 use core::sync::atomic::Ordering;
 use kernel::process::PID;
 use kernel::process::elf_loader::{ElfLoadInfo, load_elf_from_path};
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task;
+use kernel::process::thread;
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{AP_CORE_COUNT, boot_common, bsp_init, serial_println_core};
 
@@ -21,13 +22,13 @@ const COUNTER_WORKERS_DONE: usize = 3;
 const HIGH_PRIORITY: u8 = 7;
 const LOW_PRIORITY: u8 = 1;
 
-// one high priority task per AP core keeps every core busy, one worker per core has to squeeze in
-const HIGH_TASK_COUNT: usize = AP_CORE_COUNT as usize;
+// one high priority thread per AP core keeps every core busy, one worker per core has to squeeze in
+const HIGH_THREAD_COUNT: usize = AP_CORE_COUNT as usize;
 const WORKER_COUNT: usize = AP_CORE_COUNT as usize;
 
 const DEADLINE_US: u64 = 15_000_000;
 const STARTUP_DEADLINE_US: u64 = 5_000_000;
-const MIN_YIELDS_PER_HIGH_TASK: u32 = 1;
+const MIN_YIELDS_PER_HIGH_THREAD: u32 = 1;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -62,7 +63,7 @@ fn reset_counters() {
 fn spawn(elf_info: &ElfLoadInfo, name: &str, priority: u8) -> PID {
     let mut process_manager = PROCESS_MANAGER.lock();
 
-    match process_manager.create_process_from_elf(0, elf_info, name, priority) {
+    match process_manager.create_process_from_elf(BIGPROC_PID, elf_info, name, priority) {
         Ok(pid) => pid,
         Err(error) => {
             serial_println_core!("create_process_from_elf: {:?}", error);
@@ -93,28 +94,30 @@ fn parse(path: &str) -> ElfLoadInfo {
     }
 }
 
-/// Fills every AP core with high priority tasks that run until told to stop, then
+/// Fills every AP core with high priority threads that run until told to stop, then
 /// expects the low priority workers to finish anyway
 fn run_case(
     case_name: &str,
     high_elf: &ElfLoadInfo,
     high_name: &str,
     worker_elf: &ElfLoadInfo,
-    high_tasks_yield: bool,
+    high_threads_yield: bool,
 ) {
     serial_println_core!("test_user_priority: case {}", case_name);
     reset_counters();
 
-    let mut pids = [0 as PID; HIGH_TASK_COUNT + WORKER_COUNT];
+    let mut pids = [0 as PID; HIGH_THREAD_COUNT + WORKER_COUNT];
 
-    for pid_slot in pids[..HIGH_TASK_COUNT].iter_mut() {
+    for pid_slot in pids[..HIGH_THREAD_COUNT].iter_mut() {
         *pid_slot = spawn(high_elf, high_name, HIGH_PRIORITY);
     }
-    wait_until("high priority tasks to start", STARTUP_DEADLINE_US, || {
-        counter(COUNTER_RUNNING).load(Ordering::Acquire) as usize == HIGH_TASK_COUNT
-    });
+    wait_until(
+        "high priority threads to start",
+        STARTUP_DEADLINE_US,
+        || counter(COUNTER_RUNNING).load(Ordering::Acquire) as usize == HIGH_THREAD_COUNT,
+    );
 
-    for pid_slot in pids[HIGH_TASK_COUNT..].iter_mut() {
+    for pid_slot in pids[HIGH_THREAD_COUNT..].iter_mut() {
         *pid_slot = spawn(worker_elf, "worker", LOW_PRIORITY);
     }
 
@@ -127,18 +130,18 @@ fn run_case(
         kernel::interrupts::tsc_timestamp_us() - start_us
     );
 
-    if high_tasks_yield {
+    if high_threads_yield {
         let yields = counter(COUNTER_YIELDS).load(Ordering::Acquire);
         serial_println_core!("test_user_priority: high priority yields {}", yields);
-        if yields < MIN_YIELDS_PER_HIGH_TASK * HIGH_TASK_COUNT as u32 {
-            fail("yielding high priority tasks made no progress");
+        if yields < MIN_YIELDS_PER_HIGH_THREAD * HIGH_THREAD_COUNT as u32 {
+            fail("yielding high priority threads made no progress");
         }
     }
 
     counter(COUNTER_STOP).store(1, Ordering::Release);
     for pid in pids {
-        wait_until("tasks to exit", DEADLINE_US, || {
-            task::find_slot_by_pid(pid).is_none()
+        wait_until("threads to exit", DEADLINE_US, || {
+            thread::find_slot_by_pid(pid).is_none()
         });
     }
 

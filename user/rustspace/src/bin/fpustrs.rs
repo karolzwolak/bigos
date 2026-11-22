@@ -23,13 +23,13 @@ const FCW_PRECISION_DOUBLE: u16 = 0b10 << 8;
 const ROUNDING_MODE_MASK: usize = 0b11;
 
 const MS_PER_SECOND: u64 = 1000;
-/// Longer than a scheduler slice, so a waiting task preempts the spin
+/// Longer than a scheduler slice, so a waiting thread preempts the spin
 const SPIN_DURATION_MS: u64 = 150;
 const HANDOFF_TIMEOUT_MS: u64 = 5000;
 /// Keeps the core busy once the probes are done, an idle core would steal the partner
-/// of a task that still probes and leave it alone on its core
+/// of a thread that still probes and leave it alone on its core
 const LINGER_MS: u64 = 3000;
-/// Probes that must see another task run on the core while the state is loaded
+/// Probes that must see another thread run on the core while the state is loaded
 const REQUIRED_HANDOFFS: u32 = 3;
 
 const EXIT_CODE_PANIC: i32 = 1;
@@ -78,7 +78,7 @@ impl FpuBank {
 const MXCSR_OFFSET: usize = offset_of!(FpuBank, mxcsr);
 const FCW_OFFSET: usize = offset_of!(FpuBank, fcw);
 
-/// What a new task must start with, the asm also loads its control words back after a probe
+/// What a new thread must start with, the asm also loads its control words back after a probe
 static DEFAULT_FPU_BANK: FpuBank = FpuBank {
     xmm: [0; XMM_REGISTER_COUNT],
     mxcsr: MXCSR_DEFAULT,
@@ -109,8 +109,8 @@ impl Phase {
 
     fn no_handoff_message(self) -> &'static [u8] {
         match self {
-            Phase::Yield => b"fpustress: FAIL no other task ran during yield\n",
-            Phase::Preemption => b"fpustress: FAIL no other task ran during preemption\n",
+            Phase::Yield => b"fpustress: FAIL no other thread ran during yield\n",
+            Phase::Preemption => b"fpustress: FAIL no other thread ran during preemption\n",
         }
     }
 
@@ -330,7 +330,7 @@ unsafe fn yield_with_loaded_fpu(expected_bank: *const FpuBank, actual_bank: *mut
 }
 
 /// Holds the bank in the registers without entering the kernel until `deadline_tsc`,
-/// so only a timer interrupt can switch the task away
+/// so only a timer interrupt can switch the thread away
 #[inline(never)]
 unsafe fn spin_with_loaded_fpu(
     expected_bank: *const FpuBank,
@@ -376,7 +376,7 @@ unsafe fn spin_with_loaded_fpu(
     }
 }
 
-/// Repeats `probe` until REQUIRED_HANDOFFS of its runs saw another task take the core,
+/// Repeats `probe` until REQUIRED_HANDOFFS of its runs saw another thread take the core,
 /// `probe` returns false when the state it loaded did not come back
 fn run_phase_across_handoffs(timeout_tsc: u64, mut probe: impl FnMut(u32) -> bool) -> PhaseResult {
     let deadline_tsc = read_tsc() + timeout_tsc;

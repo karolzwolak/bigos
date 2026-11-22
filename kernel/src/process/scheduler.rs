@@ -1,6 +1,6 @@
 use crate::process::INVALID_PID;
 use crate::process::PID;
-use crate::process::task::{self, INVALID_SLOT, TaskRef, TaskState};
+use crate::process::thread::{self, INVALID_SLOT, ThreadRef, ThreadState};
 use crate::util::cpuinfo::get_current_core_id;
 use crate::util::irq_mutex::IrqMutex;
 use crate::{MAX_CORES, serial_println_core};
@@ -13,7 +13,7 @@ use x86_64::structures::paging::PhysFrame;
 
 const SCHED_DEBUG_PRINT: bool = false;
 
-/// An idle core takes a waiting task from the run queue of a busy core
+/// An idle core takes a waiting thread from the run queue of a busy core
 const WORK_STEALING_ENABLED: bool = true;
 
 // note non_empty_levels is u8 right now, increase size if we ever increase max prio, but why
@@ -21,7 +21,7 @@ pub const MAX_PRIORITY: usize = 7;
 const PRIORITY_LEVEL_COUNT: usize = MAX_PRIORITY + 1;
 const _: () = assert!(PRIORITY_LEVEL_COUNT <= u8::BITS as usize);
 
-/// Timer ticks a task of priority 0 runs before it has to give way
+/// Timer ticks a thread of priority 0 runs before it has to give way
 const BASE_SLICE_TICKS: u32 = 1;
 
 static CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES as usize] =
@@ -30,22 +30,22 @@ static CURRENT_PROCESS_ON_CORE: [AtomicU64; MAX_CORES as usize] =
 static CURRENT_SLOT_ON_CORE: [AtomicU16; MAX_CORES as usize] =
     [const { AtomicU16::new(INVALID_SLOT) }; MAX_CORES as usize];
 
-/// PID of the task that ran last on each core, only the owning core touches it
+/// PID of the thread that ran last on each core, only the owning core touches it
 static LAST_PROCESS_ON_CORE: [AtomicU64; MAX_CORES as usize] =
     [const { AtomicU64::new(INVALID_PID as u64) }; MAX_CORES as usize];
 
-/// Set when the task running on a core should call core_run_scheduling() before it returns to ring 3
+/// Set when the thread running on a core should call core_run_scheduling() before it returns to ring 3
 static CORE_SHOULD_BE_RESCHEDULED: [AtomicBool; MAX_CORES as usize] =
     [const { AtomicBool::new(false) }; MAX_CORES as usize];
 
 static SLICE_REMAINING_TICKS: [AtomicU32; MAX_CORES as usize] =
     [const { AtomicU32::new(0) }; MAX_CORES as usize];
 
-/// Tasks that are queued or running on each core, readable from interrupt context without a queue lock
-static RUNNABLE_TASKS_COUNT: [AtomicU32; MAX_CORES as usize] =
+/// Threads that are queued or running on each core, readable from interrupt context without a queue lock
+static RUNNABLE_THREADS_COUNT: [AtomicU32; MAX_CORES as usize] =
     [const { AtomicU32::new(0) }; MAX_CORES as usize];
 
-/// Stack pointer of each core's scheduler loop while a task runs
+/// Stack pointer of each core's scheduler loop while a thread runs
 /// switch_context stores it, core_run_scheduling() loads it to get back
 static mut SCHEDULER_RSP: [u64; MAX_CORES as usize] = [0u64; MAX_CORES as usize];
 
@@ -67,13 +67,13 @@ impl SlotQueue {
     }
 
     fn push_back(&mut self, slot_index: usize) {
-        let task = task::slot(slot_index);
-        task.next.store(INVALID_SLOT, Ordering::Relaxed);
+        let thread = thread::slot(slot_index);
+        thread.next.store(INVALID_SLOT, Ordering::Relaxed);
 
         if self.tail == INVALID_SLOT {
             self.head = slot_index as u16;
         } else {
-            task::slot(self.tail as usize)
+            thread::slot(self.tail as usize)
                 .next
                 .store(slot_index as u16, Ordering::Relaxed);
         }
@@ -84,7 +84,7 @@ impl SlotQueue {
         debug_assert!(self.head != INVALID_SLOT);
 
         let slot_index = self.head as usize;
-        let next = task::slot(slot_index).next.load(Ordering::Relaxed);
+        let next = thread::slot(slot_index).next.load(Ordering::Relaxed);
         self.head = next;
         if next == INVALID_SLOT {
             self.tail = INVALID_SLOT;
@@ -93,20 +93,20 @@ impl SlotQueue {
         slot_index
     }
 
-    /// Unlinks the first task the predicate accepts, INVALID_SLOT when none does
+    /// Unlinks the first thread the predicate accepts, INVALID_SLOT when none does
     fn remove_first_where(&mut self, accepts: impl Fn(usize) -> bool) -> usize {
         let mut previous = INVALID_SLOT;
         let mut cursor = self.head;
 
         while cursor != INVALID_SLOT {
-            let task = task::slot(cursor as usize);
-            let next = task.next.load(Ordering::Relaxed);
+            let thread = thread::slot(cursor as usize);
+            let next = thread.next.load(Ordering::Relaxed);
 
             if accepts(cursor as usize) {
                 if previous == INVALID_SLOT {
                     self.head = next;
                 } else {
-                    task::slot(previous as usize)
+                    thread::slot(previous as usize)
                         .next
                         .store(next, Ordering::Relaxed);
                 }
@@ -130,19 +130,19 @@ impl SlotQueue {
             if cursor as usize == slot_index {
                 return true;
             }
-            cursor = task::slot(cursor as usize).next.load(Ordering::Relaxed);
+            cursor = thread::slot(cursor as usize).next.load(Ordering::Relaxed);
         }
 
         false
     }
 }
 
-struct TaskSlotQueueTable {
+struct ThreadSlotQueueTable {
     queues: [SlotQueue; PRIORITY_LEVEL_COUNT],
     non_empty_levels: u8, // bitmap
 }
 
-impl TaskSlotQueueTable {
+impl ThreadSlotQueueTable {
     const fn new() -> Self {
         Self {
             queues: [SlotQueue::new(); PRIORITY_LEVEL_COUNT],
@@ -161,8 +161,8 @@ impl TaskSlotQueueTable {
         self.non_empty_levels == 0
     }
 
-    /// The oldest task of the highest priority present
-    fn pop_highest_prio_oldest_task(&mut self) -> usize {
+    /// The oldest thread of the highest priority present
+    fn pop_highest_prio_oldest_thread(&mut self) -> usize {
         debug_assert!(!self.is_empty());
 
         let level = (u8::BITS - 1 - self.non_empty_levels.leading_zeros()) as usize;
@@ -178,10 +178,10 @@ impl TaskSlotQueueTable {
         self.queues.iter().any(|queue| queue.contains(slot_index))
     }
 
-    fn take_task_not_currently_on_cpu(&mut self) -> usize {
+    fn take_thread_not_currently_on_cpu(&mut self) -> usize {
         for level in (0..PRIORITY_LEVEL_COUNT).rev() {
             let slot_index = self.queues[level]
-                .remove_first_where(|queued| !task::slot(queued).on_cpu.load(Ordering::Acquire));
+                .remove_first_where(|queued| !thread::slot(queued).on_cpu.load(Ordering::Acquire));
             if slot_index == INVALID_SLOT as usize {
                 continue;
             }
@@ -197,85 +197,86 @@ impl TaskSlotQueueTable {
     }
 }
 
-/// So every runnable task runs once per epoch and a busy high priority task cannot starve a low one
+/// So every runnable thread runs once per epoch and a busy high priority thread cannot starve a low one
 pub struct CoreRunQueue {
-    /// Tasks that still have their turn in this epoch
-    executing_tasks: TaskSlotQueueTable,
-    /// Tasks that used their slice or yielded, wait until executing_tasks is empty, then queues swap
-    yielding_tasks: TaskSlotQueueTable,
-    /// Blocked tasks of this core that wait for some point in time
-    sleeping_tasks: [SleepingTask; task::MAX_TASKS],
-    seeping_tasks_count: usize,
+    /// Threads that still have their turn in this epoch
+    executing_threads: ThreadSlotQueueTable,
+    /// Threads that used their slice or yielded, wait until executing_threads is empty, then queues swap
+    yielding_threads: ThreadSlotQueueTable,
+    /// Blocked threads of this core that wait for some point in time
+    sleeping_threads: [SleepingThread; thread::MAX_THREADS],
+    seeping_threads_count: usize,
 }
 
 #[derive(Clone, Copy)]
-struct SleepingTask {
-    task_ref: TaskRef,
+struct SleepingThread {
+    thread_ref: ThreadRef,
     wake_time_us: u64,
 }
 
-impl SleepingTask {
+impl SleepingThread {
     const EMPTY: Self = Self {
-        task_ref: TaskRef {
+        thread_ref: ThreadRef {
             slot: INVALID_SLOT,
             pid: INVALID_PID,
         },
         wake_time_us: 0,
     };
 
-    /// A woken task that was killed or woke up for another reason leaves its entry behind
+    /// A woken thread that was killed or woke up for another reason leaves its entry behind
     fn is_stale(&self) -> bool {
-        let task = task::slot(self.task_ref.slot as usize);
+        let thread = thread::slot(self.thread_ref.slot as usize);
 
-        task.pid.load(Ordering::Acquire) != self.task_ref.pid || task.state() != TaskState::Blocked
+        thread.pid.load(Ordering::Acquire) != self.thread_ref.pid
+            || thread.state() != ThreadState::Blocked
     }
 }
 
 impl CoreRunQueue {
     const fn new() -> Self {
         Self {
-            executing_tasks: TaskSlotQueueTable::new(),
-            yielding_tasks: TaskSlotQueueTable::new(),
-            sleeping_tasks: [SleepingTask::EMPTY; task::MAX_TASKS],
-            seeping_tasks_count: 0,
+            executing_threads: ThreadSlotQueueTable::new(),
+            yielding_threads: ThreadSlotQueueTable::new(),
+            sleeping_threads: [SleepingThread::EMPTY; thread::MAX_THREADS],
+            seeping_threads_count: 0,
         }
     }
 
-    fn add_sleeping_task(&mut self, task_ref: TaskRef, wake_time_us: u64) {
-        if self.seeping_tasks_count == self.sleeping_tasks.len() {
-            self.remove_stale_sleeping_tasks();
+    fn add_sleeping_thread(&mut self, thread_ref: ThreadRef, wake_time_us: u64) {
+        if self.seeping_threads_count == self.sleeping_threads.len() {
+            self.remove_stale_sleeping_threads();
         }
-        debug_assert!(self.seeping_tasks_count < self.sleeping_tasks.len());
+        debug_assert!(self.seeping_threads_count < self.sleeping_threads.len());
 
-        self.sleeping_tasks[self.seeping_tasks_count] = SleepingTask {
-            task_ref,
+        self.sleeping_threads[self.seeping_threads_count] = SleepingThread {
+            thread_ref,
             wake_time_us,
         };
-        self.seeping_tasks_count += 1;
+        self.seeping_threads_count += 1;
     }
 
-    fn remove_stale_sleeping_tasks(&mut self) {
+    fn remove_stale_sleeping_threads(&mut self) {
         let mut index = 0;
-        while index < self.seeping_tasks_count {
-            if self.sleeping_tasks[index].is_stale() {
-                self.seeping_tasks_count -= 1;
-                self.sleeping_tasks[index] = self.sleeping_tasks[self.seeping_tasks_count];
+        while index < self.seeping_threads_count {
+            if self.sleeping_threads[index].is_stale() {
+                self.seeping_threads_count -= 1;
+                self.sleeping_threads[index] = self.sleeping_threads[self.seeping_threads_count];
             } else {
                 index += 1;
             }
         }
     }
 
-    /// Returns the highest priority from the awoken tasks, None when nobody woke
-    fn wake_due_sleeping_tasks(&mut self, core_id: u8, now_us: u64) -> Option<u8> {
+    /// Returns the highest priority from the awoken threads, None when nobody woke
+    fn wake_due_sleeping_threads(&mut self, core_id: u8, now_us: u64) -> Option<u8> {
         let mut highest_priority_woken: Option<u8> = None;
         let mut index = 0;
 
-        while index < self.seeping_tasks_count {
-            let sleeper = self.sleeping_tasks[index];
+        while index < self.seeping_threads_count {
+            let sleeper = self.sleeping_threads[index];
             if sleeper.is_stale() {
-                self.seeping_tasks_count -= 1;
-                self.sleeping_tasks[index] = self.sleeping_tasks[self.seeping_tasks_count];
+                self.seeping_threads_count -= 1;
+                self.sleeping_threads[index] = self.sleeping_threads[self.seeping_threads_count];
                 continue;
             }
 
@@ -284,63 +285,63 @@ impl CoreRunQueue {
                 continue;
             }
 
-            let task = task::slot(sleeper.task_ref.slot as usize);
-            if task.transition(TaskState::Blocked, TaskState::Ready) {
-                let priority = task.priority.load(Ordering::Relaxed);
-                RUNNABLE_TASKS_COUNT[core_id as usize].fetch_add(1, Ordering::AcqRel);
-                self.executing_tasks
-                    .push(sleeper.task_ref.slot as usize, priority);
+            let thread = thread::slot(sleeper.thread_ref.slot as usize);
+            if thread.transition(ThreadState::Blocked, ThreadState::Ready) {
+                let priority = thread.priority.load(Ordering::Relaxed);
+                RUNNABLE_THREADS_COUNT[core_id as usize].fetch_add(1, Ordering::AcqRel);
+                self.executing_threads
+                    .push(sleeper.thread_ref.slot as usize, priority);
                 highest_priority_woken =
                     Some(highest_priority_woken.map_or(priority, |p| p.max(priority)));
             }
 
-            self.seeping_tasks_count -= 1;
-            self.sleeping_tasks[index] = self.sleeping_tasks[self.seeping_tasks_count];
+            self.seeping_threads_count -= 1;
+            self.sleeping_threads[index] = self.sleeping_threads[self.seeping_threads_count];
         }
 
         highest_priority_woken
     }
 
-    fn push_executing_task(&mut self, slot_index: usize, priority: u8) {
-        self.executing_tasks.push(slot_index, priority);
+    fn push_executing_thread(&mut self, slot_index: usize, priority: u8) {
+        self.executing_threads.push(slot_index, priority);
     }
 
-    fn push_yielding_task(&mut self, slot_index: usize, priority: u8) {
-        self.yielding_tasks.push(slot_index, priority);
+    fn push_yielding_thread(&mut self, slot_index: usize, priority: u8) {
+        self.yielding_threads.push(slot_index, priority);
     }
 
     /// INVALID_SLOT when nothing is queued
-    fn pick_next_task(&mut self) -> usize {
-        if self.executing_tasks.is_empty() {
-            if self.yielding_tasks.is_empty() {
+    fn pick_next_thread(&mut self) -> usize {
+        if self.executing_threads.is_empty() {
+            if self.yielding_threads.is_empty() {
                 return INVALID_SLOT as usize;
             }
 
-            core::mem::swap(&mut self.executing_tasks, &mut self.yielding_tasks);
+            core::mem::swap(&mut self.executing_threads, &mut self.yielding_threads);
         }
 
-        self.executing_tasks.pop_highest_prio_oldest_task()
+        self.executing_threads.pop_highest_prio_oldest_thread()
     }
 
-    /// A queued task another core may run, INVALID_SLOT when there is none
-    fn take_stealable_task(&mut self) -> usize {
-        let slot_index = self.executing_tasks.take_task_not_currently_on_cpu();
+    /// A queued thread another core may run, INVALID_SLOT when there is none
+    fn take_stealable_thread(&mut self) -> usize {
+        let slot_index = self.executing_threads.take_thread_not_currently_on_cpu();
         if slot_index != INVALID_SLOT as usize {
             return slot_index;
         }
 
-        self.yielding_tasks.take_task_not_currently_on_cpu()
+        self.yielding_threads.take_thread_not_currently_on_cpu()
     }
 
     fn contains(&self, slot_index: usize) -> bool {
-        self.executing_tasks.contains(slot_index) || self.yielding_tasks.contains(slot_index)
+        self.executing_threads.contains(slot_index) || self.yielding_threads.contains(slot_index)
     }
 }
 
 static CORE_RUN_QUEUES: [CacheAligned<IrqMutex<CoreRunQueue>>; MAX_CORES as usize] =
     [const { CacheAligned(IrqMutex::new(CoreRunQueue::new())) }; MAX_CORES as usize];
 
-fn set_current_task_for_core(core_id: u8, slot_index: u16, pid: PID) {
+fn set_current_thread_for_core(core_id: u8, slot_index: u16, pid: PID) {
     CURRENT_SLOT_ON_CORE[core_id as usize].store(slot_index, Ordering::Release);
     CURRENT_PROCESS_ON_CORE[core_id as usize].store(pid as u64, Ordering::Release);
 }
@@ -353,12 +354,12 @@ pub fn get_current_slot_for_core(core_id: u8) -> usize {
     CURRENT_SLOT_ON_CORE[core_id as usize].load(Ordering::Acquire) as usize
 }
 
-pub fn core_runnable_tasks_count(core_id: u8) -> usize {
-    RUNNABLE_TASKS_COUNT[core_id as usize].load(Ordering::Acquire) as usize
+pub fn core_runnable_threads_count(core_id: u8) -> usize {
+    RUNNABLE_THREADS_COUNT[core_id as usize].load(Ordering::Acquire) as usize
 }
 
-pub fn core_task_leave_run_queue(core_id: u8) {
-    let previous = RUNNABLE_TASKS_COUNT[core_id as usize].fetch_sub(1, Ordering::AcqRel);
+pub fn core_thread_leave_run_queue(core_id: u8) {
+    let previous = RUNNABLE_THREADS_COUNT[core_id as usize].fetch_sub(1, Ordering::AcqRel);
     debug_assert!(previous > 0);
 }
 
@@ -371,15 +372,15 @@ pub fn mark_core_for_reschedule(core_id: u8) {
 }
 
 pub fn on_timer_tick(core_id: u8) {
-    wake_due_sleeping_tasks(core_id);
+    wake_due_sleeping_threads(core_id);
 
     let slot_index = get_current_slot_for_core(core_id);
     if slot_index == INVALID_SLOT as usize {
         return;
     }
 
-    let task = task::slot(slot_index);
-    task.cpu_ticks.fetch_add(1, Ordering::Relaxed);
+    let thread = thread::slot(slot_index);
+    thread.cpu_ticks.fetch_add(1, Ordering::Relaxed);
 
     let remaining_ticks = SLICE_REMAINING_TICKS[core_id as usize].load(Ordering::Relaxed);
     if remaining_ticks > 1 {
@@ -387,64 +388,64 @@ pub fn on_timer_tick(core_id: u8) {
         return;
     }
 
-    let another_task_waits = RUNNABLE_TASKS_COUNT[core_id as usize].load(Ordering::Acquire) > 1;
-    if another_task_waits {
+    let another_thread_waits = RUNNABLE_THREADS_COUNT[core_id as usize].load(Ordering::Acquire) > 1;
+    if another_thread_waits {
         SLICE_REMAINING_TICKS[core_id as usize].store(0, Ordering::Relaxed);
         mark_core_for_reschedule(core_id);
     } else {
-        let priority = task.priority.load(Ordering::Relaxed);
+        let priority = thread.priority.load(Ordering::Relaxed);
         SLICE_REMAINING_TICKS[core_id as usize]
             .store(get_slice_ticks_for_priority(priority), Ordering::Relaxed);
     }
 }
 
-fn wake_due_sleeping_tasks(core_id: u8) {
+fn wake_due_sleeping_threads(core_id: u8) {
     let now_us = crate::interrupts::tsc_timestamp_us();
     let highest_priority_woken = CORE_RUN_QUEUES[core_id as usize]
         .0
         .lock()
-        .wake_due_sleeping_tasks(core_id, now_us);
+        .wake_due_sleeping_threads(core_id, now_us);
 
     let Some(woken_priority) = highest_priority_woken else {
         return;
     };
 
-    // an idle core picks the woken task up by itself when the interrupt returns
+    // an idle core picks the woken thread up by itself when the interrupt returns
     let running_slot = get_current_slot_for_core(core_id);
     if running_slot != INVALID_SLOT as usize
-        && task::slot(running_slot).priority.load(Ordering::Relaxed) < woken_priority
+        && thread::slot(running_slot).priority.load(Ordering::Relaxed) < woken_priority
     {
         mark_core_for_reschedule(core_id);
     }
 }
 
-pub fn core_block_current_task_until_wake_time(wake_time_us: u64, core_id: u8) {
-    let task_ref = task::core_current_task_ref(core_id);
-    let task = task::slot(task_ref.slot as usize);
-    let home_core = task.home_core.load(Ordering::Relaxed);
+pub fn core_block_current_thread_until_wake_time(wake_time_us: u64, core_id: u8) {
+    let thread_ref = thread::core_current_thread_ref(core_id);
+    let thread = thread::slot(thread_ref.slot as usize);
+    let assigned_core = thread.assigned_core.load(Ordering::Relaxed);
 
     {
-        let mut run_queue = CORE_RUN_QUEUES[home_core as usize].0.lock();
-        run_queue.add_sleeping_task(task_ref, wake_time_us);
+        let mut run_queue = CORE_RUN_QUEUES[assigned_core as usize].0.lock();
+        run_queue.add_sleeping_thread(thread_ref, wake_time_us);
 
-        let was_running = task.transition(TaskState::Running, TaskState::Blocked);
+        let was_running = thread.transition(ThreadState::Running, ThreadState::Blocked);
         debug_assert!(was_running);
-        core_task_leave_run_queue(home_core);
+        core_thread_leave_run_queue(assigned_core);
     }
 
-    core_run_scheduling(home_core);
+    core_run_scheduling(assigned_core);
 }
 
-pub fn core_enqueue_ready_task(core_id: u8, slot_index: usize, priority: u8) {
-    RUNNABLE_TASKS_COUNT[core_id as usize].fetch_add(1, Ordering::AcqRel);
+pub fn core_enqueue_ready_thread(core_id: u8, slot_index: usize, priority: u8) {
+    RUNNABLE_THREADS_COUNT[core_id as usize].fetch_add(1, Ordering::AcqRel);
     CORE_RUN_QUEUES[core_id as usize]
         .0
         .lock()
-        .push_executing_task(slot_index, priority);
+        .push_executing_thread(slot_index, priority);
 
     let running_slot = get_current_slot_for_core(core_id);
     let should_preempt = running_slot == INVALID_SLOT as usize
-        || task::slot(running_slot).priority.load(Ordering::Relaxed) < priority;
+        || thread::slot(running_slot).priority.load(Ordering::Relaxed) < priority;
     if !should_preempt {
         return;
     }
@@ -457,7 +458,7 @@ pub fn core_enqueue_ready_task(core_id: u8, slot_index: usize, priority: u8) {
 }
 
 pub fn is_pid_queued(pid: PID) -> bool {
-    let Some(slot_index) = task::find_slot_by_pid(pid) else {
+    let Some(slot_index) = thread::find_slot_by_pid(pid) else {
         return false;
     };
 
@@ -475,12 +476,12 @@ pub fn is_pid_queued(pid: PID) -> bool {
 }
 
 /// Last stop before a core returns to ring 3, with interrupts off
-/// Runs the pending reschedules, so the task comes back here when it is its turn again
+/// Runs the pending reschedules, so the thread comes back here when it is its turn again
 pub fn exit_to_user() {
     debug_assert!(!interrupts::are_enabled());
 
     loop {
-        task::exit_if_kill_pending();
+        thread::exit_if_kill_pending();
 
         let core_id = get_current_core_id();
         if !CORE_SHOULD_BE_RESCHEDULED[core_id as usize].swap(false, Ordering::AcqRel) {
@@ -491,20 +492,20 @@ pub fn exit_to_user() {
     }
 }
 
-pub fn wake_task(task_ref: TaskRef) {
-    let task = task::slot(task_ref.slot as usize);
-    if task.pid.load(Ordering::Acquire) != task_ref.pid {
+pub fn wake_thread(thread_ref: ThreadRef) {
+    let thread = thread::slot(thread_ref.slot as usize);
+    if thread.pid.load(Ordering::Acquire) != thread_ref.pid {
         return;
     }
 
-    if !task.transition(TaskState::Blocked, TaskState::Ready) {
+    if !thread.transition(ThreadState::Blocked, ThreadState::Ready) {
         return;
     }
 
-    // blocked tasks do not migrate, so the home core is the one that last ran it
-    let home_core = task.home_core.load(Ordering::Relaxed);
-    let priority = task.priority.load(Ordering::Relaxed);
-    core_enqueue_ready_task(home_core, task_ref.slot as usize, priority);
+    // blocked threads do not migrate, so the running core is the one that last ran it
+    let assigned_core = thread.assigned_core.load(Ordering::Relaxed);
+    let priority = thread.priority.load(Ordering::Relaxed);
+    core_enqueue_ready_thread(assigned_core, thread_ref.slot as usize, priority);
 }
 
 /// Saves the callee-saved registers on the current stack, stores the stack pointer
@@ -564,10 +565,13 @@ extern "C" fn scheduler_loop(core_id: u64) -> ! {
     loop {
         interrupts::disable();
 
-        let slot_index = CORE_RUN_QUEUES[core_id as usize].0.lock().pick_next_task();
+        let slot_index = CORE_RUN_QUEUES[core_id as usize]
+            .0
+            .lock()
+            .pick_next_thread();
 
         if slot_index == INVALID_SLOT as usize {
-            if WORK_STEALING_ENABLED && try_steal_task(core_id) {
+            if WORK_STEALING_ENABLED && try_steal_thread(core_id) {
                 continue;
             }
 
@@ -583,43 +587,43 @@ extern "C" fn scheduler_loop(core_id: u64) -> ! {
             continue;
         }
 
-        run_task(core_id, slot_index);
+        run_thread(core_id, slot_index);
         kernel_cr3_loaded = false;
     }
 }
 
-/// Moves one waiting task from a busy core to the core_id one
-fn try_steal_task(core_id: u8) -> bool {
+/// Moves one waiting thread from a busy core to the core_id one
+fn try_steal_thread(core_id: u8) -> bool {
     for core_from in 1..MAX_CORES {
         if core_from == core_id {
             continue;
         }
 
-        if RUNNABLE_TASKS_COUNT[core_from as usize].load(Ordering::Acquire) <= 1 {
+        if RUNNABLE_THREADS_COUNT[core_from as usize].load(Ordering::Acquire) <= 1 {
             continue;
         }
 
         let Some(mut core_from_queue) = CORE_RUN_QUEUES[core_from as usize].0.try_lock() else {
             continue;
         };
-        let slot_index = core_from_queue.take_stealable_task();
+        let slot_index = core_from_queue.take_stealable_thread();
         drop(core_from_queue);
 
         if slot_index == INVALID_SLOT as usize {
             continue;
         }
 
-        let task = task::slot(slot_index);
-        task.home_core.store(core_id, Ordering::Relaxed);
-        task.core_migration_count.fetch_add(1, Ordering::Relaxed);
-        RUNNABLE_TASKS_COUNT[core_from as usize].fetch_sub(1, Ordering::AcqRel);
-        RUNNABLE_TASKS_COUNT[core_id as usize].fetch_add(1, Ordering::AcqRel);
+        let thread = thread::slot(slot_index);
+        thread.assigned_core.store(core_id, Ordering::Relaxed);
+        thread.core_migration_count.fetch_add(1, Ordering::Relaxed);
+        RUNNABLE_THREADS_COUNT[core_from as usize].fetch_sub(1, Ordering::AcqRel);
+        RUNNABLE_THREADS_COUNT[core_id as usize].fetch_add(1, Ordering::AcqRel);
 
-        let priority = task.priority.load(Ordering::Relaxed);
+        let priority = thread.priority.load(Ordering::Relaxed);
         CORE_RUN_QUEUES[core_id as usize]
             .0
             .lock()
-            .push_executing_task(slot_index, priority);
+            .push_executing_thread(slot_index, priority);
 
         if SCHED_DEBUG_PRINT {
             serial_println_core!("Stole slot {} from core {}", slot_index, core_from);
@@ -631,28 +635,28 @@ fn try_steal_task(core_id: u8) -> bool {
     false
 }
 
-fn run_task(core_id: u8, slot_index: usize) {
-    let task = task::slot(slot_index);
-    debug_assert!(task.state() == TaskState::Ready);
+fn run_thread(core_id: u8, slot_index: usize) {
+    let thread = thread::slot(slot_index);
+    debug_assert!(thread.state() == ThreadState::Ready);
 
-    let pid = task.pid.load(Ordering::Acquire);
+    let pid = thread.pid.load(Ordering::Acquire);
     let last_pid = LAST_PROCESS_ON_CORE[core_id as usize].swap(pid as u64, Ordering::Relaxed);
     if last_pid != pid as u64 {
-        task.handoff_count.fetch_add(1, Ordering::Relaxed);
+        thread.handoff_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    task.set_state(TaskState::Running);
-    task.on_cpu.store(true, Ordering::Release);
-    set_current_task_for_core(core_id, slot_index as u16, pid);
+    thread.set_state(ThreadState::Running);
+    thread.on_cpu.store(true, Ordering::Release);
+    set_current_thread_for_core(core_id, slot_index as u16, pid);
 
     CORE_SHOULD_BE_RESCHEDULED[core_id as usize].store(false, Ordering::Release);
     SLICE_REMAINING_TICKS[core_id as usize].store(
-        get_slice_ticks_for_priority(task.priority.load(Ordering::Relaxed)),
+        get_slice_ticks_for_priority(thread.priority.load(Ordering::Relaxed)),
         Ordering::Relaxed,
     );
 
-    // ring 3 entries from here on land on the stack of this task
-    let stack_top = task.kernel_stack_top.load(Ordering::Relaxed);
+    // ring 3 entries from here on land on the stack of this thread
+    let stack_top = thread.kernel_stack_top.load(Ordering::Relaxed);
     crate::process::syscall::set_syscall_stack_top(core_id, stack_top);
     crate::gdt::set_privilege_stack_top(core_id, stack_top);
 
@@ -662,51 +666,52 @@ fn run_task(core_id: u8, slot_index: usize) {
 
     // the kernel has no xmm code, so this state stays live until the return to ring 3
     unsafe {
-        (*task.fpu_state.get()).restore_to_cpu();
+        (*thread.fpu_state.get()).restore_to_cpu();
 
-        let frame = PhysFrame::containing_address(PhysAddr::new(task.cr3.load(Ordering::Relaxed)));
+        let frame =
+            PhysFrame::containing_address(PhysAddr::new(thread.cr3.load(Ordering::Relaxed)));
         Cr3::write(frame, Cr3Flags::empty());
 
         switch_context(
             core::ptr::addr_of_mut!(SCHEDULER_RSP[core_id as usize]),
-            *task.saved_rsp.get(),
+            *thread.saved_rsp.get(),
         );
     }
 
-    // the task switched back to this loop, its stack is no longer in use
-    task.on_cpu.store(false, Ordering::Release);
-    set_current_task_for_core(core_id, INVALID_SLOT, INVALID_PID);
+    // the thread switched back to this loop, its stack is no longer in use
+    thread.on_cpu.store(false, Ordering::Release);
+    set_current_thread_for_core(core_id, INVALID_SLOT, INVALID_PID);
 
-    if task.state() == TaskState::Dead {
+    if thread.state() == ThreadState::Dead {
         if SCHED_DEBUG_PRINT {
             serial_println_core!("PID {} dead, releasing slot {}", pid, slot_index);
         }
-        task::release_task_slot(slot_index);
+        thread::release_thread_slot(slot_index);
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RequeueType {
-    ExecutingTasks,
-    YieldingTasks,
+    ExecutingThreads,
+    YieldingThreads,
 }
 
 pub fn core_run_scheduling(core_id: u8) {
     let requeue_type = if SLICE_REMAINING_TICKS[core_id as usize].load(Ordering::Relaxed) == 0 {
-        RequeueType::YieldingTasks
+        RequeueType::YieldingThreads
     } else {
-        RequeueType::ExecutingTasks
+        RequeueType::ExecutingThreads
     };
 
     core_switch_executing_yielding(core_id, requeue_type);
 }
 
-pub fn core_yield_executing_tasks(core_id: u8) {
-    if RUNNABLE_TASKS_COUNT[core_id as usize].load(Ordering::Acquire) <= 1 {
+pub fn core_yield_executing_threads(core_id: u8) {
+    if RUNNABLE_THREADS_COUNT[core_id as usize].load(Ordering::Acquire) <= 1 {
         return;
     }
 
-    core_switch_executing_yielding(core_id, RequeueType::YieldingTasks);
+    core_switch_executing_yielding(core_id, RequeueType::YieldingThreads);
 }
 
 fn core_switch_executing_yielding(core_id: u8, requeue_type: RequeueType) {
@@ -716,24 +721,24 @@ fn core_switch_executing_yielding(core_id: u8, requeue_type: RequeueType) {
     let slot_index = get_current_slot_for_core(core_id);
     debug_assert!(slot_index != INVALID_SLOT as usize);
 
-    let task = task::slot(slot_index);
+    let thread = thread::slot(slot_index);
 
-    unsafe { (*task.fpu_state.get()).save_from_cpu() };
+    unsafe { (*thread.fpu_state.get()).save_from_cpu() };
 
-    // blocked and dead tasks are not queued again
-    if task.transition(TaskState::Running, TaskState::Ready) {
-        let priority = task.priority.load(Ordering::Relaxed);
-        debug_assert!(task.home_core.load(Ordering::Relaxed) == core_id);
+    // blocked and dead threads are not queued again
+    if thread.transition(ThreadState::Running, ThreadState::Ready) {
+        let priority = thread.priority.load(Ordering::Relaxed);
+        debug_assert!(thread.assigned_core.load(Ordering::Relaxed) == core_id);
         let mut run_queue = CORE_RUN_QUEUES[core_id as usize].0.lock();
         match requeue_type {
-            RequeueType::ExecutingTasks => run_queue.push_executing_task(slot_index, priority),
-            RequeueType::YieldingTasks => run_queue.push_yielding_task(slot_index, priority),
+            RequeueType::ExecutingThreads => run_queue.push_executing_thread(slot_index, priority),
+            RequeueType::YieldingThreads => run_queue.push_yielding_thread(slot_index, priority),
         }
     }
 
     unsafe {
         switch_context(
-            task.saved_rsp.get(),
+            thread.saved_rsp.get(),
             *core::ptr::addr_of!(SCHEDULER_RSP[core_id as usize]),
         );
     }

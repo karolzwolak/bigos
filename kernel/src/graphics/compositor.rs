@@ -4,8 +4,11 @@ use crate::events::event_buffer::{
 use crate::events::keyboard_state::{KEY_COUNT, KeyBitset, KeyboardState};
 use crate::graphics::FRAMEBUFFER_BYTES_PER_PIXEL;
 use crate::graphics::framebuffer::FrameBufferTarget;
+use crate::graphics::visible_spans::{
+    ComposeLayer, LayerSource, PixelSpanScratch, for_each_visible_span,
+};
 use crate::graphics::window::{
-    INVALID_WINDOW_ID, Window, WindowBuffer, WindowID, event_buffer_user_vaddr,
+    INVALID_WINDOW_ID, Window, WindowBounds, WindowBuffer, WindowID, event_buffer_user_vaddr,
 };
 use crate::memory::paging::{PAGE_SIZE, align_up};
 use crate::memory::{get_frame_allocator, usermem};
@@ -23,6 +26,8 @@ use x86_64::structures::paging::{PageTableFlags, PhysFrame};
 use x86_64::{PhysAddr, VirtAddr};
 
 static COMPOSITOR: Once<Mutex<Compositor>> = Once::new();
+
+pub static SHELL_RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn init_compositor(width: u32, height: u32) {
     COMPOSITOR.call_once(|| Mutex::new(Compositor::new(width, height)));
@@ -53,10 +58,73 @@ pub fn get_input_event_buffer() -> &'static EventBuffer {
 const NORMALIZE_Z_INDEX_THRESHOLD: u8 = 250;
 
 const MOUSE_DEBUG_PRINT: bool = false;
-const CURSOR_COLOR_XRGB: u32 = 0xFFAAAAFF;
-const CLEAR_COLOR_XRGB: u32 = 0xFF000000;
-const CURSOR_SIZE_X: i32 = 3;
-const CURSOR_SIZE_Y: i32 = 10;
+const FOCUS_PREVIOUS_WINDOW_KEY: KeyCode = KeyCode::A;
+const FOCUS_NEXT_WINDOW_KEY: KeyCode = KeyCode::D;
+const RESTART_SHELL_KEY: KeyCode = KeyCode::T;
+pub const CURSOR_COLOR_XRGB: u32 = 0xFFAAAAFF;
+pub const CLEAR_COLOR_XRGB: u32 = 0xFF000000;
+pub const CURSOR_SIZE_X: i32 = 3;
+pub const CURSOR_SIZE_Y: i32 = 10;
+
+pub const WINDOW_PLACEMENT_GAP_PX: i32 = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlacementSide {
+    Right,
+    BottomLeft,
+    BottomRight,
+}
+
+impl PlacementSide {
+    /// Tried in this order next to every anchor
+    const ORDER: [PlacementSide; 3] = [Self::Right, Self::BottomLeft, Self::BottomRight];
+
+    const fn place_next_to(self, anchor: &WindowBounds, window: WindowBounds) -> WindowBounds {
+        let right_x = anchor.right() + WINDOW_PLACEMENT_GAP_PX;
+        let below_y = anchor.bottom() + WINDOW_PLACEMENT_GAP_PX;
+
+        match self {
+            Self::Right => window.moved_to(right_x, anchor.y),
+            Self::BottomLeft => window.moved_to(anchor.x, below_y),
+            Self::BottomRight => window.moved_to(right_x, below_y),
+        }
+    }
+}
+
+fn visible_windows_painters_order(windows: &[Window]) -> Vec<&Window> {
+    let mut visible_windows: Vec<&Window> =
+        windows.iter().filter(|window| window.is_visible).collect();
+    visible_windows.sort_unstable_by_key(|window| (window.z_index, window.id));
+
+    visible_windows
+}
+
+pub fn find_window_placement(
+    requested: WindowBounds,
+    occupied: &[WindowBounds],
+    screen: WindowBounds,
+) -> WindowBounds {
+    let is_free = |candidate: &WindowBounds| {
+        occupied
+            .iter()
+            .all(|occupied_bounds| !occupied_bounds.overlaps_window(candidate))
+    };
+    if is_free(&requested) {
+        return requested;
+    }
+
+    let anchors = core::iter::once(&requested).chain(occupied.iter());
+    for anchor in anchors {
+        for side in PlacementSide::ORDER {
+            let candidate = side.place_next_to(anchor, requested);
+            if screen.contains_window(&candidate) && is_free(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    requested
+}
 
 pub struct Compositor {
     framebuffer_width: u32,
@@ -71,11 +139,14 @@ pub struct Compositor {
     mouse_x: AtomicI32,
     mouse_y: AtomicI32,
     cursor_visible: AtomicBool,
-    // a destroyed window leaves its pixels in the framebuffer, the next compose wipes them
-    needs_framebuffer_clear: AtomicBool,
 
-    mouse_last_drawn_x: i32,
-    mouse_last_drawn_y: i32,
+    /// window ids and screen bounds the last compose drew, in draw order
+    drawn_window_layout: Vec<(WindowID, WindowBounds)>,
+    drawn_cursor: WindowBounds,
+    /// the framebuffer still holds what the bootloader left, the first compose clears it
+    is_background_stale: bool,
+    compose_layers: Vec<ComposeLayer>,
+    span_scratch: PixelSpanScratch,
 
     keyboard_state: KeyboardState,
 }
@@ -92,9 +163,11 @@ impl Compositor {
             mouse_x: AtomicI32::new(0),
             mouse_y: AtomicI32::new(0),
             cursor_visible: AtomicBool::new(true),
-            needs_framebuffer_clear: AtomicBool::new(false),
-            mouse_last_drawn_x: 0,
-            mouse_last_drawn_y: 0,
+            drawn_window_layout: Vec::new(),
+            drawn_cursor: WindowBounds::EMPTY,
+            is_background_stale: true,
+            compose_layers: Vec::new(),
+            span_scratch: PixelSpanScratch::new(),
             keyboard_state: KeyboardState::new(),
         }
     }
@@ -111,9 +184,6 @@ impl Compositor {
         self.framebuffer_height
     }
 
-    /// Max bytes a single window buffer may occupy, bounded by the framebuffer
-    /// resolution and a hard clamp. One framebuffer-sized surface is the
-    /// largest window that can contribute visible pixels.
     pub fn max_window_buffer_bytes(&self) -> u64 {
         let framebuffer_bytes = self.framebuffer_width as u64
             * self.framebuffer_height as u64
@@ -122,11 +192,22 @@ impl Compositor {
         align_up(framebuffer_bytes, PAGE_SIZE as u64).min(PROCESS_WINDOW_BUFFER_HARD_MAX_SIZE)
     }
 
-    /// User virtual address of the front and back buffer slot of a window, the front buffer
-    /// follows the back buffer by max_window_buffer_bytes
     pub fn window_buffer_user_base(&self, window_id: WindowID) -> u64 {
         let slot_size = 2 * self.max_window_buffer_bytes();
         PROCESS_WINDOW_BUFFER_BASE + window_id as u64 * slot_size
+    }
+
+    pub fn screen_bounds(&self) -> WindowBounds {
+        WindowBounds::new(0, 0, self.framebuffer_width, self.framebuffer_height)
+    }
+
+    pub fn visible_window_bounds(&self) -> Vec<WindowBounds> {
+        self.windows
+            .read()
+            .iter()
+            .filter(|window| window.is_visible)
+            .map(Window::bounds)
+            .collect()
     }
 
     pub fn create_window(
@@ -137,6 +218,13 @@ impl Compositor {
         y: i32,
         pid: PID,
     ) -> (WindowID, Arc<WindowBuffer>, Option<&'static EventBuffer>) {
+        let placed = find_window_placement(
+            WindowBounds::new(x, y, width, height),
+            &self.visible_window_bounds(),
+            self.screen_bounds(),
+        );
+        let (x, y) = (placed.x, placed.y);
+
         let buffer = Arc::new(WindowBuffer::new(width, height, x, y));
         let id = if let Some(free_id) = self.free_window_ids.lock().pop() {
             free_id
@@ -361,7 +449,6 @@ impl Compositor {
             )
         };
         self.free_window_ids.lock().push(window_id);
-        self.needs_framebuffer_clear.store(true, Ordering::Release);
 
         // the dead window kept the focus, without this no window would get keys again
         if was_focused {
@@ -441,6 +528,15 @@ impl Compositor {
     }
 
     /// True when a window of the process has input waiting in its event buffer
+    pub fn is_present_pending(&self, window_id: u32) -> bool {
+        self.windows
+            .read()
+            .get(window_id as usize)
+            .is_some_and(|window| {
+                window.is_visible && window.buffer.needs_swap.load(Ordering::Acquire)
+            })
+    }
+
     pub fn process_has_pending_input(&self, pid: PID) -> bool {
         self.windows.read().iter().any(|window| {
             window.owner_pid == pid
@@ -497,11 +593,15 @@ impl Compositor {
 
     fn handle_key_state_event(&mut self, event: InputEvent) {
         debug_assert!((event.value as usize) < KEY_COUNT);
-        self.keyboard_state.update(
-            event.value as u8,
-            KeyState::from_raw(event.extra),
-            event.key_modifiers(),
-        );
+        let key = event.value as u8;
+        let state = KeyState::from_raw(event.extra);
+        self.keyboard_state
+            .update(key, state, event.key_modifiers());
+
+        // letters reach the compositor only as key states and chars, so focus hotkeys are handled here
+        if self.keyboard_state.is_down(KeyCode::LAlt) && state == KeyState::Pressed {
+            self.handle_alt_hotkey(key);
+        }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
             event_buffer.publish_keyboard_state(
@@ -512,22 +612,22 @@ impl Compositor {
         }
     }
 
+    fn handle_alt_hotkey(&mut self, key: u8) {
+        if key == RESTART_SHELL_KEY as u8 {
+            SHELL_RESTART_REQUESTED.store(true, Ordering::Release);
+        } else if key == FOCUS_PREVIOUS_WINDOW_KEY as u8 {
+            let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
+            let new_focused_window_id = focused_window_id.saturating_sub(1);
+            self.focus_window(new_focused_window_id);
+        } else if key == FOCUS_NEXT_WINDOW_KEY as u8 {
+            let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
+            let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
+            self.focus_window(new_focused_window_id);
+        }
+    }
+
     pub fn handle_keyboard_event(&mut self, event: InputEvent) {
         debug_assert!((event.value as usize) < KEY_COUNT);
-        let key = event.value as u8;
-        let state = KeyState::from_raw(event.extra);
-
-        if self.keyboard_state.is_down(KeyCode::LAlt) && state == KeyState::Pressed {
-            if key == KeyCode::ArrowLeft as u8 {
-                let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
-                let new_focused_window_id = focused_window_id.saturating_sub(1);
-                self.focus_window(new_focused_window_id);
-            } else if key == KeyCode::ArrowRight as u8 {
-                let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
-                let (new_focused_window_id, _) = focused_window_id.overflowing_add(1);
-                self.focus_window(new_focused_window_id);
-            }
-        }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
             let _ = event_buffer.push(event);
@@ -629,138 +729,153 @@ impl Compositor {
         }
     }
 
-    fn draw_cursor(
-        &self,
-        cursor_x: i32,
-        cursor_y: i32,
-        color_xrgb: u32,
-        framebuffer: &FrameBufferTarget,
-    ) {
-        let framebuffer_ptr = framebuffer.address();
-        let framebuffer_pitch = framebuffer.pitch as u32;
-        let framebuffer_width = framebuffer.width as u32;
-        let framebuffer_height = framebuffer.height as u32;
-        if cursor_x >= 0
-            && cursor_x < framebuffer_width as i32
-            && cursor_y >= 0
-            && cursor_y < framebuffer_height as i32
-        {
-            let start_x = cursor_x.max(0) as u32;
-            let start_y = cursor_y.max(0) as u32;
-            let end_x = (cursor_x + CURSOR_SIZE_X).min(framebuffer_width as i32) as u32;
-            let end_y = (cursor_y + CURSOR_SIZE_Y).min(framebuffer_height as i32) as u32;
-
-            for y in start_y..end_y {
-                for x in start_x..end_x {
-                    let dst_offset =
-                        (y * framebuffer_pitch + x * FRAMEBUFFER_BYTES_PER_PIXEL) as usize;
-
-                    unsafe {
-                        let dst_ptr = framebuffer_ptr.add(dst_offset).cast::<u32>();
-                        core::ptr::write_volatile(dst_ptr, color_xrgb);
-                    }
-                }
-            }
-            if MOUSE_DEBUG_PRINT {
-                serial_println_core!("Cursor drawn at ({}, {})", cursor_x, cursor_y);
-            }
-        }
-    }
-
-    fn clear_framebuffer(framebuffer: &FrameBufferTarget) {
-        let framebuffer_ptr = framebuffer.address();
-        let row_bytes = framebuffer.width as usize * FRAMEBUFFER_BYTES_PER_PIXEL as usize;
-
-        for y in 0..framebuffer.height as usize {
-            // SAFETY: every row of the framebuffer is pitch bytes apart and holds width pixels
-            unsafe {
-                let row_ptr = framebuffer_ptr
-                    .add(y * framebuffer.pitch as usize)
-                    .cast::<u32>();
-                core::slice::from_raw_parts_mut(row_ptr, row_bytes / size_of::<u32>())
-                    .fill(CLEAR_COLOR_XRGB);
-            }
-        }
-    }
-
     //TODO:compositor should own the framebuffer
     //TODO: alpha blending
     pub fn compose(&mut self, framebuffer: &mut FrameBufferTarget) {
-        let windows = self.windows.read();
-
-        let visible_windows: Vec<&Window> = windows.iter().filter(|w| w.is_visible).collect();
-
-        let framebuffer_ptr = framebuffer.address();
-        let framebuffer_pitch = framebuffer.pitch;
-        let framebuffer_width = framebuffer.width;
-        let framebuffer_height = framebuffer.height;
-
-        // clear cursor
-        self.draw_cursor(
-            self.mouse_last_drawn_x,
-            self.mouse_last_drawn_y,
-            CLEAR_COLOR_XRGB,
-            framebuffer,
+        let screen = WindowBounds::new(0, 0, framebuffer.width as u32, framebuffer.height as u32);
+        debug_assert!(
+            screen.width == self.framebuffer_width && screen.height == self.framebuffer_height
         );
-        // serial_println!("Composing frame with {} visible windows", visible_windows.len());
 
-        if self.needs_framebuffer_clear.swap(false, Ordering::AcqRel) {
-            Self::clear_framebuffer(framebuffer);
+        let windows = self.windows.read();
+        let visible_windows = visible_windows_painters_order(&windows);
+
+        let mut swapped_any = false;
+        for window in &visible_windows {
+            swapped_any |= window.buffer.try_swap();
         }
 
-        for window in visible_windows {
-            if window.is_visible {
-                window.buffer.try_swap();
-
-                // serial_println!("Compositing window ID {} at position ({}, {}) with size {}x{}", window.id, window.x, window.y, window.buffer.width, window.buffer.height);
-
-                let start_x = window.x.max(0) as u32;
-                let start_y = window.y.max(0) as u32;
-                let end_x =
-                    (window.x + window.buffer.width as i32).min(framebuffer_width as i32) as u32;
-                let end_y =
-                    (window.y + window.buffer.height as i32).min(framebuffer_height as i32) as u32;
-
-                if start_x >= end_x || start_y >= end_y {
-                    // serial_println!("Skipping window ID {} - out of bounds", window.id);
-                    continue;
-                }
-
-                let src_x = if window.x > 0 { 0 } else { -window.x as u32 };
-                let src_y = if window.y > 0 { 0 } else { -window.y as u32 };
-
-                let copy_width = end_x - start_x;
-                let copy_height = end_y - start_y;
-
-                let src_ptr = window.buffer.front_buffer_ptr();
-
-                // serial_println!("Copying window ID {} to framebuffer region ({}, {}) - ({}, {})", window.id, start_x, start_y, end_x, end_y);
-
-                for y in 0..copy_height {
-                    let src_offset = ((src_y + y) * window.buffer.width + src_x) as usize;
-                    let dst_offset = ((start_y + y) * framebuffer_pitch as u32
-                        + start_x * FRAMEBUFFER_BYTES_PER_PIXEL)
-                        as usize;
-
-                    unsafe {
-                        let dst_ptr = framebuffer_ptr.add(dst_offset).cast::<u32>();
-                        core::ptr::copy_nonoverlapping(
-                            src_ptr.add(src_offset),
-                            dst_ptr,
-                            copy_width as usize,
-                        );
-                    }
-                }
-            }
-        }
-
-        if self.cursor_visible.load(Ordering::Relaxed) {
+        let cursor = if self.cursor_visible.load(Ordering::Relaxed) {
             let cursor_x = self.mouse_x.load(Ordering::Relaxed);
             let cursor_y = self.mouse_y.load(Ordering::Relaxed);
-            self.mouse_last_drawn_x = cursor_x;
-            self.mouse_last_drawn_y = cursor_y;
+            WindowBounds::new(
+                cursor_x,
+                cursor_y,
+                CURSOR_SIZE_X as u32,
+                CURSOR_SIZE_Y as u32,
+            )
+            .clipped_to_area(&screen)
+        } else {
+            WindowBounds::EMPTY
+        };
 
-            self.draw_cursor(cursor_x, cursor_y, CURSOR_COLOR_XRGB, framebuffer);
+        self.compose_layers.clear();
+        self.compose_layers.push(ComposeLayer::new(
+            WindowBounds::EMPTY,
+            LayerSource::Background,
+        ));
+
+        let mut is_window_layout_same = self.drawn_window_layout.len() == visible_windows.len();
+        for (index, window) in visible_windows.iter().enumerate() {
+            let bounds = window.bounds().clipped_to_area(&screen);
+            self.compose_layers
+                .push(ComposeLayer::new(bounds, LayerSource::Window(index)));
+
+            is_window_layout_same &= self
+                .drawn_window_layout
+                .get(index)
+                .is_some_and(|&drawn| drawn == (window.id, bounds));
+        }
+        self.compose_layers
+            .push(ComposeLayer::new(cursor, LayerSource::Cursor));
+
+        // what is not under a window keeps its pixels from the last frame, so the background is
+        // only drawn where a window left
+        self.compose_layers[0].bounds = if self.is_background_stale || !is_window_layout_same {
+            screen
+        } else if self.drawn_cursor != cursor {
+            self.drawn_cursor
+        } else {
+            WindowBounds::EMPTY
+        };
+
+        if !is_window_layout_same {
+            self.drawn_window_layout.clear();
+            for (index, window) in visible_windows.iter().enumerate() {
+                let bounds = self.compose_layers[index + 1].bounds;
+                self.drawn_window_layout.push((window.id, bounds));
+            }
+        }
+        self.drawn_cursor = cursor;
+        self.is_background_stale = false;
+
+        let framebuffer_ptr = framebuffer.address();
+        let framebuffer_pitch = framebuffer.pitch as usize;
+        for_each_visible_span(
+            &self.compose_layers,
+            &mut self.span_scratch,
+            |layer, band_top, band_bottom, span| {
+                let rows = band_top as usize..band_bottom as usize;
+                let first_column = span.start as usize;
+                let row_pixel_count = span.len();
+
+                match layer.source {
+                    LayerSource::Window(index) => {
+                        let window = visible_windows[index];
+                        let source_width = window.buffer.width as usize;
+                        let source_column = (span.start - window.x) as usize;
+                        let source_first_row = (band_top - window.y) as usize;
+                        let source = window.buffer.front_buffer_ptr();
+
+                        for (source_row, row) in (source_first_row..).zip(rows) {
+                            // SAFETY: the span lies inside the window and inside the screen
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    source.add(source_row * source_width + source_column),
+                                    framebuffer_row(framebuffer_ptr, framebuffer_pitch, row)
+                                        .add(first_column),
+                                    row_pixel_count,
+                                );
+                            }
+                        }
+                    }
+                    LayerSource::Background => fill_rows(
+                        framebuffer_ptr,
+                        framebuffer_pitch,
+                        rows,
+                        first_column,
+                        row_pixel_count,
+                        CLEAR_COLOR_XRGB,
+                    ),
+                    LayerSource::Cursor => fill_rows(
+                        framebuffer_ptr,
+                        framebuffer_pitch,
+                        rows,
+                        first_column,
+                        row_pixel_count,
+                        CURSOR_COLOR_XRGB,
+                    ),
+                }
+            },
+        );
+
+        if swapped_any {
+            crate::process::wait::WINDOW_SWAP_WAIT_QUEUE.wake_all();
+        }
+    }
+}
+
+/// First pixel of a framebuffer row
+///
+/// # Safety
+/// `row` must be below the framebuffer height
+unsafe fn framebuffer_row(framebuffer_ptr: *mut u8, pitch: usize, row: usize) -> *mut u32 {
+    unsafe { framebuffer_ptr.add(row * pitch).cast::<u32>() }
+}
+
+fn fill_rows(
+    framebuffer_ptr: *mut u8,
+    pitch: usize,
+    rows: core::ops::Range<usize>,
+    first_column: usize,
+    pixel_count: usize,
+    color_xrgb: u32,
+) {
+    for row in rows {
+        // SAFETY: the caller keeps the rows and columns inside the framebuffer
+        unsafe {
+            let row_start = framebuffer_row(framebuffer_ptr, pitch, row).add(first_column);
+            core::slice::from_raw_parts_mut(row_start, pixel_count).fill(color_xrgb);
         }
     }
 }

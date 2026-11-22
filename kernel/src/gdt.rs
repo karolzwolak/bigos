@@ -5,7 +5,7 @@ use x86_64::registers::segmentation::Segment;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
 
-use crate::process::task::MAX_TASKS;
+use crate::process::thread::MAX_THREADS;
 use crate::{MAX_CORES, serial_println};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
@@ -14,8 +14,8 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const PER_CORE_STACK_SIZE: usize = 8 * 4096; // 32 KiB
 pub const GUARD_PAGE_SIZE: usize = 4096;
 
-// Syscalls run on the task stack, so it needs the room the old per-core syscall stack had
-pub const TASK_KERNEL_STACK_SIZE: usize = 16 * 4096; // 64 KiB
+// Syscalls run on the thread stack, so it needs the room the old per-core syscall stack had
+pub const THREAD_KERNEL_STACK_SIZE: usize = 16 * 4096; // 64 KiB
 
 pub const KERNEL_CODE_SELECTOR_VALUE: u16 = 0x08;
 pub const KERNEL_DATA_SELECTOR_VALUE: u16 = 0x10;
@@ -46,34 +46,34 @@ static mut IST0_STACKS: [GuardedKernelStack; MAX_CORES as usize] =
 static mut SCHEDULER_STACKS: [GuardedKernelStack; MAX_CORES as usize] =
     [const { GuardedKernelStack::new() }; MAX_CORES as usize];
 
-static mut KERNEL_TASK_STACKS: [GuardedKernelStack<TASK_KERNEL_STACK_SIZE>; MAX_TASKS] =
-    [const { GuardedKernelStack::new() }; MAX_TASKS];
+static mut KERNEL_THREAD_STACKS: [GuardedKernelStack<THREAD_KERNEL_STACK_SIZE>; MAX_THREADS] =
+    [const { GuardedKernelStack::new() }; MAX_THREADS];
 
-pub fn task_stack_top(slot_index: usize) -> u64 {
-    debug_assert!(slot_index < MAX_TASKS);
+pub fn thread_stack_top(slot_index: usize) -> u64 {
+    debug_assert!(slot_index < MAX_THREADS);
 
     unsafe {
-        let slot = &KERNEL_TASK_STACKS[slot_index];
-        slot.stack.as_ptr().add(TASK_KERNEL_STACK_SIZE) as u64
+        let slot = &KERNEL_THREAD_STACKS[slot_index];
+        slot.stack.as_ptr().add(THREAD_KERNEL_STACK_SIZE) as u64
     }
 }
 
-pub fn task_guard_page(slot_index: usize) -> VirtAddr {
-    debug_assert!(slot_index < MAX_TASKS);
+pub fn thread_guard_page(slot_index: usize) -> VirtAddr {
+    debug_assert!(slot_index < MAX_THREADS);
 
     unsafe {
-        let slot = &KERNEL_TASK_STACKS[slot_index];
+        let slot = &KERNEL_THREAD_STACKS[slot_index];
         VirtAddr::new(slot.guard.as_ptr() as u64)
     }
 }
 
-pub fn task_stack_bounds(slot_index: usize) -> (VirtAddr, VirtAddr) {
-    debug_assert!(slot_index < MAX_TASKS);
+pub fn thread_stack_bounds(slot_index: usize) -> (VirtAddr, VirtAddr) {
+    debug_assert!(slot_index < MAX_THREADS);
 
     unsafe {
-        let slot = &KERNEL_TASK_STACKS[slot_index];
+        let slot = &KERNEL_THREAD_STACKS[slot_index];
         let bottom = VirtAddr::new(slot.stack.as_ptr() as u64);
-        let top = VirtAddr::new(slot.stack.as_ptr().add(TASK_KERNEL_STACK_SIZE) as u64);
+        let top = VirtAddr::new(slot.stack.as_ptr().add(THREAD_KERNEL_STACK_SIZE) as u64);
         (bottom, top)
     }
 }
@@ -171,27 +171,30 @@ pub fn install_guard_pages(frame_allocator: &mut crate::memory::paging::MemoryMa
         }
     }
 
-    for slot_index in 0..MAX_TASKS {
+    for slot_index in 0..MAX_THREADS {
         unsafe {
-            crate::stack_guard::ensure_guard_unmapped(task_guard_page(slot_index), frame_allocator);
+            crate::stack_guard::ensure_guard_unmapped(
+                thread_guard_page(slot_index),
+                frame_allocator,
+            );
         }
     }
 }
 
-/// The running task owns its kernel stack, so rsp must lie inside it
+/// The running thread owns its kernel stack, so rsp must lie inside it
 #[inline(always)]
-pub fn assert_rsp_in_task_stack(core_id: u8) {
+pub fn assert_rsp_in_thread_stack(core_id: u8) {
     let slot_index = crate::process::scheduler::get_current_slot_for_core(core_id);
-    if slot_index == crate::process::task::INVALID_SLOT as usize {
+    if slot_index == crate::process::thread::INVALID_SLOT as usize {
         return;
     }
 
     let rsp: u64;
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
-    let (bottom, top) = task_stack_bounds(slot_index);
+    let (bottom, top) = thread_stack_bounds(slot_index);
     debug_assert!(
         rsp >= bottom.as_u64() && rsp <= top.as_u64(),
-        "RSP {:#x} out of bounds for task slot {} on core {} [{:#x}..{:#x}]",
+        "RSP {:#x} out of bounds for thread slot {} on core {} [{:#x}..{:#x}]",
         rsp,
         slot_index,
         core_id,

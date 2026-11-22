@@ -5,9 +5,9 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::process::elf_loader::load_elf_from_path;
-use kernel::process::process_manager::{ARCHE_PID, BIGPROC_NAME, BIGPROC_PID, PROCESS_MANAGER};
+use kernel::process::process_manager::{BIGPROC_NAME, BIGPROC_PID, NO_PARENT_PID, PROCESS_MANAGER};
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task;
+use kernel::process::thread;
 use kernel::process::{ChildPolicy, PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, mount_test_disk, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -80,8 +80,8 @@ fn wait_until(what: &str, deadline_us: u64, condition: impl Fn() -> bool) {
     }
 }
 
-fn has_task(pid: PID) -> bool {
-    task::find_slot_by_pid(pid).is_some()
+fn has_thread(pid: PID) -> bool {
+    thread::find_slot_by_pid(pid).is_some()
 }
 
 fn children_of(pid: PID) -> alloc::vec::Vec<PID> {
@@ -101,23 +101,17 @@ fn check_bigproc() {
         serial_println_core!("PID 1 is named {}", bigproc.name);
         fail("PID 1 is not bigproc");
     }
-    if bigproc.parent_pid != ARCHE_PID || bigproc.state == ProcessState::Terminated {
-        fail("bigproc is not a live child of arche");
-    }
-    let Ok(arche) = process_manager.get_process(ARCHE_PID) else {
-        fail("arche does not exist");
-    };
-    if !arche.children.contains(&BIGPROC_PID) {
-        fail("arche does not list bigproc as a child");
+    if bigproc.parent_pid != NO_PARENT_PID || bigproc.state == ProcessState::Terminated {
+        fail("bigproc is not a live process without a parent");
     }
     drop(process_manager);
 
-    if !has_task(BIGPROC_PID) {
-        fail("bigproc has no task");
+    if !has_thread(BIGPROC_PID) {
+        fail("bigproc has no thread");
     }
 }
 
-/// Starts treeroot under arche, waits for its leaves, checks the links, returns (root, leaves)
+/// Starts treeroot under bigproc, waits for its leaves, checks the links, returns (root, leaves)
 fn start_tree(mode: u32) -> (PID, [PID; LEAF_COUNT]) {
     for index in 0..USED_COUNTER_COUNT {
         counter(index).store(0, Ordering::Release);
@@ -132,7 +126,7 @@ fn start_tree(mode: u32) -> (PID, [PID; LEAF_COUNT]) {
         }
     };
     let root_pid = match PROCESS_MANAGER.lock().create_process_from_elf(
-        ARCHE_PID,
+        BIGPROC_PID,
         &elf_info,
         ROOT_NAME,
         ROOT_PRIORITY,
@@ -147,9 +141,9 @@ fn start_tree(mode: u32) -> (PID, [PID; LEAF_COUNT]) {
     wait_until("treeroot and its leaves", STARTUP_DEADLINE_US, || {
         (counter(COUNTER_ROOT_READY).load(Ordering::Acquire) == 1
             && counter(COUNTER_LEAVES_STARTED).load(Ordering::Acquire) == LEAF_COUNT as u32)
-            || !has_task(root_pid)
+            || !has_thread(root_pid)
     });
-    if !has_task(root_pid) {
+    if !has_thread(root_pid) {
         fail("treeroot exited before it was ready");
     }
 
@@ -160,8 +154,8 @@ fn start_tree(mode: u32) -> (PID, [PID; LEAF_COUNT]) {
         fail("treeroot policy checks failed");
     }
 
-    if !children_of(ARCHE_PID).contains(&root_pid) {
-        fail("arche does not list treeroot as a child");
+    if !children_of(BIGPROC_PID).contains(&root_pid) {
+        fail("bigproc does not list treeroot as a child");
     }
     let root_children = children_of(root_pid);
     if root_children.len() != LEAF_COUNT {
@@ -202,8 +196,8 @@ fn check_terminated(pid: PID, exit_code: i32, what: &str) {
 }
 
 fn check_root_unlinked(root_pid: PID) {
-    if children_of(ARCHE_PID).contains(&root_pid) {
-        fail("arche still lists the terminated treeroot");
+    if children_of(BIGPROC_PID).contains(&root_pid) {
+        fail("bigproc still lists the terminated treeroot");
     }
 }
 
@@ -219,7 +213,7 @@ fn check_and_release_orphans(root_pid: PID, leaves: [PID; LEAF_COUNT], root_exit
             let Ok(leaf) = process_manager.get_process(leaf_pid) else {
                 fail("an orphaned leaf is gone");
             };
-            if leaf.state == ProcessState::Terminated || !has_task(leaf_pid) {
+            if leaf.state == ProcessState::Terminated || !has_thread(leaf_pid) {
                 fail("an orphaned leaf was killed");
             }
             if leaf.parent_pid != BIGPROC_PID || !bigproc_children.contains(&leaf_pid) {
@@ -231,7 +225,7 @@ fn check_and_release_orphans(root_pid: PID, leaves: [PID; LEAF_COUNT], root_exit
 
     counter(COUNTER_LEAF_RELEASE).store(1, Ordering::Release);
     wait_until("the orphaned leaves to exit", DEADLINE_US, || {
-        leaves.iter().all(|&leaf_pid| !has_task(leaf_pid))
+        leaves.iter().all(|&leaf_pid| !has_thread(leaf_pid))
     });
 
     for leaf_pid in leaves {
@@ -248,7 +242,7 @@ fn check_and_release_orphans(root_pid: PID, leaves: [PID; LEAF_COUNT], root_exit
 
 fn check_cascade(root_pid: PID, leaves: [PID; LEAF_COUNT], exit_code: i32) {
     wait_until("the whole tree to exit", DEADLINE_US, || {
-        !has_task(root_pid) && leaves.iter().all(|&leaf_pid| !has_task(leaf_pid))
+        !has_thread(root_pid) && leaves.iter().all(|&leaf_pid| !has_thread(leaf_pid))
     });
 
     check_terminated(root_pid, exit_code, ROOT_NAME);
@@ -259,8 +253,8 @@ fn check_cascade(root_pid: PID, leaves: [PID; LEAF_COUNT], exit_code: i32) {
 }
 
 fn kill(pid: PID, child_policy: ChildPolicy) {
-    if !task::request_kill(pid, KILL_EXIT_CODE, child_policy) {
-        fail("request_kill found no task");
+    if !thread::request_kill(pid, KILL_EXIT_CODE, child_policy) {
+        fail("request_kill found no thread");
     }
 }
 
@@ -275,7 +269,7 @@ fn round_exit_killing_children() {
 fn round_exit_orphaning_children() {
     let (root_pid, leaves) = start_tree(MODE_EXIT_ORPHANING_CHILDREN);
     counter(COUNTER_ROOT_RELEASE).store(1, Ordering::Release);
-    wait_until("treeroot to exit", DEADLINE_US, || !has_task(root_pid));
+    wait_until("treeroot to exit", DEADLINE_US, || !has_thread(root_pid));
 
     check_and_release_orphans(root_pid, leaves, ROOT_EXIT_CODE);
     serial_println_core!("exit orphaning children: ok");
@@ -292,7 +286,7 @@ fn round_kill_killing_children() {
 fn round_kill_orphaning_children() {
     let (root_pid, leaves) = start_tree(MODE_WAIT_FOR_KILL);
     kill(root_pid, ChildPolicy::OrphanChildren);
-    wait_until("treeroot to die", DEADLINE_US, || !has_task(root_pid));
+    wait_until("treeroot to die", DEADLINE_US, || !has_thread(root_pid));
 
     check_and_release_orphans(root_pid, leaves, KILL_EXIT_CODE);
     serial_println_core!("kill orphaning children: ok");

@@ -3,13 +3,16 @@ use crate::process::elf_loader::load_elf_from_path;
 use crate::process::process_manager::{BIGPROC_PID, PROCESS_MANAGER, ProcessSpawn};
 use crate::process::scheduler::{self, MAX_PRIORITY};
 use crate::process::syscall::{SyscallError, SyscallFrame};
+use crate::process::thread::{self, ThreadState};
 use crate::process::user_access::{UserAccess, copy_from_user, copy_user_path, validate_user_ptr};
+use crate::process::wait;
 use crate::process::{
-    FileDescriptor, MAX_ARGC, MAX_ARGV_BYTES, MAX_OPEN_FILES, MAX_PROCESS_NAME_LEN, Process,
-    ProcessState,
+    FileDescriptor, INVALID_PID, MAX_ARGC, MAX_ARGV_BYTES, MAX_OPEN_FILES, MAX_PROCESS_NAME_LEN,
+    PID, Process, ProcessState,
 };
 use crate::util::cpuinfo::get_current_core_id;
 use bitflags::bitflags;
+use core::sync::atomic::Ordering;
 use static_assertions::const_assert;
 
 const ARGUMENT_TERMINATOR: u8 = 0;
@@ -250,4 +253,178 @@ pub fn list_processes(frame: &SyscallFrame) -> Result<u64, SyscallError> {
     }
 
     Ok(written as u64)
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessRunState {
+    Ready = 0,
+    Running = 1,
+    Blocked = 2,
+    Terminated = 3,
+}
+
+/// assigned_core of a process without a thread slot
+pub const PROCESS_NO_CORE_ASSIGNED: u8 = u8::MAX;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessDetailsFlat {
+    pub pid: u64,
+    pub parent_pid: u64,
+    /// sum of every mapped user region, shared mappings included
+    pub mapped_bytes: u64,
+    /// ProcessRunState
+    pub run_state: u8,
+    pub priority: u8,
+    pub assigned_core: u8,
+    pub name_len: u8,
+    pub exit_code: i32,
+    pub child_count: u32,
+    pub open_fd_count: u32,
+    pub channel_count: u32,
+    pub stdout_write_syscall_count: u32,
+    pub core_migration_count: u32,
+    pub handoff_count: u32,
+    pub name: [u8; MAX_PROCESS_NAME_LEN],
+}
+
+const PROCESS_DETAILS_FLAT_SIZE_BYTES: usize = core::mem::size_of::<ProcessDetailsFlat>();
+const_assert!(PROCESS_DETAILS_FLAT_SIZE_BYTES == 88);
+
+impl ProcessDetailsFlat {
+    fn from_process(process: &Process) -> Self {
+        debug_assert!(process.name.len() <= MAX_PROCESS_NAME_LEN);
+
+        let name_len = process.name.len();
+        let mut name = [0u8; MAX_PROCESS_NAME_LEN];
+        name[..name_len].copy_from_slice(process.name.as_bytes());
+
+        let mut details = Self {
+            pid: process.pid as u64,
+            parent_pid: process.parent_pid as u64,
+            mapped_bytes: process
+                .memory_layout
+                .regions
+                .iter()
+                .map(|region| region.size_bytes)
+                .sum(),
+            run_state: ProcessRunState::Terminated as u8,
+            priority: process.priority,
+            assigned_core: PROCESS_NO_CORE_ASSIGNED,
+            name_len: name_len as u8,
+            exit_code: process.exit_code.unwrap_or(0),
+            child_count: process.children.len() as u32,
+            open_fd_count: process
+                .file_descriptors
+                .iter()
+                .filter(|descriptor| descriptor.is_open())
+                .count() as u32,
+            channel_count: process
+                .channels
+                .iter()
+                .filter(|mapping| mapping.is_mapped())
+                .count() as u32,
+            stdout_write_syscall_count: process.stdout_write_syscall_count,
+            core_migration_count: 0,
+            handoff_count: 0,
+            name,
+        };
+
+        if process.state == ProcessState::Terminated {
+            return details;
+        }
+
+        // a new process gets its slot before it enters the list
+        let Some(slot_index) = thread::find_slot_by_pid(process.pid) else {
+            details.run_state = ProcessRunState::Running as u8;
+            return details;
+        };
+        let thread = thread::slot(slot_index);
+        details.run_state = match thread.state() {
+            ThreadState::Running => ProcessRunState::Running,
+            ThreadState::Blocked => ProcessRunState::Blocked,
+            ThreadState::Dead => ProcessRunState::Terminated,
+            ThreadState::Free | ThreadState::Creating | ThreadState::Ready => {
+                ProcessRunState::Ready
+            }
+        } as u8;
+        details.assigned_core = thread.assigned_core.load(Ordering::Relaxed);
+        details.core_migration_count = thread.core_migration_count.load(Ordering::Relaxed);
+        details.handoff_count = thread.handoff_count.load(Ordering::Relaxed);
+
+        details
+    }
+}
+
+/// GetProcessInfo(pid, out_ptr, out_size_bytes)
+/// Any process may be asked about, terminated ones too until they are removed
+pub fn get_process_info(frame: &SyscallFrame) -> Result<u64, SyscallError> {
+    let pid = frame.arg1 as PID;
+    let out_ptr = frame.arg2 as usize;
+    if frame.arg3 as usize != PROCESS_DETAILS_FLAT_SIZE_BYTES || pid == INVALID_PID {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if !validate_user_ptr(out_ptr, PROCESS_DETAILS_FLAT_SIZE_BYTES, UserAccess::Write) {
+        return Err(SyscallError::InvalidPtr);
+    }
+
+    let details = {
+        let process_manager = PROCESS_MANAGER.lock();
+        ProcessDetailsFlat::from_process(process_manager.get_process(pid)?)
+    };
+
+    // SAFETY: validated as writable above, alignment is not assumed
+    unsafe { (out_ptr as *mut ProcessDetailsFlat).write_unaligned(details) };
+
+    Ok(0)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildState {
+    Running,
+    Terminated,
+}
+
+/// WaitProcess(pid) -> exit code of the child as u32
+/// Blocks until the child terminated, then removes its entry from the process list
+pub fn wait_process(frame: &SyscallFrame) -> Result<u64, SyscallError> {
+    let child_pid = frame.arg1 as PID;
+    let caller_pid = scheduler::get_current_process_for_core(get_current_core_id());
+    if child_pid == INVALID_PID || child_pid == caller_pid {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let child_state = || -> Result<ChildState, SyscallError> {
+        let process_manager = PROCESS_MANAGER.lock();
+        let child = process_manager.get_process(child_pid)?;
+        if child.parent_pid != caller_pid {
+            return Err(SyscallError::PermissionDenied);
+        }
+
+        match child.state {
+            ProcessState::Terminated => Ok(ChildState::Terminated),
+            ProcessState::Ready | ProcessState::Running | ProcessState::Waiting => {
+                Ok(ChildState::Running)
+            }
+        }
+    };
+
+    // permission and existence errors come back right away instead of blocking forever
+    child_state()?;
+    wait::block_current_thread_until_event(&wait::PROCESS_EXIT_WAIT_QUEUE, || {
+        child_state() != Ok(ChildState::Running)
+    });
+
+    // checked and removed under one lock, a second waiter on the same child gets ProcessNotFound
+    let mut process_manager = PROCESS_MANAGER.lock();
+    let child = process_manager.get_process(child_pid)?;
+    if child.state != ProcessState::Terminated {
+        // only a pending kill of the caller ends the wait early, it exits on the way out
+        return Err(SyscallError::InvalidArgument);
+    }
+    let exit_code = child.exit_code.unwrap_or(0);
+    process_manager.remove_terminated_process(child_pid);
+
+    Ok(exit_code as u32 as u64)
 }

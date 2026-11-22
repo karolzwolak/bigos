@@ -17,7 +17,9 @@ pub enum JobPoll {
     /// the program runs did not write anything since the last poll
     NothingYet,
     /// the program is gone and all of its output was handed out
-    Finished,
+    Finished {
+        pid: u32,
+    },
 }
 
 /// A program the shell started with `run`, its stdout goes into a channel the shell reads
@@ -31,13 +33,15 @@ impl ShellJob {
         matches!(self, ShellJob::Running { .. })
     }
 
+    /// The first word names the program, a name without a / is looked up in /BIN
     pub fn start(&mut self, command_line: &str) -> Result<u32, SyscallError> {
         debug_assert!(!self.is_running());
 
-        let mut words = command_line.split_ascii_whitespace();
-        let Some(program) = words.next() else {
+        let command_line = command_line.trim_start();
+        let Some(program) = command_line.split_ascii_whitespace().next() else {
             return Err(SyscallError::INVALID_ARGUMENT);
         };
+        let args = &command_line[program.len()..];
 
         let mut path_buffer = [0u8; JOB_PATH_MAX_BYTES];
         let prefix: &[u8] = if program.contains(PATH_SEPARATOR) {
@@ -54,10 +58,17 @@ impl ShellJob {
         // SAFETY: an ASCII prefix followed by the bytes of a str
         let path = unsafe { core::str::from_utf8_unchecked(&path_buffer[..path_len]) };
 
+        self.start_program(path, args)
+    }
+
+    /// Starts the program at path, args are whitespace separated
+    pub fn start_program(&mut self, path: &str, args: &str) -> Result<u32, SyscallError> {
+        debug_assert!(!self.is_running());
+
         let mut packed_args = [0u8; JOB_ARGS_MAX_BYTES];
         let mut packed_len = 0;
         let mut argc = 0;
-        for word in words {
+        for word in args.split_ascii_whitespace() {
             let end = packed_len + word.len() + 1;
             if end > JOB_ARGS_MAX_BYTES || argc == MAX_ARGC {
                 return Err(SyscallError::INVALID_ARGUMENT);
@@ -102,14 +113,14 @@ impl ShellJob {
             ReadReadiness::HasBytes => JobPoll::Output(reader.read_ring_available_bytes(out)),
             ReadReadiness::NothingYet => JobPoll::NothingYet,
             ReadReadiness::WriterDone => {
-                let ShellJob::Running { reader, .. } = core::mem::replace(self, ShellJob::Idle)
+                let ShellJob::Running { reader, pid } = core::mem::replace(self, ShellJob::Idle)
                 else {
                     unreachable!()
                 };
                 let closed = reader.close();
                 debug_assert!(closed.is_ok());
 
-                JobPoll::Finished
+                JobPoll::Finished { pid }
             }
         }
     }

@@ -1,5 +1,5 @@
 use crate::process::scheduler;
-use crate::process::task::{self, MAX_TASKS, TaskRef, TaskState};
+use crate::process::thread::{self, MAX_THREADS, ThreadRef, ThreadState};
 use crate::util::cpuinfo::get_current_core_id;
 use crate::util::irq_mutex::IrqMutex;
 use core::sync::atomic::Ordering;
@@ -7,38 +7,39 @@ use core::sync::atomic::Ordering;
 const MICROSECONDS_PER_MILLISECOND: u64 = 1000;
 
 struct WaiterList {
-    waiters: [TaskRef; MAX_TASKS],
+    waiters: [ThreadRef; MAX_THREADS],
     count: usize,
 }
 
 impl WaiterList {
     const fn new() -> Self {
         Self {
-            waiters: [TaskRef {
-                slot: task::INVALID_SLOT,
+            waiters: [ThreadRef {
+                slot: thread::INVALID_SLOT,
                 pid: crate::process::INVALID_PID,
-            }; MAX_TASKS],
+            }; MAX_THREADS],
             count: 0,
         }
     }
 
-    fn is_stale(task_ref: TaskRef) -> bool {
-        let task = task::slot(task_ref.slot as usize);
+    fn is_stale(thread_ref: ThreadRef) -> bool {
+        let thread = thread::slot(thread_ref.slot as usize);
 
-        task.pid.load(Ordering::Acquire) != task_ref.pid || task.state() != TaskState::Blocked
+        thread.pid.load(Ordering::Acquire) != thread_ref.pid
+            || thread.state() != ThreadState::Blocked
     }
 
-    fn push(&mut self, task_ref: TaskRef) {
+    fn push(&mut self, thread_ref: ThreadRef) {
         if self.count == self.waiters.len() {
             self.remove_stale();
         }
         debug_assert!(self.count < self.waiters.len());
 
-        self.waiters[self.count] = task_ref;
+        self.waiters[self.count] = thread_ref;
         self.count += 1;
     }
 
-    /// Tasks killed while they waited leave their entry behind
+    /// Threads killed while they waited leave their entry behind
     fn remove_stale(&mut self) {
         let mut index = 0;
         while index < self.count {
@@ -51,10 +52,10 @@ impl WaiterList {
         }
     }
 
-    fn remove(&mut self, task_ref: TaskRef) {
+    fn remove(&mut self, thread_ref: ThreadRef) {
         if let Some(index) = self.waiters[..self.count]
             .iter()
-            .position(|waiter| *waiter == task_ref)
+            .position(|waiter| *waiter == thread_ref)
         {
             self.count -= 1;
             self.waiters[index] = self.waiters[self.count];
@@ -62,7 +63,7 @@ impl WaiterList {
     }
 }
 
-/// Tasks that wait for something to happen, woken by whoever makes it happen
+/// Threads that wait for something to happen, woken by whoever makes it happen
 /// Safe to use from interrupt context
 pub struct WaitQueue {
     list: IrqMutex<WaiterList>,
@@ -75,29 +76,29 @@ impl WaitQueue {
         }
     }
 
-    pub fn add_current_task_and_mark_blocked(&self) {
+    pub fn add_current_thread_and_mark_blocked(&self) {
         let core_id = get_current_core_id();
-        let task_ref = task::core_current_task_ref(core_id);
-        let task = task::slot(task_ref.slot as usize);
+        let thread_ref = thread::core_current_thread_ref(core_id);
+        let thread = thread::slot(thread_ref.slot as usize);
 
         let mut list = self.list.lock();
-        list.push(task_ref);
+        list.push(thread_ref);
 
-        let was_running = task.transition(TaskState::Running, TaskState::Blocked);
+        let was_running = thread.transition(ThreadState::Running, ThreadState::Blocked);
         debug_assert!(was_running);
-        scheduler::core_task_leave_run_queue(task.home_core.load(Ordering::Relaxed));
+        scheduler::core_thread_leave_run_queue(thread.assigned_core.load(Ordering::Relaxed));
     }
 
-    pub fn remove(&self, task_ref: TaskRef) {
-        self.list.lock().remove(task_ref);
+    pub fn remove(&self, thread_ref: ThreadRef) {
+        self.list.lock().remove(thread_ref);
     }
 
     pub fn wake_all(&self) {
-        // wake_task takes a run queue lock, so no waiter list lock is held while it runs
-        let mut woken = [TaskRef {
-            slot: task::INVALID_SLOT,
+        // wake_thread takes a run queue lock, so no waiter list lock is held while it runs
+        let mut woken = [ThreadRef {
+            slot: thread::INVALID_SLOT,
             pid: crate::process::INVALID_PID,
-        }; MAX_TASKS];
+        }; MAX_THREADS];
         let woken_count = {
             let mut list = self.list.lock();
             let count = list.count;
@@ -106,8 +107,8 @@ impl WaitQueue {
             count
         };
 
-        for task_ref in &woken[..woken_count] {
-            scheduler::wake_task(*task_ref);
+        for thread_ref in &woken[..woken_count] {
+            scheduler::wake_thread(*thread_ref);
         }
     }
 }
@@ -118,41 +119,47 @@ impl Default for WaitQueue {
     }
 }
 
-pub fn block_current_task_until_event(queue: &WaitQueue, condition: impl Fn() -> bool) {
+pub fn block_current_thread_until_event(queue: &WaitQueue, condition: impl Fn() -> bool) {
     loop {
-        // read on every pass, another core may have stolen the task while it was blocked
+        // read on every pass, another core may have stolen the thread while it was blocked
         let core_id = get_current_core_id();
-        if condition() || task::core_current_task_kill_pending(core_id) {
+        if condition() || thread::core_current_thread_kill_pending(core_id) {
             return;
         }
 
-        queue.add_current_task_and_mark_blocked();
+        queue.add_current_thread_and_mark_blocked();
 
-        if condition() || task::core_current_task_kill_pending(core_id) {
-            let task_ref = task::core_current_task_ref(core_id);
-            queue.remove(task_ref);
-            scheduler::wake_task(task_ref);
+        if condition() || thread::core_current_thread_kill_pending(core_id) {
+            let thread_ref = thread::core_current_thread_ref(core_id);
+            queue.remove(thread_ref);
+            scheduler::wake_thread(thread_ref);
         }
 
         scheduler::core_run_scheduling(core_id);
     }
 }
 
-/// Blocks the running task for at least `duration_ms`, or until it is asked to exit
-pub fn sleep_current_task_ms(duration_ms: u64) {
+/// Blocks the running thread for at least `duration_ms`, or until it is asked to exit
+pub fn sleep_current_thread_ms(duration_ms: u64) {
     let wake_time_us =
         crate::interrupts::tsc_timestamp_us() + duration_ms * MICROSECONDS_PER_MILLISECOND;
 
-    // the core is read on every pass, another core may have stolen the task while it slept
+    // the core is read on every pass, another core may have stolen the thread while it slept
     while crate::interrupts::tsc_timestamp_us() < wake_time_us
-        && !task::core_current_task_kill_pending(get_current_core_id())
+        && !thread::core_current_thread_kill_pending(get_current_core_id())
     {
-        scheduler::core_block_current_task_until_wake_time(wake_time_us, get_current_core_id());
+        scheduler::core_block_current_thread_until_wake_time(wake_time_us, get_current_core_id());
     }
 }
 
 /// Woken whenever input reaches the event buffer of a window
 pub static INPUT_WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
+/// Woken after the compositor swapped window buffers, PresentWindow callers recheck their window
+pub static WINDOW_SWAP_WAIT_QUEUE: WaitQueue = WaitQueue::new();
+
 /// Woken by FutexWake, waiters recheck the word they sleep on
 pub static FUTEX_WAIT_QUEUE: WaitQueue = WaitQueue::new();
+
+/// Woken whenever a process terminated, WaitProcess callers recheck their child
+pub static PROCESS_EXIT_WAIT_QUEUE: WaitQueue = WaitQueue::new();

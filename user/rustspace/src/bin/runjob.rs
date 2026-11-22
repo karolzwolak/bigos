@@ -87,7 +87,7 @@ fn run_to_completion(job: &mut ShellJob, capture: &mut Capture) {
                 capture.len += copy_len;
             }
             JobPoll::NothingYet => sys_yield(),
-            JobPoll::Finished | JobPoll::NoJob => return,
+            JobPoll::Finished { .. } | JobPoll::NoJob => return,
         }
     }
 }

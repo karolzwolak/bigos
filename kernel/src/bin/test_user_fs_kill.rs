@@ -6,9 +6,10 @@ extern crate alloc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::filesystem::get_vfs;
 use kernel::process::elf_loader::load_elf_from_path;
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task;
+use kernel::process::thread;
 use kernel::process::{ChildPolicy, FileDescriptor, PID};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -61,7 +62,12 @@ fn spawn_worker() -> PID {
     };
 
     let mut process_manager = PROCESS_MANAGER.lock();
-    match process_manager.create_process_from_elf(0, &elf_info, "fsworker", PROGRAM_PRIORITY) {
+    match process_manager.create_process_from_elf(
+        BIGPROC_PID,
+        &elf_info,
+        "fsworker",
+        PROGRAM_PRIORITY,
+    ) {
         Ok(pid) => pid,
         Err(error) => {
             serial_println_core!("create_process_from_elf: {:?}", error);
@@ -169,9 +175,9 @@ fn test_main() -> ! {
     let pid = spawn_worker();
     wait_until("the worker to hold its fds", STARTUP_DEADLINE_US, || {
         counter(COUNTER_HELD_FDS).load(Ordering::Acquire) == HOLD_FD_COUNT
-            || task::find_slot_by_pid(pid).is_none()
+            || thread::find_slot_by_pid(pid).is_none()
     });
-    if task::find_slot_by_pid(pid).is_none() {
+    if thread::find_slot_by_pid(pid).is_none() {
         fail("the worker exited before it was killed");
     }
 
@@ -184,11 +190,11 @@ fn test_main() -> ! {
     );
 
     let start_us = now_us();
-    if !task::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
-        fail("request_kill found no task");
+    if !thread::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
+        fail("request_kill found no thread");
     }
     wait_until("the worker to die", KILL_DEADLINE_US, || {
-        task::find_slot_by_pid(pid).is_none()
+        thread::find_slot_by_pid(pid).is_none()
     });
     serial_println_core!(
         "test_user_fs_kill: worker gone {} us after the kill request",

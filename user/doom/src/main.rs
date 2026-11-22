@@ -19,9 +19,7 @@ mod screen;
 use platform::{PLATFORM, PlatformState, read_tsc};
 use screen::{DOOM_SCREEN_HEIGHT, DOOM_SCREEN_WIDTH};
 
-const SHELL_WINDOW_RIGHT_EDGE_X: i32 = 590;
-const DOOM_WINDOW_GAP_X: i32 = 50;
-const DOOM_WINDOW_X: i32 = SHELL_WINDOW_RIGHT_EDGE_X + DOOM_WINDOW_GAP_X;
+const DOOM_WINDOW_X: i32 = 640;
 const DOOM_WINDOW_Y: i32 = 50;
 const DOOM_PROGRAM_NAME: &core::ffi::CStr = c"doom";
 const IWAD_FLAG: &str = "-iwad";

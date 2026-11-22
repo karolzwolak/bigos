@@ -4,15 +4,23 @@ pub mod scrollback;
 
 use alloc::vec::Vec;
 use core::cmp::{max, min};
+use core::fmt::Write;
 use embedded_graphics::{
     mono_font::{MonoFont, MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb888,
     prelude::*,
+    primitives::{PrimitiveStyle, Rectangle},
     text::{Alignment, LineHeight, Text, TextStyle, TextStyleBuilder},
 };
 
 use crate::gfx::{color::Rgba8888UNORM, surface::UserSurface};
 use crate::job::{JobPoll, ShellJob};
+use crate::shell::history::{CommandHistory, HISTORY_ENTRY_MAX_BYTES};
+use crate::shell::{
+    self, CommandAction, EXIT_CODE_FAILURE, EXIT_CODE_NOT_FOUND, EXIT_CODE_TERMINATED, ShellOutput,
+    ShellState,
+};
+use crate::{ChildPolicy, SyscallError, sys_terminate_process, sys_wait_process};
 use line_index::LineIndex;
 use scrollback::Scrollback;
 
@@ -21,6 +29,7 @@ const MARGIN_TOP: i32 = 16;
 const LINE_SPACING: i32 = 15;
 
 const CHARACTER_STYLE: MonoTextStyle<Rgb888> = MonoTextStyle::new(&FONT_8X13, Rgb888::WHITE);
+const PROMPT_CHARACTER_STYLE: MonoTextStyle<Rgb888> = MonoTextStyle::new(&FONT_8X13, Rgb888::CYAN);
 const TEXT_STYLE: TextStyle = TextStyleBuilder::new()
     .alignment(Alignment::Left)
     .line_height(LineHeight::Percent(150))
@@ -28,23 +37,19 @@ const TEXT_STYLE: TextStyle = TextStyleBuilder::new()
 
 const DEFAULT_MAX_LINES: usize = 4096;
 
-const PROMPT: &str = "> ";
+/// The cursor is an underline starting this far below the text baseline
+const CURSOR_BASELINE_OFFSET_PX: i32 = 1;
+const CURSOR_HEIGHT_PX: u32 = 2;
+const CURSOR_STYLE: PrimitiveStyle<Rgb888> = PrimitiveStyle::with_fill(Rgb888::WHITE);
+
+const PROMPT: &str = " > ";
+pub const INTERRUPT_CONTROL_KEY: char = 'c';
+const INTERRUPT_ECHO: &str = "^C";
 const JOB_DRAIN_CHUNK_BYTES: usize = 1024;
 /// a frame takes at most one ring of job output, so a chatty program cannot stall the window
 const JOB_DRAIN_MAX_BYTES_PER_FRAME: usize = crate::channel::STDOUT_CHANNEL_DATA_SIZE_BYTES;
-const UNPRINTABLE_REPLACEMENT: u8 = b'?';
-
-/// Job output is untrusted and the renderer expects ASCII: keep printable ASCII and line
-/// breaks, turn tabs into spaces and everything else into UNPRINTABLE_REPLACEMENT
-fn sanitize_job_output(bytes: &mut [u8]) {
-    for byte in bytes {
-        *byte = match *byte {
-            b' '..=b'~' | b'\n' | b'\r' => *byte,
-            b'\t' => b' ',
-            _ => UNPRINTABLE_REPLACEMENT,
-        };
-    }
-}
+/// File contents shown by cat are copied through a buffer of this size to be sanitized
+const SANITIZE_CHUNK_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FontMetrics {
@@ -84,7 +89,13 @@ pub struct Terminal<D: DrawTarget<Color = Rgb888>> {
     pub scroll_offset: usize,
     /// scrollback position right after the last prompt, typed input starts here
     pub input_start_abs: u64,
+    /// How many typed bytes are right of the cursor
+    pub cursor_back: usize,
+    /// Scratch for the typed bytes right of the cursor while the input is rewritten
+    pub edit_tail_buf: Vec<u8>,
     pub job: ShellJob,
+    pub shell_state: ShellState,
+    pub history: CommandHistory,
 }
 
 impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
@@ -118,7 +129,11 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             last_command_buf: Vec::new(),
             scroll_offset: 0,
             input_start_abs: start_abs,
+            cursor_back: 0,
+            edit_tail_buf: Vec::new(),
             job: ShellJob::Idle,
+            shell_state: ShellState::new(),
+            history: CommandHistory::new(),
         }
     }
 
@@ -131,6 +146,7 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         self.scrollback = scrollback;
         self.lines.clear(abs);
         self.input_start_abs = abs;
+        self.cursor_back = 0;
         self.needs_redraw = true;
     }
 
@@ -293,12 +309,24 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         let max_scroll = total.saturating_sub(visible);
         let offset = core::cmp::min(self.scroll_offset, max_scroll);
         let start_logical = total.saturating_sub(visible + offset);
+        let cursor_abs = self.scrollback.current_absolute() - self.cursor_back as u64;
 
         for vis_idx in 0..visible {
             let logical_idx = start_logical + vis_idx;
             let Some(meta) = self.lines.logical_line_for_index(logical_idx) else {
                 continue;
             };
+            let baseline_y = MARGIN_TOP + vis_idx as i32 * LINE_SPACING;
+
+            // the end of a line is the start of the next one, only the last line owns its end
+            let is_last_line = logical_idx + 1 == total;
+            let is_cursor_line = meta.first_pos <= cursor_abs
+                && (cursor_abs < meta.one_past_last_pos
+                    || (is_last_line && cursor_abs == meta.one_past_last_pos));
+            if is_cursor_line {
+                self.draw_cursor((cursor_abs - meta.first_pos) as i32, baseline_y);
+            }
+
             if meta.is_empty() {
                 continue;
             }
@@ -308,22 +336,155 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 continue;
             }
             let s = unsafe { core::str::from_utf8_unchecked(bytes) };
-            let pos = Point::new(MARGIN_LEFT, MARGIN_TOP + vis_idx as i32 * LINE_SPACING);
-            let _ = Text::with_text_style(s, pos, CHARACTER_STYLE, TEXT_STYLE)
-                .draw(&mut self.draw_target);
+            let (prompt, rest) = s.split_at(meta.prompt_len().min(s.len()));
+            let mut pos = Point::new(MARGIN_LEFT, baseline_y);
+            if !prompt.is_empty() {
+                pos = Text::with_text_style(prompt, pos, PROMPT_CHARACTER_STYLE, TEXT_STYLE)
+                    .draw(&mut self.draw_target)
+                    .unwrap_or(pos);
+            }
+            if !rest.is_empty() {
+                let _ = Text::with_text_style(rest, pos, CHARACTER_STYLE, TEXT_STYLE)
+                    .draw(&mut self.draw_target);
+            }
         }
     }
 
-    pub fn backspace(&mut self) {
-        let cur = *self.lines.current_ref();
-        // never eat into the prompt
-        if cur.is_empty() || self.scrollback.current_absolute() <= self.input_start_abs {
+    pub fn typed_input(&self) -> &[u8] {
+        let end_abs = self.scrollback.current_absolute();
+        debug_assert!(end_abs >= self.input_start_abs);
+        let typed_len = (end_abs - self.input_start_abs) as usize;
+        let typed = self.scrollback.read_at(self.input_start_abs, typed_len);
+        debug_assert!(typed.len() == typed_len);
+
+        typed
+    }
+
+    pub fn cursor_offset(&self) -> usize {
+        let typed_len = (self.scrollback.current_absolute() - self.input_start_abs) as usize;
+        debug_assert!(self.cursor_back <= typed_len);
+
+        typed_len - self.cursor_back
+    }
+
+    fn insert_char(&mut self, byte: u8) {
+        if self.cursor_back == 0 {
+            self.write_bytes_internal(&[byte]);
             return;
         }
-        let new_end = cur.one_past_last_pos - 1;
-        self.lines.truncate_last(new_end);
-        self.scrollback.remove_last_byte();
+
+        let cursor_offset = self.cursor_offset();
+        self.replace_input_range(cursor_offset, cursor_offset, &[byte]);
+    }
+
+    fn draw_cursor(&mut self, column: i32, baseline_y: i32) {
+        let char_width = self.font_metrics.char_width;
+        let top_left = Point::new(
+            MARGIN_LEFT + column * char_width as i32,
+            baseline_y + CURSOR_BASELINE_OFFSET_PX,
+        );
+
+        let _ = Rectangle::new(top_left, Size::new(char_width, CURSOR_HEIGHT_PX))
+            .into_styled(CURSOR_STYLE)
+            .draw(&mut self.draw_target);
+    }
+
+    pub fn backspace(&mut self) {
+        let cursor_offset = self.cursor_offset();
+        // never eat into the prompt
+        if cursor_offset == 0 {
+            return;
+        }
+
+        self.replace_input_range(cursor_offset - 1, cursor_offset, &[]);
+    }
+
+    pub fn delete_word(&mut self) {
+        let cursor_offset = self.cursor_offset();
+        let word_start = input::word_start_before(&self.typed_input()[..cursor_offset]);
+
+        self.replace_input_range(word_start, cursor_offset, &[]);
+    }
+
+    /// Replaces the typed bytes in `remove_start..remove_end` with `insert`
+    fn replace_input_range(&mut self, remove_start: usize, remove_end: usize, insert: &[u8]) {
+        debug_assert!(remove_start <= remove_end);
+        debug_assert!(remove_end <= self.typed_input().len());
+
+        let mut tail = core::mem::take(&mut self.edit_tail_buf);
+        tail.clear();
+        tail.extend_from_slice(&self.typed_input()[remove_end..]);
+
+        self.rewind_input_to(self.input_start_abs + remove_start as u64);
+        self.write_bytes_internal(insert);
+        self.write_bytes_internal(&tail);
+        self.cursor_back = tail.len();
+
+        self.edit_tail_buf = tail;
+    }
+
+    fn move_cursor_left(&mut self) {
+        self.cursor_back = min(self.cursor_back + 1, self.typed_input().len());
+    }
+
+    fn move_cursor_right(&mut self) {
+        self.cursor_back = self.cursor_back.saturating_sub(1);
+    }
+
+    fn move_cursor_word_left(&mut self) {
+        let typed = self.typed_input();
+        let cursor_offset = typed.len() - self.cursor_back;
+        let word_start = input::word_start_before(&typed[..cursor_offset]);
+
+        self.cursor_back = typed.len() - word_start;
+    }
+
+    fn move_cursor_word_right(&mut self) {
+        let typed = self.typed_input();
+        let cursor_offset = typed.len() - self.cursor_back;
+        let word_end = input::word_end_after(typed, cursor_offset);
+
+        self.cursor_back = typed.len() - word_end;
+    }
+
+    /// Drops typed input from `abs_pos` on, wrapped lines included
+    fn rewind_input_to(&mut self, abs_pos: u64) {
+        debug_assert!(abs_pos >= self.input_start_abs);
+
+        self.scrollback.truncate_to(abs_pos);
+        self.lines.rewind_to(abs_pos);
         self.needs_redraw = true;
+    }
+
+    /// Swaps everything typed after the prompt for `line`
+    fn replace_input(&mut self, line: &[u8]) {
+        self.rewind_input_to(self.input_start_abs);
+        self.write_bytes_internal(line);
+        self.cursor_back = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// The recalled line is copied out, the history stays borrowed otherwise
+    fn recall_older_command(&mut self) {
+        let Some(recalled) = self.history.step_to_older() else {
+            return;
+        };
+        let mut line = [0u8; HISTORY_ENTRY_MAX_BYTES];
+        let line_len = recalled.len();
+        line[..line_len].copy_from_slice(recalled);
+
+        self.replace_input(&line[..line_len]);
+    }
+
+    fn recall_newer_command(&mut self) {
+        let Some(recalled) = self.history.step_to_newer() else {
+            return;
+        };
+        let mut line = [0u8; HISTORY_ENTRY_MAX_BYTES];
+        let line_len = recalled.len();
+        line[..line_len].copy_from_slice(recalled);
+
+        self.replace_input(&line[..line_len]);
     }
 
     /// Everything typed since the prompt, wrapped lines included
@@ -347,8 +508,13 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         if !self.lines.current_ref().is_empty() {
             self.newline();
         }
+        let prompt_start = self.scrollback.current_absolute();
+        let cwd = self.shell_state.cwd;
+        self.write_str(cwd.as_str());
         self.write_str(PROMPT);
         self.input_start_abs = self.scrollback.current_absolute();
+        self.cursor_back = 0;
+        self.lines.mark_prompt(prompt_start, self.input_start_abs);
     }
 
     /// Moves the output of the running job into the scrollback
@@ -360,12 +526,14 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         while drained_bytes < JOB_DRAIN_MAX_BYTES_PER_FRAME {
             match self.job.poll(&mut chunk) {
                 JobPoll::Output(read_len) => {
-                    sanitize_job_output(&mut chunk[..read_len]);
+                    // job output is untrusted and the renderer expects ASCII
+                    shell::sanitize_for_screen(&mut chunk[..read_len]);
                     self.write_bytes_internal(&chunk[..read_len]);
                     drained_bytes += read_len;
                 }
                 JobPoll::NothingYet | JobPoll::NoJob => return,
-                JobPoll::Finished => {
+                JobPoll::Finished { pid } => {
+                    self.remove_job(pid);
                     self.write_prompt();
                     return;
                 }
@@ -373,28 +541,36 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         }
     }
 
-    fn run_job(&mut self, command_line: &str) {
-        if command_line.is_empty() {
-            self.write_line("run: usage: run <program> [args]");
-            return;
-        }
-
-        if let Err(error) = self.job.start(command_line) {
-            let _ = core::fmt::Write::write_fmt(
-                self,
-                format_args!("run: cannot start {}: error {}", command_line, error.0),
-            );
-            self.newline();
+    fn remove_job(&mut self, pid: u32) {
+        match sys_wait_process(pid) {
+            Ok(exit_code) => {
+                self.shell_state.last_exit_code = exit_code;
+                if exit_code != 0 {
+                    if !self.lines.current_ref().is_empty() {
+                        self.newline();
+                    }
+                    let _ = writeln!(self, "[exit code {}]", exit_code);
+                }
+            }
+            Err(error) => {
+                self.shell_state.last_exit_code = EXIT_CODE_FAILURE;
+                let _ = writeln!(self, "wait for pid {}: {}", pid, error);
+            }
         }
     }
 
-    fn recall_last_command(&mut self) {
-        if self.last_command_buf.is_empty() {
-            return;
+    fn start_program(&mut self, name: &str, path: &str, args: &str) {
+        match self.job.start_program(path, args) {
+            Ok(_) => {}
+            Err(SyscallError::NOT_FOUND) if !name.contains('/') => {
+                self.shell_state.last_exit_code = EXIT_CODE_NOT_FOUND;
+                let _ = writeln!(self, "{}: command not found", name);
+            }
+            Err(error) => {
+                self.shell_state.last_exit_code = EXIT_CODE_FAILURE;
+                let _ = writeln!(self, "{}: {}", name, error);
+            }
         }
-        let buf = self.last_command_buf.clone();
-        self.write_bytes_internal(&buf);
-        self.needs_redraw = true;
     }
 
     fn det_flow_demo(&mut self, count: usize) {
@@ -556,12 +732,6 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
         };
         let args = args_raw.trim();
         match cmd {
-            "deb" => {
-                self.write_line("deb!");
-            }
-            "clear" => {
-                self.clear();
-            }
             "flow" => {
                 let count = if args.is_empty() {
                     1600
@@ -606,17 +776,47 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 };
                 self.det_flow_demo(count);
             }
-            "run" => self.run_job(args),
             _ => {
-                let _ =
-                    core::fmt::Write::write_fmt(self, format_args!("{}: command not found", cmd));
-                self.newline();
+                // the state is copied out, the terminal itself is the output
+                let mut shell_state = self.shell_state;
+                let outcome = shell::run_command_line(&mut shell_state, s_trimmed, self);
+                self.shell_state = shell_state;
+
+                match outcome {
+                    CommandAction::Done => {}
+                    CommandAction::ClearScreen => self.clear(),
+                    CommandAction::StartProgram { name, path, args } => {
+                        self.start_program(name, path.as_str(), args)
+                    }
+                }
             }
         }
     }
 
+    /// Ctrl+C: terminates the running program, without one it drops the typed line
+    /// poll_job prints the exit code and the prompt once the program is gone
+    pub fn interrupt(&mut self) {
+        if let ShellJob::Running { pid, .. } = self.job {
+            let terminated = sys_terminate_process(
+                pid as usize,
+                EXIT_CODE_TERMINATED,
+                ChildPolicy::KillChildren,
+            );
+            if let Err(error) = terminated {
+                let _ = writeln!(self, "terminate pid {}: {}", pid, error);
+            }
+            return;
+        }
+
+        self.cursor_back = 0;
+        self.scroll_offset = 0;
+        self.write_str(INTERRUPT_ECHO);
+        self.write_prompt();
+    }
+
     fn apply_action(&mut self, action: input::InputAction) {
         match action {
+            input::InputAction::Control(INTERRUPT_CONTROL_KEY) => self.interrupt(),
             input::InputAction::Scroll { dir, amount } => match (dir, amount) {
                 (input::ScrollDir::Up, input::ScrollAmount::Page) => {
                     self.scroll_up_lines(self.viewport_rows)
@@ -629,13 +829,22 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
             },
             // no stdin yet: while a job runs typed input is dropped, scrolling still works
             input::InputAction::Backspace
+            | input::InputAction::DeleteWord
             | input::InputAction::Enter
             | input::InputAction::Char(_)
             | input::InputAction::ArrowUp
+            | input::InputAction::ArrowDown
+            | input::InputAction::ArrowLeft
+            | input::InputAction::ArrowRight
+            | input::InputAction::WordLeft
+            | input::InputAction::WordRight
                 if self.job.is_running() => {}
             input::InputAction::Backspace => self.backspace(),
+            input::InputAction::DeleteWord => self.delete_word(),
             input::InputAction::Enter => {
+                self.cursor_back = 0;
                 self.capture_last_command();
+                self.history.push_line(self.last_command_buf.trim_ascii());
                 self.newline();
                 self.execute_command();
                 if !self.job.is_running() {
@@ -647,18 +856,22 @@ impl<D: DrawTarget<Color = Rgb888>> Terminal<D> {
                 if self.scroll_offset != 0 {
                     self.scroll_offset = 0;
                 }
-                let b = c as u8;
-                self.write_bytes_internal(&[b]);
+                self.insert_char(c as u8);
             }
-            input::InputAction::ArrowUp => self.recall_last_command(),
-            input::InputAction::ArrowDown
-            | input::InputAction::ArrowLeft
-            | input::InputAction::ArrowRight
-            | input::InputAction::Home
+            input::InputAction::ArrowUp => self.recall_older_command(),
+            input::InputAction::ArrowDown => self.recall_newer_command(),
+            input::InputAction::ArrowLeft => self.move_cursor_left(),
+            input::InputAction::ArrowRight => self.move_cursor_right(),
+            input::InputAction::WordLeft => self.move_cursor_word_left(),
+            input::InputAction::WordRight => self.move_cursor_word_right(),
+            input::InputAction::Home
             | input::InputAction::End
             | input::InputAction::PageUp
             | input::InputAction::PageDown
             | input::InputAction::Escape
+            | input::InputAction::Tab
+            | input::InputAction::Delete
+            | input::InputAction::Control(_)
             | input::InputAction::Ignore => {}
         }
         self.needs_redraw = true;
@@ -675,5 +888,18 @@ impl<D: DrawTarget<Color = Rgb888>> core::fmt::Write for Terminal<D> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write_str(s);
         Ok(())
+    }
+}
+
+impl<D: DrawTarget<Color = Rgb888>> ShellOutput for Terminal<D> {
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        let mut chunk = [0u8; SANITIZE_CHUNK_BYTES];
+
+        for source in bytes.chunks(SANITIZE_CHUNK_BYTES) {
+            let chunk = &mut chunk[..source.len()];
+            chunk.copy_from_slice(source);
+            shell::sanitize_for_screen(chunk);
+            self.write_bytes_internal(chunk);
+        }
     }
 }

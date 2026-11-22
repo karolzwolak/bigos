@@ -7,9 +7,10 @@ use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::filesystem::{get_vfs, vfs::FileSystemError};
 use kernel::process::elf_loader::load_elf_from_path;
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task;
+use kernel::process::thread;
 use kernel::process::{FileDescriptor, PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -92,7 +93,12 @@ fn spawn_fs_test() -> PID {
     };
 
     let mut process_manager = PROCESS_MANAGER.lock();
-    match process_manager.create_process_from_elf(0, &elf_info, "fs_test", PROGRAM_PRIORITY) {
+    match process_manager.create_process_from_elf(
+        BIGPROC_PID,
+        &elf_info,
+        "fs_test",
+        PROGRAM_PRIORITY,
+    ) {
         Ok(pid) => pid,
         Err(error) => {
             serial_println_core!("create_process_from_elf: {:?}", error);
@@ -187,12 +193,12 @@ fn test_main() -> ! {
     let pid = spawn_fs_test();
     wait_until("fs_test to start", STARTUP_DEADLINE_US, || {
         counter(COUNTER_RUNNING).load(Ordering::Acquire) == 1
-            || task::find_slot_by_pid(pid).is_none()
+            || thread::find_slot_by_pid(pid).is_none()
     });
 
     let start_us = now_us();
     wait_until("fs_test to exit", DEADLINE_US, || {
-        task::find_slot_by_pid(pid).is_none()
+        thread::find_slot_by_pid(pid).is_none()
     });
     serial_println_core!("test_user_fs: fs_test took {} us", now_us() - start_us);
 

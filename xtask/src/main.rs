@@ -32,6 +32,10 @@ fn kernel_max_cores(root: &Path) -> u8 {
     4
 }
 
+const QEMU_TIMEZONE: &str = "Etc/GMT-1";
+const QEMU_RTC_ARGS: [&str; 2] = ["-rtc", "base=localtime"];
+const QEMU_DISPLAY_ARGS: [&str; 4] = ["-vga", "none", "-device", "VGA,edid=on,xres=1400,yres=900"];
+
 fn qemu_smp_arg(root: &Path) -> String {
     let cores = kernel_max_cores(root);
     format!("cores={},threads=1", cores)
@@ -121,6 +125,52 @@ const TEST_DISK_TEMPLATE: &str = "disk_templates/test";
 const DEFAULT_DISK_IMAGE: &str = "storage/disk.img";
 const TEST_DISK_IMAGE: &str = "storage/test_disk.img";
 const TEST_DISK_PATTERN_BYTES: u32 = 100_000;
+const DEFAULT_DISK_BIG_FILES_DIR: &str = "disk_templates/default/BIGFILES";
+const BIG_FILE_PATTERN: &[u8] = b"ABCD";
+const BIG_FILE_LINE_CHARS: usize = 60;
+const BYTES_PER_MIB: usize = 1 << 20;
+const BIG_FILES: [GeneratedFile; 1] = [GeneratedFile::new("ABCD4M.TXT", 4 * BYTES_PER_MIB)];
+
+struct GeneratedFile {
+    name: &'static str,
+    size_bytes: usize,
+}
+
+impl GeneratedFile {
+    const fn new(name: &'static str, size_bytes: usize) -> Self {
+        Self { name, size_bytes }
+    }
+}
+
+fn generate_big_files(root: &Path) {
+    let big_files_dir = root.join(DEFAULT_DISK_BIG_FILES_DIR);
+    fs::create_dir_all(&big_files_dir).unwrap();
+
+    let line: Vec<u8> = BIG_FILE_PATTERN
+        .iter()
+        .copied()
+        .cycle()
+        .take(BIG_FILE_LINE_CHARS)
+        .chain(std::iter::once(b'\n'))
+        .collect();
+
+    for big_file in &BIG_FILES {
+        let path = big_files_dir.join(big_file.name);
+        let is_current =
+            fs::metadata(&path).is_ok_and(|meta| meta.len() == big_file.size_bytes as u64);
+        if is_current {
+            continue;
+        }
+
+        let content: Vec<u8> = line
+            .iter()
+            .copied()
+            .cycle()
+            .take(big_file.size_bytes)
+            .collect();
+        fs::write(&path, content).unwrap_or_else(|e| panic!("can't write {}: {e}", path.display()));
+    }
+}
 
 /// newest modification time of any file or directory under path, including path itself
 fn newest_modification_time(path: &Path) -> std::time::SystemTime {
@@ -148,6 +198,11 @@ const DISK_STAGING_DIR: &str = "target/disk_staging";
 const DISK_BIN_DIR: &str = "BIN";
 const HEADER_ONLY_ELF_NAME: &str = "HDRONLY.ELF";
 const TRUNCATED_ELF_NAME: &str = "TRUNC.ELF";
+/// executable files that are not ELFs, so loading them reaches the ELF checks
+const SHORT_TEXT_EXEC_NAME: &str = "SHORT.TXT";
+const SHORT_TEXT_EXEC_CONTENT: &[u8] = b"not a program\n";
+const NOT_ELF_EXEC_NAME: &str = "NOTELF.BIN";
+const NOT_ELF_EXEC_BYTES: usize = 4096;
 const TRUNCATION_SOURCE_BIN: &str = "rust1st";
 const HEADER_ONLY_ELF_BYTES: usize = 32;
 const ELF64_PHOFF_OFFSET: usize = 0x20;
@@ -262,6 +317,12 @@ fn stage_disk_contents(root: &Path, template_dir: &Path, staging_dir: &Path, is_
             &source[..truncated_elf_length(&source)],
         )
         .unwrap();
+        fs::write(bin_dir.join(SHORT_TEXT_EXEC_NAME), SHORT_TEXT_EXEC_CONTENT).unwrap();
+        fs::write(
+            bin_dir.join(NOT_ELF_EXEC_NAME),
+            vec![b'x'; NOT_ELF_EXEC_BYTES],
+        )
+        .unwrap();
     }
 }
 
@@ -305,7 +366,12 @@ fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u
         .arg(&staging_dir)
         .arg("-o")
         .arg(&output_path)
-        .args(["-s", &DISK_IMAGE_SIZE_MB.to_string()]);
+        .args(["-s", &DISK_IMAGE_SIZE_MB.to_string()])
+        // programs are r-x, game data r--, everything else stays rw-
+        .args(["-x", DISK_BIN_DIR]);
+    if staging_dir.join(DOOM_WAD_DISK_NAME).exists() {
+        cmd.args(["-r", DOOM_WAD_DISK_NAME]);
+    }
     if pattern_bytes > 0 {
         cmd.args(["-p", &pattern_bytes.to_string()]);
     }
@@ -315,7 +381,8 @@ fn ensure_disk_image(root: &Path, template: &str, output: &str, pattern_bytes: u
 const DISK_AIO_ENV: &str = "BIGOS_DISK_AIO";
 const DEFAULT_DISK_AIO: &str = "io_uring";
 const TEST_DISK_COPY_DIR: &str = "target/test_disks";
-const FSCK_TEST_PREFIXES: [&str; 2] = ["test_fs", "test_user_fs"];
+const FSCK_TEST_PREFIXES: [&str; 4] =
+    ["test_fs", "test_user_fs", "test_user_shell", "test_user_fe"];
 
 /// QEMU arguments that attach the disk image as a modern virtio-blk PCI device
 fn disk_qemu_args(image: &Path) -> Vec<String> {
@@ -358,6 +425,7 @@ fn fsck_report_if_dirty(image: &Path) -> Option<String> {
 }
 
 fn build_disk_images(root: &Path) {
+    generate_big_files(root);
     ensure_disk_image(root, DEFAULT_DISK_TEMPLATE, DEFAULT_DISK_IMAGE, 0);
     ensure_disk_image(
         root,
@@ -377,6 +445,9 @@ const RESET: &str = "\x1b[0m";
 const TESTS_NEEDING_DOOM: [&str; 2] = ["test_user_doom", "test_user_libc"];
 /// Tests that also need storage/doom1.wad on the test image
 const TESTS_NEEDING_WAD: [&str; 1] = ["test_user_doom"];
+
+const TESTS_ENDING_IN_POWER_OFF: [&str; 1] = ["test_power_off"];
+const QEMU_POWER_OFF_EXIT: i32 = 0;
 
 const TEST_SUCCESS_EXIT: i32 = 33;
 const TEST_FAILED_EXIT: i32 = 35;
@@ -606,6 +677,8 @@ fn run_test_with_timeout(
     let out = Command::new("timeout")
         .arg(timeout_secs)
         .arg("qemu-system-x86_64")
+        .env("TZ", QEMU_TIMEZONE)
+        .args(QEMU_RTC_ARGS)
         .args([
             "-M",
             "q35",
@@ -666,6 +739,11 @@ fn run_test_with_timeout(
 fn run_test(root: &Path, name: &str, iso: &Path, ovmf_code: &Path, ovmf_vars: &Path) -> TestResult {
     let disk_image = prepare_test_disk(root, name);
     let mut result = run_test_with_timeout(root, iso, ovmf_code, ovmf_vars, &disk_image, "30");
+    if TESTS_ENDING_IN_POWER_OFF.contains(&name) {
+        let marker = format!("=== {name}: power request sent ===");
+        result.passed =
+            result.exit_code == Some(QEMU_POWER_OFF_EXIT) && result.serial.contains(&marker);
+    }
 
     let needs_fsck = FSCK_TEST_PREFIXES
         .iter()
@@ -1384,6 +1462,9 @@ fn run_iso(root: &Path, accel: QemuAccel) {
         kernel_max_cores(root)
     );
     let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.env("TZ", QEMU_TIMEZONE)
+        .args(QEMU_RTC_ARGS)
+        .args(QEMU_DISPLAY_ARGS);
 
     cmd.args([
         "-M",
@@ -1435,6 +1516,9 @@ fn run_nologs(root: &Path) {
         kernel_max_cores(root)
     );
     let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.env("TZ", QEMU_TIMEZONE)
+        .args(QEMU_RTC_ARGS)
+        .args(QEMU_DISPLAY_ARGS);
     cmd.args([
         "-M",
         "q35",

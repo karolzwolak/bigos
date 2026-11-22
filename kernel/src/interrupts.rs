@@ -701,6 +701,8 @@ pub unsafe fn init_acpi(
         unsafe { AcpiTables::from_rsdp(handler, rsdp_addr).expect("Failed to parse ACPI") };
 
     serial_println!("AcpiTables initialized");
+    crate::power::init_from_acpi(&acpi_tables, &handler);
+    crate::time::init_from_acpi(&acpi_tables);
 
     let acpi_platform: AcpiPlatform<IdentityAcpiHandler> =
         AcpiPlatform::new(acpi_tables, handler).expect("Cannot create AcpiPlatform");
@@ -967,7 +969,7 @@ extern "x86-interrupt" fn double_fault_handler(
 extern "C" fn timer_interrupt_handler(frame: &mut TrapFrame) {
     let core_id = get_current_core_id();
     if is_user_frame(frame) {
-        crate::gdt::assert_rsp_in_task_stack(core_id);
+        crate::gdt::assert_rsp_in_thread_stack(core_id);
     }
 
     if TIMER_DEBUG_PRINT {

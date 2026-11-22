@@ -35,7 +35,7 @@ fn wait_for_turn(turn: &AtomicU32, role: u32) {
     let other_role = ROLE_COUNT - 1 - role;
 
     // a wake that lands between the load and the wait must not be lost, the kernel
-    // rechecks the word after it queued the task
+    // rechecks the word after it queued the thread
     while turn.load(Ordering::Acquire) != role {
         unsafe { sys_futex_wait(turn.as_ptr(), other_role) };
     }

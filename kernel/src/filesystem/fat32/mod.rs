@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use boot_sector::BootSector;
 use core::cmp::{max, min};
-use direntry::{DIRECTORY_ENTRY_SIZE, DirectoryEntry, MAX_FULL_NAME_LENGTH};
+use direntry::{DIRECTORY_ENTRY_SIZE, DirectoryEntry, FatTimestamp, MAX_FULL_NAME_LENGTH};
 
 pub const ROOT_CLUSTER: u32 = 2;
 // node_id packing assumes up to 2^24 clusters
@@ -157,12 +157,18 @@ fn to_fat32_name(name: &str) -> FileSystemResult<[u8; MAX_FULL_NAME_LENGTH]> {
 
 const fn file_attributes_from_fat_attributes(fat_attributes: u8) -> FileAttributes {
     if is_directory(fat_attributes) {
-        FileAttributes::DIR_DEFAULT
-    } else if fat_attributes & FatFileAttributes::ReadOnly as u8 == 0 {
-        FileAttributes::FILE_READ_WRITE
-    } else {
-        FileAttributes::FILE_READONLY
+        return FileAttributes::DIR_DEFAULT;
     }
+
+    let mut attributes = FileAttributes::READ;
+    if fat_attributes & FatFileAttributes::ReadOnly as u8 == 0 {
+        attributes = attributes.union(FileAttributes::WRITE);
+    }
+    if fat_attributes & FatFileAttributes::System as u8 != 0 {
+        attributes = attributes.union(FileAttributes::EXECUTE);
+    }
+
+    attributes
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
@@ -800,8 +806,12 @@ impl Fat32Driver {
         }
 
         let new_size = max(old_size, offset + total_written);
-        if new_size != old_size {
+        let now = FatTimestamp::from_unix_seconds(crate::time::now_unix_seconds());
+        // the stamp has 2 second steps, so most writes in a burst skip the entry rewrite
+        let is_modified_time_stale = entry.write_time != now.time || entry.write_date != now.date;
+        if new_size != old_size || is_modified_time_stale {
             entry.file_size = new_size as u32;
+            entry.set_modified_time(now);
             self.write_direntry(parent_cluster, entry_index, &entry)?;
         }
 
@@ -885,19 +895,23 @@ impl Fat32Driver {
 
         let free_slot = self.find_free_slot_in_directory(parent_cluster, &entries)?;
 
+        let now = FatTimestamp::from_unix_seconds(crate::time::now_unix_seconds());
         let mut new_entry = DirectoryEntry::create_empty();
         new_entry.set_filename(name)?;
+        new_entry.set_all_times(now);
 
         if is_new_node_directory {
             let new_dir_cluster = self.allocate_cluster(NO_CLUSTER)?;
-            let dot_entry = DirectoryEntry::create_dot_entry(new_dir_cluster);
+            let mut dot_entry = DirectoryEntry::create_dot_entry(new_dir_cluster);
+            dot_entry.set_all_times(now);
             // the parent of a top level directory is recorded as cluster 0 in ".."
             let dotdot_cluster = if parent_cluster == self.root_cluster {
                 NO_CLUSTER
             } else {
                 parent_cluster
             };
-            let dotdot_entry = DirectoryEntry::create_dot_dot_entry(dotdot_cluster);
+            let mut dotdot_entry = DirectoryEntry::create_dot_dot_entry(dotdot_cluster);
+            dotdot_entry.set_all_times(now);
 
             // allocate_cluster left the buffer zeroed
             self.cluster_buffer[..DIRECTORY_ENTRY_SIZE].copy_from_slice(&dot_entry.as_bytes());
@@ -941,6 +955,9 @@ impl Fat32Driver {
 
         let parent_cluster = decode_node_id(node_id).parent_cluster;
         let (mut entry, entry_index) = self.load_entry(node_id)?;
+        if entry.attributes & FatFileAttributes::ReadOnly as u8 != 0 {
+            return Err(FileSystemError::PermissionDenied);
+        }
         let first_cluster = entry.get_first_cluster();
 
         if entry.is_directory() {

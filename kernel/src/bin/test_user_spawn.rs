@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::process::elf_loader::load_elf_from_path;
 use kernel::process::process_manager::{BIGPROC_PID, PROCESS_MANAGER};
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task;
+use kernel::process::thread;
 use kernel::process::{FileDescriptor, PID, Process, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, mount_test_disk, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -35,7 +35,7 @@ const DETACHED_NAME: &str = "treeleaf";
 const PROGRAM_PRIORITY: u8 = 5;
 const STARTUP_DEADLINE_US: u64 = 5_000_000;
 const DEADLINE_US: u64 = 20_000_000;
-const EXPECTED_PASSED_CHECKS: u32 = 19;
+const EXPECTED_PASSED_CHECKS: u32 = 20;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -87,7 +87,12 @@ fn spawn_spawner() -> PID {
     };
 
     let mut process_manager = PROCESS_MANAGER.lock();
-    match process_manager.create_process_from_elf(0, &elf_info, SPAWNER_NAME, PROGRAM_PRIORITY) {
+    match process_manager.create_process_from_elf(
+        BIGPROC_PID,
+        &elf_info,
+        SPAWNER_NAME,
+        PROGRAM_PRIORITY,
+    ) {
         Ok(pid) => pid,
         Err(error) => {
             serial_println_core!("create_process_from_elf: {:?}", error);
@@ -155,11 +160,11 @@ fn test_main() -> ! {
     let spawner_pid = spawn_spawner();
     wait_until("spawner to start", STARTUP_DEADLINE_US, || {
         counter(COUNTER_RUNNING).load(Ordering::Acquire) == 1
-            || task::find_slot_by_pid(spawner_pid).is_none()
+            || thread::find_slot_by_pid(spawner_pid).is_none()
     });
     wait_until("spawner checks", DEADLINE_US, || {
         counter(COUNTER_CHECKS_DONE).load(Ordering::Acquire) == 1
-            || task::find_slot_by_pid(spawner_pid).is_none()
+            || thread::find_slot_by_pid(spawner_pid).is_none()
     });
 
     let child_pid = counter(COUNTER_CHILD_PID).load(Ordering::Acquire) as PID;
@@ -218,7 +223,7 @@ fn test_main() -> ! {
     wait_until("every process to exit", DEADLINE_US, || {
         [spawner_pid, child_pid, detached_pid]
             .iter()
-            .all(|&pid| task::find_slot_by_pid(pid).is_none())
+            .all(|&pid| thread::find_slot_by_pid(pid).is_none())
     });
 
     let passed = counter(COUNTER_CHECKS_PASSED).load(Ordering::Acquire);

@@ -115,15 +115,18 @@ impl Scrollback {
         self.absolute_filled
     }
 
-    pub fn remove_last_byte(&mut self) {
-        if self.absolute_filled == 0 {
-            return;
-        }
-        self.absolute_filled -= 1;
-        if self.relative == 0 {
-            self.relative = self.view_size - 1;
+    /// Drops every byte from `abs_pos` on, the next write lands at `abs_pos`
+    pub fn truncate_to(&mut self, abs_pos: u64) {
+        debug_assert!(abs_pos <= self.absolute_filled);
+        debug_assert!(self.absolute_filled - abs_pos <= self.view_size as u64);
+
+        let removed = (self.absolute_filled - abs_pos) as usize;
+        self.absolute_filled = abs_pos;
+        self.relative = if removed <= self.relative {
+            self.relative - removed
         } else {
-            self.relative -= 1;
-        }
+            self.view_size + self.relative - removed
+        };
+        debug_assert!(self.relative < self.view_size || self.view_size == 0);
     }
 }

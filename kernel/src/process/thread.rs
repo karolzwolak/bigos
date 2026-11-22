@@ -10,7 +10,7 @@ use core::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 
-pub const MAX_TASKS: usize = 64;
+pub const MAX_THREADS: usize = 64;
 pub const INVALID_SLOT: u16 = u16::MAX;
 
 const FPU_STATE_SIZE_BYTES: usize = 512;
@@ -87,45 +87,45 @@ impl Default for FpuState {
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskState {
+pub enum ThreadState {
     Free = 0,
     /// Slot reserved, stack and bookkeeping are being filled in
     Creating,
     Ready,
     Running,
     Blocked,
-    /// The task finished tearing itself down, the scheduler loop reaps the slot
+    /// The thread finished tearing itself down, the scheduler loop removes the slot
     Dead,
 }
 
-impl TaskState {
+impl ThreadState {
     pub fn from_raw(raw: u8) -> Self {
-        debug_assert!(raw <= TaskState::Dead as u8);
+        debug_assert!(raw <= ThreadState::Dead as u8);
 
-        // SAFETY: raw is only ever produced from a TaskState
-        unsafe { core::mem::transmute::<u8, TaskState>(raw) }
+        // SAFETY: raw is only ever produced from a ThreadState
+        unsafe { core::mem::transmute::<u8, ThreadState>(raw) }
     }
 }
 
-/// identifies a task for slot reuse, valid while the slot still holds the same pid
+/// identifies a thread for slot reuse, valid while the slot still holds the same pid
 /// PIDs are never reused
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TaskRef {
+pub struct ThreadRef {
     pub slot: u16,
     pub pid: PID,
 }
 
-impl TaskRef {
+impl ThreadRef {
     pub fn is_alive(&self) -> bool {
         slot(self.slot as usize).pid.load(Ordering::Acquire) == self.pid
     }
 }
 
-pub struct TaskSlot {
+pub struct ThreadSlot {
     pub pid: AtomicUsize,
     pub state: AtomicU8,
     pub priority: AtomicU8,
-    pub home_core: AtomicU8,
+    pub assigned_core: AtomicU8,
     pub on_cpu: AtomicBool,
     pub kill_pending: AtomicBool,
     pub exit_code_request: AtomicI32,
@@ -133,29 +133,29 @@ pub struct TaskSlot {
     pub child_policy_request: AtomicU8,
     pub cpu_ticks: AtomicU64,
     pub core_migration_count: AtomicU32,
-    /// Runs that began on a core where a different task ran last, so the registers
+    /// Runs that began on a core where a different thread ran last, so the registers
     /// and the fpu state really came back from the save areas
     pub handoff_count: AtomicU32,
     pub cr3: AtomicU64,
     pub kernel_stack_top: AtomicU64,
-    /// Next slot in the run queue queue the task sits in
+    /// Next slot in the run queue queue the thread sits in
     pub next: AtomicU16,
-    /// Written by switch_context while the task is switched out
+    /// Written by switch_context while the thread is switched out
     pub saved_rsp: UnsafeCell<u64>,
     pub fpu_state: UnsafeCell<FpuState>,
 }
 
-// SAFETY: saved_rsp and fpu_state are only touched by the core that owns the task
+// SAFETY: saved_rsp and fpu_state are only touched by the core that owns the thread
 // at that moment, handoffs between cores go through the on_cpu and state atomics
-unsafe impl Sync for TaskSlot {}
+unsafe impl Sync for ThreadSlot {}
 
-impl TaskSlot {
+impl ThreadSlot {
     const fn new() -> Self {
         Self {
             pid: AtomicUsize::new(INVALID_PID),
-            state: AtomicU8::new(TaskState::Free as u8),
+            state: AtomicU8::new(ThreadState::Free as u8),
             priority: AtomicU8::new(0),
-            home_core: AtomicU8::new(0),
+            assigned_core: AtomicU8::new(0),
             on_cpu: AtomicBool::new(false),
             kill_pending: AtomicBool::new(false),
             exit_code_request: AtomicI32::new(0),
@@ -171,63 +171,65 @@ impl TaskSlot {
         }
     }
 
-    pub fn state(&self) -> TaskState {
-        TaskState::from_raw(self.state.load(Ordering::Acquire))
+    pub fn state(&self) -> ThreadState {
+        ThreadState::from_raw(self.state.load(Ordering::Acquire))
     }
 
-    pub fn set_state(&self, state: TaskState) {
+    pub fn set_state(&self, state: ThreadState) {
         self.state.store(state as u8, Ordering::Release);
     }
 
-    /// Moves from one state to another, false when the task was not in `from`
-    pub fn transition(&self, from: TaskState, to: TaskState) -> bool {
+    /// Moves from one state to another, false when the thread was not in `from`
+    pub fn transition(&self, from: ThreadState, to: ThreadState) -> bool {
         self.state
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 }
 
-pub static TASKS: [TaskSlot; MAX_TASKS] = [const { TaskSlot::new() }; MAX_TASKS];
+pub static THREADS: [ThreadSlot; MAX_THREADS] = [const { ThreadSlot::new() }; MAX_THREADS];
 
-pub fn slot(slot_index: usize) -> &'static TaskSlot {
-    debug_assert!(slot_index < MAX_TASKS);
+pub fn slot(slot_index: usize) -> &'static ThreadSlot {
+    debug_assert!(slot_index < MAX_THREADS);
 
-    &TASKS[slot_index]
+    &THREADS[slot_index]
 }
 
 pub fn find_slot_by_pid(pid: PID) -> Option<usize> {
-    TASKS
+    THREADS
         .iter()
-        .position(|task| task.pid.load(Ordering::Acquire) == pid)
+        .position(|thread| thread.pid.load(Ordering::Acquire) == pid)
 }
 
-/// Reserves a free slot, None when all MAX_TASKS are in use
+/// Reserves a free slot, None when all MAX_THREADS are in use
 /// The slot stays Creating until the caller makes it Ready
-pub fn allocate_task_slot(pid: PID, priority: u8, home_core: u8, cr3: u64) -> Option<usize> {
-    for (slot_index, task) in TASKS.iter().enumerate() {
-        if !task.transition(TaskState::Free, TaskState::Creating) {
+pub fn allocate_thread_slot(pid: PID, priority: u8, assigned_core: u8, cr3: u64) -> Option<usize> {
+    for (slot_index, thread) in THREADS.iter().enumerate() {
+        if !thread.transition(ThreadState::Free, ThreadState::Creating) {
             continue;
         }
 
-        task.priority.store(priority, Ordering::Relaxed);
-        task.home_core.store(home_core, Ordering::Relaxed);
-        task.on_cpu.store(false, Ordering::Relaxed);
-        task.kill_pending.store(false, Ordering::Relaxed);
-        task.exit_code_request.store(0, Ordering::Relaxed);
-        task.child_policy_request
+        thread.priority.store(priority, Ordering::Relaxed);
+        thread.assigned_core.store(assigned_core, Ordering::Relaxed);
+        thread.on_cpu.store(false, Ordering::Relaxed);
+        thread.kill_pending.store(false, Ordering::Relaxed);
+        thread.exit_code_request.store(0, Ordering::Relaxed);
+        thread
+            .child_policy_request
             .store(ChildPolicy::KillChildren as u8, Ordering::Relaxed);
-        task.cpu_ticks.store(0, Ordering::Relaxed);
-        task.core_migration_count.store(0, Ordering::Relaxed);
-        task.handoff_count.store(0, Ordering::Relaxed);
-        task.cr3.store(cr3, Ordering::Relaxed);
-        task.next.store(INVALID_SLOT, Ordering::Relaxed);
-        task.kernel_stack_top
-            .store(gdt::task_stack_top(slot_index), Ordering::Relaxed);
+        thread.cpu_ticks.store(0, Ordering::Relaxed);
+        thread.core_migration_count.store(0, Ordering::Relaxed);
+        thread.handoff_count.store(0, Ordering::Relaxed);
+        thread.cr3.store(cr3, Ordering::Relaxed);
+        thread.next.store(INVALID_SLOT, Ordering::Relaxed);
+        thread
+            .kernel_stack_top
+            .store(gdt::thread_stack_top(slot_index), Ordering::Relaxed);
 
         // SAFETY: the slot is Creating, nobody else touches the fpu image
-        unsafe { *task.fpu_state.get() = FpuState::new() };
+        unsafe { *thread.fpu_state.get() = FpuState::new() };
 
-        task.pid.store(pid, Ordering::Release);
+        thread.pid.store(pid, Ordering::Release);
 
         return Some(slot_index);
     }
@@ -235,33 +237,30 @@ pub fn allocate_task_slot(pid: PID, priority: u8, home_core: u8, cr3: u64) -> Op
     None
 }
 
-pub fn core_current_task_ref(core_id: u8) -> TaskRef {
+pub fn core_current_thread_ref(core_id: u8) -> ThreadRef {
     let slot_index = scheduler::get_current_slot_for_core(core_id);
     debug_assert!(slot_index != INVALID_SLOT as usize);
 
-    TaskRef {
+    ThreadRef {
         slot: slot_index as u16,
         pid: scheduler::get_current_process_for_core(core_id),
     }
 }
 
-pub fn core_current_task_kill_pending(core_id: u8) -> bool {
-    slot(core_current_task_ref(core_id).slot as usize)
+pub fn core_current_thread_kill_pending(core_id: u8) -> bool {
+    slot(core_current_thread_ref(core_id).slot as usize)
         .kill_pending
         .load(Ordering::Acquire)
 }
 
-pub fn release_task_slot(slot_index: usize) {
-    let task = slot(slot_index);
+pub fn release_thread_slot(slot_index: usize) {
+    let thread = slot(slot_index);
 
-    task.pid.store(INVALID_PID, Ordering::Release);
-    task.set_state(TaskState::Free);
+    thread.pid.store(INVALID_PID, Ordering::Release);
+    thread.set_state(ThreadState::Free);
 }
 
-/// Builds the stack of a task that has never run
-/// The first switch_context into it returns to task_first_entry, which leaves
-/// for ring 3 through the trap frame above it
-/// Registers a task finds on its first entry to ring 3
+/// Registers a thread finds on its first entry to ring 3
 /// rdi and rsi carry argc and the ArgSlice array, so the entry function gets them as arguments
 #[derive(Debug, Clone, Copy)]
 pub struct UserEntry {
@@ -271,9 +270,12 @@ pub struct UserEntry {
     pub argv: u64,
 }
 
-pub fn init_task_stack(slot_index: usize, entry: UserEntry) {
-    let task = slot(slot_index);
-    let stack_top = task.kernel_stack_top.load(Ordering::Relaxed);
+/// Builds the stack of a thread that has never run
+/// The first switch_context into it returns to thread_first_entry, which leaves
+/// for ring 3 through the trap frame above it
+pub fn init_thread_stack(slot_index: usize, entry: UserEntry) {
+    let thread = slot(slot_index);
+    let stack_top = thread.kernel_stack_top.load(Ordering::Relaxed);
     debug_assert!(stack_top % 16 == 0);
 
     let trap_frame_addr = stack_top - TRAP_FRAME_SIZE as u64;
@@ -294,16 +296,16 @@ pub fn init_task_stack(slot_index: usize, entry: UserEntry) {
         core::ptr::write(trap_frame_addr as *mut TrapFrame, frame);
         core::ptr::write(
             return_address_slot as *mut u64,
-            task_first_entry as *const () as usize as u64,
+            thread_first_entry as *const () as usize as u64,
         );
         core::ptr::write_bytes(saved_rsp as *mut u64, 0, CALLEE_SAVED_REGISTER_COUNT);
-        *task.saved_rsp.get() = saved_rsp;
+        *thread.saved_rsp.get() = saved_rsp;
     }
 }
 
-/// Reached by the first switch_context into a task, with rsp at its trap frame
+/// Reached by the first switch_context into a thread, with rsp at its trap frame
 #[unsafe(naked)]
-unsafe extern "C" fn task_first_entry() -> ! {
+unsafe extern "C" fn thread_first_entry() -> ! {
     naked_asm!(
         "mov rdi, rsp",
         "call {check}",
@@ -317,12 +319,12 @@ unsafe extern "C" fn task_first_entry() -> ! {
         pop_all_gprs!(),
         "iretq",
 
-        check = sym task_first_entry_check,
+        check = sym thread_first_entry_check,
         user_data_selector = const USER_DATA_SELECTOR_VALUE,
     )
 }
 
-extern "C" fn task_first_entry_check(frame: *const TrapFrame) {
+extern "C" fn thread_first_entry_check(frame: *const TrapFrame) {
     debug_assert!(frame as usize % 16 == 0);
     debug_assert!(unsafe { (*frame).cs } == USER_CODE_SELECTOR_VALUE as u64);
 
@@ -330,21 +332,25 @@ extern "C" fn task_first_entry_check(frame: *const TrapFrame) {
     exit_if_kill_pending();
 }
 
-/// Called on the way to ring 3, where the task holds no kernel resources
+/// Called on the way to ring 3, where the thread holds no kernel resources
 pub fn exit_if_kill_pending() {
     let core_id = get_current_core_id();
     let slot_index = scheduler::get_current_slot_for_core(core_id);
     debug_assert!(slot_index != INVALID_SLOT as usize);
 
-    let task = slot(slot_index);
-    if task.kill_pending.load(Ordering::Acquire) {
-        let child_policy = ChildPolicy::from_raw(task.child_policy_request.load(Ordering::Acquire));
-        exit_current(task.exit_code_request.load(Ordering::Acquire), child_policy);
+    let thread = slot(slot_index);
+    if thread.kill_pending.load(Ordering::Acquire) {
+        let child_policy =
+            ChildPolicy::from_raw(thread.child_policy_request.load(Ordering::Acquire));
+        exit_current(
+            thread.exit_code_request.load(Ordering::Acquire),
+            child_policy,
+        );
     }
 }
 
-/// Asks a task to exit, the task tears itself down at its next return to ring 3
-/// Returns false when no such task exists
+/// Asks a thread to exit, the thread tears itself down at its next return to ring 3
+/// Returns false when no such thread exists
 pub fn request_kill(pid: PID, exit_code: i32, child_policy: ChildPolicy) -> bool {
     debug_assert!(pid != BIGPROC_PID, "bigproc is never killed");
 
@@ -352,32 +358,33 @@ pub fn request_kill(pid: PID, exit_code: i32, child_policy: ChildPolicy) -> bool
         return false;
     };
 
-    let task = slot(slot_index);
-    task.exit_code_request.store(exit_code, Ordering::Release);
-    task.child_policy_request
+    let thread = slot(slot_index);
+    thread.exit_code_request.store(exit_code, Ordering::Release);
+    thread
+        .child_policy_request
         .store(child_policy as u8, Ordering::Release);
-    task.kill_pending.store(true, Ordering::Release);
+    thread.kill_pending.store(true, Ordering::Release);
 
-    scheduler::wake_task(TaskRef {
+    scheduler::wake_thread(ThreadRef {
         slot: slot_index as u16,
         pid,
     });
 
-    // a task running in ring 3 only notices when something takes it into the kernel
-    if task.state() == TaskState::Running {
-        let running_core = task.home_core.load(Ordering::Relaxed);
-        if running_core == get_current_core_id() {
-            scheduler::mark_core_for_reschedule(running_core);
+    // a thread running in ring 3 only notices when something takes it into the kernel
+    if thread.state() == ThreadState::Running {
+        let assigned_core = thread.assigned_core.load(Ordering::Relaxed);
+        if assigned_core == get_current_core_id() {
+            scheduler::mark_core_for_reschedule(assigned_core);
         } else {
-            crate::interrupts::send_reschedule_ipi(running_core);
+            crate::interrupts::send_reschedule_ipi(assigned_core);
         }
     }
 
     true
 }
 
-/// Tears the running task down on its own kernel stack, never returns
-/// The scheduler loop frees the slot once it has switched away from the dead task
+/// Tears the running thread down on its own kernel stack, never returns
+/// The scheduler loop frees the slot once it has switched away from the dead thread
 pub fn exit_current(exit_code: i32, child_policy: ChildPolicy) -> ! {
     let core_id = get_current_core_id();
     let slot_index = scheduler::get_current_slot_for_core(core_id);
@@ -403,12 +410,13 @@ pub fn exit_current(exit_code: i32, child_policy: ChildPolicy) -> ! {
         let result = process_manager.terminate_process(pid, exit_code, child_policy);
         debug_assert!(result.is_ok());
     }
+    crate::process::wait::PROCESS_EXIT_WAIT_QUEUE.wake_all();
 
     x86_64::instructions::interrupts::disable();
-    let task = slot(slot_index);
-    task.set_state(TaskState::Dead);
-    scheduler::core_task_leave_run_queue(task.home_core.load(Ordering::Relaxed));
+    let thread = slot(slot_index);
+    thread.set_state(ThreadState::Dead);
+    scheduler::core_thread_leave_run_queue(thread.assigned_core.load(Ordering::Relaxed));
     scheduler::core_run_scheduling(get_current_core_id());
 
-    unreachable!("dead task {} was scheduled again", pid);
+    unreachable!("dead thread {} was scheduled again", pid);
 }

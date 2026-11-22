@@ -90,6 +90,10 @@ name = "lsproc"
 path = "src/bin/lsproc.rs"
 
 [[bin]]
+name = "shtest"
+path = "src/bin/shtest.rs"
+
+[[bin]]
 name = "runjob"
 path = "src/bin/runjob.rs"
 
@@ -111,3 +115,11 @@ path = "src/bin/treeroot.rs"
 [[bin]]
 name = "treeleaf"
 path = "src/bin/treeleaf.rs"
+
+[[bin]]
+name = "fe"
+path = "src/bin/fe.rs"
+
+[[bin]]
+name = "fetest"
+path = "src/bin/fetest.rs"

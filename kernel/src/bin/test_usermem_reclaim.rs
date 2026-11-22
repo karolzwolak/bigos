@@ -5,6 +5,7 @@ extern crate alloc;
 
 use core::sync::atomic::Ordering;
 use kernel::process::elf_loader::load_elf_from_path;
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::scheduler;
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
@@ -66,7 +67,7 @@ fn test_main() -> ! {
 
     let pid = {
         let mut pm = PROCESS_MANAGER.lock();
-        match pm.create_process_from_elf(0, &elf_info, "memstrs", 5) {
+        match pm.create_process_from_elf(BIGPROC_PID, &elf_info, "memstrs", 5) {
             Ok(pid) => {
                 serial_println_core!("test_usermem_reclaim: created memstrs pid={}", pid);
                 pid

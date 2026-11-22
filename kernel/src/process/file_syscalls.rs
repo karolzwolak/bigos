@@ -1,4 +1,5 @@
 use crate::filesystem::fat32::direntry::{MAX_EXT_LENGTH, MAX_NAME_LENGTH};
+use crate::filesystem::vfs::FileAttributes;
 use crate::filesystem::{FileNode, FileType, get_vfs};
 use crate::process::process_manager::PROCESS_MANAGER;
 use crate::process::syscall::{SyscallError, SyscallFrame};
@@ -21,7 +22,9 @@ pub struct StatFlat {
     pub name: [u8; FS_NAME_LEN],
     pub name_len: u8,
     pub is_dir: u8,
-    pub padding: [u8; 6],
+    /// `FileAttributes` bits
+    pub attributes: u8,
+    pub padding: [u8; 5],
     pub size: u64,
     pub created_time: u32,
     pub modified_time: u32,
@@ -47,7 +50,8 @@ impl StatFlat {
             name,
             name_len: name_len as u8,
             is_dir: (node.file_type == FileType::Directory) as u8,
-            padding: [0; 6],
+            attributes: node.attributes.bits(),
+            padding: [0; 5],
             size: node.size as u64,
             created_time: node.created_time,
             modified_time: node.modified_time,
@@ -79,6 +83,9 @@ pub fn open_file(frame: &SyscallFrame) -> Result<u64, SyscallError> {
     }
 
     let node = get_vfs().open_file(path.as_str())?;
+    if flags & FD_FLAG_WRITE as u64 != 0 && !node.attributes.contains(FileAttributes::WRITE) {
+        return Err(SyscallError::PermissionDenied);
+    }
 
     let mut process_manager = PROCESS_MANAGER.lock();
     let process = process_manager

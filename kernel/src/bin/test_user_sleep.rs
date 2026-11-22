@@ -5,9 +5,10 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::process::elf_loader::{ElfLoadInfo, load_elf_from_path};
+use kernel::process::process_manager::BIGPROC_PID;
 use kernel::process::process_manager::PROCESS_MANAGER;
 use kernel::process::shared_state::{TEST_COUNTER_COUNT, get_shared_program_data_buffer_mut};
-use kernel::process::task::{self, TaskState};
+use kernel::process::thread::{self, ThreadState};
 use kernel::process::{ChildPolicy, PID, ProcessState};
 use kernel::testing::{QemuExitCode, exit_qemu, test_panic_handler};
 use kernel::{boot_common, bsp_init, serial_println_core};
@@ -15,7 +16,7 @@ use kernel::{boot_common, bsp_init, serial_println_core};
 // indexes into the shared test counters, the user programs use the same values
 const COUNTER_RUNNING: usize = 0;
 const COUNTER_SLEEP_MS: usize = 4;
-const COUNTER_SLEEPING_TASKS_DONE: usize = 5;
+const COUNTER_SLEEPING_THREADS_DONE: usize = 5;
 const COUNTER_PING_ROUNDS_BASE: usize = 8;
 
 const PROGRAM_PRIORITY: u8 = 5;
@@ -24,7 +25,7 @@ const PING_ROLE_COUNT: usize = 2;
 
 const SLEEP_MS: u32 = 100;
 const MICROSECONDS_PER_MILLISECOND: u64 = 1000;
-// a task that spun instead of sleeping would collect about ten ticks in 100 ms
+// a thread that spun instead of sleeping would collect about ten ticks in 100 ms
 const MAX_CPU_TICKS_WHILE_SLEEPING: u64 = 3;
 
 const LONG_SLEEP_MS: u32 = 30_000;
@@ -80,7 +81,7 @@ fn parse(path: &str) -> ElfLoadInfo {
 fn spawn(elf_info: &ElfLoadInfo, name: &str) -> PID {
     let mut process_manager = PROCESS_MANAGER.lock();
 
-    match process_manager.create_process_from_elf(0, elf_info, name, PROGRAM_PRIORITY) {
+    match process_manager.create_process_from_elf(BIGPROC_PID, elf_info, name, PROGRAM_PRIORITY) {
         Ok(pid) => pid,
         Err(error) => {
             serial_println_core!("create_process_from_elf: {:?}", error);
@@ -102,8 +103,8 @@ fn wait_until(what: &str, deadline_us: u64, condition: impl Fn() -> bool) {
 }
 
 fn wait_until_gone(pid: PID, deadline_us: u64) {
-    wait_until("a task to exit", deadline_us, || {
-        task::find_slot_by_pid(pid).is_none()
+    wait_until("a thread to exit", deadline_us, || {
+        thread::find_slot_by_pid(pid).is_none()
     });
 }
 
@@ -125,20 +126,21 @@ fn test_sleep_duration_and_cpu_use(sleeper_elf: &ElfLoadInfo) {
     let start_us = now_us();
     let pid = spawn(sleeper_elf, "sleeper");
     let slot_index = loop {
-        if let Some(slot_index) = task::find_slot_by_pid(pid) {
+        if let Some(slot_index) = thread::find_slot_by_pid(pid) {
             break slot_index;
         }
         core::hint::spin_loop();
     };
 
-    // the slot is released with the task, so the highest tick count is sampled while it lives
+    // the slot is released with the thread, so the highest tick count is sampled while it lives
     let mut max_cpu_ticks = 0;
-    while task::find_slot_by_pid(pid).is_some() {
+    while thread::find_slot_by_pid(pid).is_some() {
         if now_us() - start_us > DEADLINE_US {
             fail("sleeper did not finish");
         }
 
-        max_cpu_ticks = max_cpu_ticks.max(task::slot(slot_index).cpu_ticks.load(Ordering::Relaxed));
+        max_cpu_ticks =
+            max_cpu_ticks.max(thread::slot(slot_index).cpu_ticks.load(Ordering::Relaxed));
         core::hint::spin_loop();
     }
     let elapsed_us = now_us() - start_us;
@@ -155,11 +157,11 @@ fn test_sleep_duration_and_cpu_use(sleeper_elf: &ElfLoadInfo) {
     if exit_code_of(pid) != Some(0) {
         fail("sleeper measured a sleep shorter than requested");
     }
-    if counter(COUNTER_SLEEPING_TASKS_DONE).load(Ordering::Acquire) != 1 {
+    if counter(COUNTER_SLEEPING_THREADS_DONE).load(Ordering::Acquire) != 1 {
         fail("sleeper did not report completion");
     }
     if max_cpu_ticks > MAX_CPU_TICKS_WHILE_SLEEPING {
-        fail("sleeping task burned cpu time");
+        fail("sleeping thread burned cpu time");
     }
 }
 
@@ -173,14 +175,14 @@ fn test_kill_during_sleep(sleeper_elf: &ElfLoadInfo) {
         counter(COUNTER_RUNNING).load(Ordering::Acquire) == 1
     });
 
-    let slot_index = task::find_slot_by_pid(pid).expect("a running task has a slot");
+    let slot_index = thread::find_slot_by_pid(pid).expect("a running thread has a slot");
     wait_until("the sleeper to block", STARTUP_DEADLINE_US, || {
-        task::slot(slot_index).state() == TaskState::Blocked
+        thread::slot(slot_index).state() == ThreadState::Blocked
     });
 
     let start_us = now_us();
-    if !task::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
-        fail("request_kill found no task");
+    if !thread::request_kill(pid, KILL_EXIT_CODE, ChildPolicy::KillChildren) {
+        fail("request_kill found no thread");
     }
     wait_until_gone(pid, KILL_DEADLINE_US);
     serial_println_core!(
@@ -200,12 +202,16 @@ fn test_wake_racing_with_block(pingpong_elf: &ElfLoadInfo) {
     let first = spawn(pingpong_elf, "pingpong");
     let second = spawn(pingpong_elf, "pingpong");
 
-    let first_slot = task::find_slot_by_pid(first).expect("a new task has a slot");
-    let second_slot = task::find_slot_by_pid(second).expect("a new task has a slot");
-    let first_core = task::slot(first_slot).home_core.load(Ordering::Relaxed);
-    let second_core = task::slot(second_slot).home_core.load(Ordering::Relaxed);
+    let first_slot = thread::find_slot_by_pid(first).expect("a new thread has a slot");
+    let second_slot = thread::find_slot_by_pid(second).expect("a new thread has a slot");
+    let first_core = thread::slot(first_slot)
+        .assigned_core
+        .load(Ordering::Relaxed);
+    let second_core = thread::slot(second_slot)
+        .assigned_core
+        .load(Ordering::Relaxed);
     if first_core == second_core {
-        fail("both ping pong tasks share a core, so no wake crosses cores");
+        fail("both ping pong threads share a core, so no wake crosses cores");
     }
 
     let start_us = now_us();
@@ -221,7 +227,7 @@ fn test_wake_racing_with_block(pingpong_elf: &ElfLoadInfo) {
         }
     }
     if exit_code_of(first) != Some(0) || exit_code_of(second) != Some(0) {
-        fail("a ping pong task did not exit cleanly");
+        fail("a ping pong thread did not exit cleanly");
     }
 }
 

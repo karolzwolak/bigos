@@ -8,7 +8,7 @@ use rustspace::{CpuInfoFlat, program_shared_data, sys_exit, sys_get_cpu_info, sy
 // Indexes into the shared test counters, the kernel tests use the same values
 const COUNTER_RUNNING: usize = 0;
 const COUNTER_SLEEP_MS: usize = 4;
-const COUNTER_SLEEPING_TASKS_DONE: usize = 5;
+const COUNTER_SLEEPING_THREADS_DONE: usize = 5;
 
 const MICROSECONDS_PER_MILLISECOND: u64 = 1000;
 const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
@@ -58,7 +58,7 @@ extern "C" fn sleep_main() -> ! {
         sys_exit(EXIT_CODE_WOKE_TOO_EARLY)
     }
 
-    counters[COUNTER_SLEEPING_TASKS_DONE].fetch_add(1, Ordering::AcqRel);
+    counters[COUNTER_SLEEPING_THREADS_DONE].fetch_add(1, Ordering::AcqRel);
 
     sys_exit(0)
 }

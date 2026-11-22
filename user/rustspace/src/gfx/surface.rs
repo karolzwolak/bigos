@@ -13,6 +13,8 @@ pub struct UserSurface {
     pub pixels_second: *mut u32,
     pub width: u32,
     pub height: u32,
+    /// Which of the two window buffers `pixels` points at, flips on every swap
+    pub back_buffer_index: usize,
 }
 
 impl UserSurface {
@@ -27,11 +29,23 @@ impl UserSurface {
             pixels_second,
             width,
             height,
+            back_buffer_index: 0,
         }
     }
 
     pub fn swap(&mut self) {
         core::mem::swap(&mut self.pixels, &mut self.pixels_second);
+        self.back_buffer_index ^= 1;
+    }
+
+    /// `len` pixels of row `y` starting at column `x`
+    #[inline(always)]
+    pub fn row_span_mut(&mut self, x: u32, y: u32, len: u32) -> &mut [u32] {
+        debug_assert!(y < self.height);
+        debug_assert!(x + len <= self.width);
+
+        let offset = (y * self.width + x) as usize;
+        unsafe { core::slice::from_raw_parts_mut(self.pixels.add(offset), len as usize) }
     }
 
     #[inline(always)]

@@ -1,5 +1,6 @@
 use crate::filesystem::fat32::ROOT_CLUSTER;
 use crate::filesystem::vfs::{FileSystemError, FileSystemResult, FileType};
+use crate::time::DateTime;
 use alloc::string::String;
 
 #[repr(u8)]
@@ -9,7 +10,7 @@ pub enum FatFileAttributes {
     None = 0x00,
     ReadOnly = 0x01,  // reject changes to the file (write, delete, rename)
     Hidden = 0x02,    // listing should hide the file unless -a flag
-    System = 0x04,    // indicates that its a system file (means nothing for now)
+    System = 0x04,    // indicates that its a system file, bigOS reads it as the execute permission
     VolumeId = 0x08, // indicates that this entry has the volume label of the volume, only one such entry can exist in the root directory
     Directory = 0x10, // indicates that this entry is a directory, otherwise its a file
     Archive = 0x20, // for backup utilities - Set by FAT driver on new creation, or when modifying/renaming the file. The backup utilities able to easily find the file to be backed up and it clears the attribute after the back up process
@@ -53,67 +54,73 @@ pub struct DirectoryEntry {
     pub file_size: u32,          // offset 0x1C: File size in bytes
 }
 
-const fn is_leap_year(year: u32) -> bool {
-    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+// FAT time: bits 0-4: seconds / 2, bits 5-10: minutes, bits 11-15: hours
+// FAT date: bits 0-4: day [1, 31], bits 5-8: month [1, 12], bits 9-15: years since 1980
+const FAT_TIME_HALF_SECONDS_MASK: u16 = 0x1F;
+const FAT_TIME_MINUTES_SHIFT: u16 = 5;
+const FAT_TIME_MINUTES_MASK: u16 = 0x3F;
+const FAT_TIME_HOURS_SHIFT: u16 = 11;
+const FAT_TIME_HOURS_MASK: u16 = 0x1F;
+const FAT_DATE_DAY_MASK: u16 = 0x1F;
+const FAT_DATE_MONTH_SHIFT: u16 = 5;
+const FAT_DATE_MONTH_MASK: u16 = 0x0F;
+const FAT_DATE_YEAR_SHIFT: u16 = 9;
+const FAT_DATE_YEAR_MASK: u16 = 0x7F;
+const FAT_EPOCH_YEAR: u32 = 1980;
+const FAT_SECONDS_PER_TICK: u32 = 2;
+/// creation_time_tenth counts 10 ms units on top of the 2 second time field
+const FAT_TENTHS_PER_SECOND: u32 = 100;
+
+const FAT_EPOCH: DateTime = DateTime {
+    year: FAT_EPOCH_YEAR,
+    ..DateTime::UNIX_EPOCH
+};
+pub const FAT_EPOCH_UNIX_SECONDS: u32 = FAT_EPOCH.to_unix_seconds();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FatTimestamp {
+    pub time: u16,
+    pub date: u16,
+    pub tenth: u8,
 }
 
-const DAYS_UNTIL_YEAR_SINCE_1970: [u32; 128] = {
-    let mut days = [0; 128];
-    let mut cumsum = 0;
-    let mut y = 1970;
-    while y < 1970 + 128 {
-        let idx = (y - 1970) as usize;
-        days[idx] = cumsum;
-        cumsum += if is_leap_year(y) { 366 } else { 365 };
-        y += 1;
-    }
-    days
-};
+impl FatTimestamp {
+    pub const fn from_unix_seconds(unix_seconds: u32) -> Self {
+        let clamped_seconds = if unix_seconds > FAT_EPOCH_UNIX_SECONDS {
+            unix_seconds
+        } else {
+            FAT_EPOCH_UNIX_SECONDS
+        };
+        let civil = DateTime::from_unix_seconds(clamped_seconds);
 
-// FAT date format:
-// Seconds: 0-4b [0, 29] 2 second intervals
-// Minutes: 5-10b [0, 59]
-// Hours: 11-15b [0, 23]
-// Day: 0-4b [1, 31]
-// Month: 5-8b [1, 12]
-// Year: 9-15b (0 == the year 1980)
-pub fn fat_time_to_unix_timestamp(time: u16, date: u16) -> u32 {
-    let seconds = ((time & 0x1F) as u32) * 2;
-    let minutes = ((time >> 5) & 0x3F) as u32;
-    let hours = ((time >> 11) & 0x1F) as u32;
-    let day = (date & 0x1F) as u32;
-    let month = ((date >> 5) & 0x0F) as u32;
-    let year_idx = ((date >> 9) & 0x7F) as usize;
+        let time = (civil.hour << FAT_TIME_HOURS_SHIFT)
+            | (civil.minute << FAT_TIME_MINUTES_SHIFT)
+            | (civil.second / FAT_SECONDS_PER_TICK);
+        let date = ((civil.year - FAT_EPOCH_YEAR) << FAT_DATE_YEAR_SHIFT)
+            | (civil.month << FAT_DATE_MONTH_SHIFT)
+            | civil.day;
 
-    let mut days = DAYS_UNTIL_YEAR_SINCE_1970[year_idx];
-    let month_days = match month {
-        1 => 0,
-        2 => 31,
-        3 => 59,
-        4 => 90,
-        5 => 120,
-        6 => 151,
-        7 => 181,
-        8 => 212,
-        9 => 243,
-        10 => 273,
-        11 => 304,
-        12 => 334,
-        _ => 0,
-    };
-    days += month_days;
-
-    let year = year_idx as u32 + 1980;
-    if month > 2 && is_leap_year(year) {
-        days += 1;
+        FatTimestamp {
+            time: time as u16,
+            date: date as u16,
+            tenth: (civil.second % FAT_SECONDS_PER_TICK * FAT_TENTHS_PER_SECOND) as u8,
+        }
     }
 
-    if day > 1 {
-        days += day - 1;
-    }
+    pub const fn to_unix_seconds(&self) -> u32 {
+        let month = ((self.date >> FAT_DATE_MONTH_SHIFT) & FAT_DATE_MONTH_MASK) as u32;
+        let day = (self.date & FAT_DATE_DAY_MASK) as u32;
+        let civil = DateTime {
+            year: FAT_EPOCH_YEAR + ((self.date >> FAT_DATE_YEAR_SHIFT) & FAT_DATE_YEAR_MASK) as u32,
+            month: if month == 0 { 1 } else { month },
+            day: if day == 0 { 1 } else { day },
+            hour: ((self.time >> FAT_TIME_HOURS_SHIFT) & FAT_TIME_HOURS_MASK) as u32,
+            minute: ((self.time >> FAT_TIME_MINUTES_SHIFT) & FAT_TIME_MINUTES_MASK) as u32,
+            second: (self.time & FAT_TIME_HALF_SECONDS_MASK) as u32 * FAT_SECONDS_PER_TICK,
+        };
 
-    // convert to seconds
-    (days * 86400) + (hours * 3600) + (minutes * 60) + seconds
+        civil.to_unix_seconds() + self.tenth as u32 / FAT_TENTHS_PER_SECOND
+    }
 }
 
 impl DirectoryEntry {
@@ -309,11 +316,38 @@ impl DirectoryEntry {
     }
 
     pub fn get_creation_timestamp(&self) -> u32 {
-        fat_time_to_unix_timestamp(self.creation_time, self.creation_date)
+        FatTimestamp {
+            time: self.creation_time,
+            date: self.creation_date,
+            tenth: self.creation_time_tenth,
+        }
+        .to_unix_seconds()
     }
 
     pub fn get_modified_timestamp(&self) -> u32 {
-        fat_time_to_unix_timestamp(self.write_time, self.write_date)
+        FatTimestamp {
+            time: self.write_time,
+            date: self.write_date,
+            tenth: 0,
+        }
+        .to_unix_seconds()
+    }
+
+    pub fn set_creation_time(&mut self, timestamp: FatTimestamp) {
+        self.creation_time = timestamp.time;
+        self.creation_date = timestamp.date;
+        self.creation_time_tenth = timestamp.tenth;
+    }
+
+    pub fn set_modified_time(&mut self, timestamp: FatTimestamp) {
+        self.write_time = timestamp.time;
+        self.write_date = timestamp.date;
+        self.access_date = timestamp.date;
+    }
+
+    pub fn set_all_times(&mut self, timestamp: FatTimestamp) {
+        self.set_creation_time(timestamp);
+        self.set_modified_time(timestamp);
     }
 
     pub fn as_bytes(&self) -> [u8; 32] {

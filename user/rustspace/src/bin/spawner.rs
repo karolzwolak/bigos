@@ -26,6 +26,7 @@ const SPAWNEE_NAME: &str = "kid";
 const DETACHED_PATH: &str = "/BIN/treeleaf";
 const MISSING_PATH: &str = "/BIN/missing";
 const TEXT_FILE_PATH: &str = "/HELLO.TXT";
+const NOT_ELF_EXEC_PATH: &str = "/BIN/NOTELF.BIN";
 const DIRECTORY_PATH: &str = "/BIN";
 const INHERITED_FILE_PATH: &str = "/HELLO.TXT";
 
@@ -144,8 +145,13 @@ fn run_path_error_checks() {
         SyscallError::NOT_FOUND,
     );
     expect_error(
-        "spawn of a text file",
+        "spawn of a file without execute permission",
         &ProcessCreateInfo::new(TEXT_FILE_PATH, CHILD_PRIORITY),
+        SyscallError::PERMISSION_DENIED,
+    );
+    expect_error(
+        "spawn of an executable that is no ELF",
+        &ProcessCreateInfo::new(NOT_ELF_EXEC_PATH, CHILD_PRIORITY),
         SyscallError::INVALID_EXECUTABLE,
     );
     expect_error(

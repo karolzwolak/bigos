@@ -17,10 +17,10 @@ const DECIMAL_BASE: u8 = 10;
 const LINE_CAPACITY: usize = 96;
 
 const MS_PER_SECOND: u64 = 1000;
-/// Longer than a scheduler slice, so a waiting task preempts the spin
+/// Longer than a scheduler slice, so a waiting thread preempts the spin
 const SPIN_DURATION_MS: u64 = 150;
 const HANDOFF_TIMEOUT_MS: u64 = 5000;
-/// Probes that must see another task run on the core while the registers are loaded
+/// Probes that must see another thread run on the core while the registers are loaded
 const REQUIRED_HANDOFFS: u32 = 3;
 const CALIBRATION_SPIN_ITERATIONS: u64 = 1 << 16;
 const CALIBRATION_RUNS: u32 = 4;
@@ -225,7 +225,7 @@ fn exit_failed(exit_code: i32) -> ! {
 }
 
 /// Keeps the core busy until every instance is done probing. An instance that exits
-/// earlier leaves a task that still probes alone, either on its own core or after an idle
+/// earlier leaves a thread that still probes alone, either on its own core or after an idle
 /// core steals its partner. Run without the kernel test the instance count is 0 and
 /// nobody waits
 fn wait_for_all_instances() {
@@ -244,7 +244,7 @@ unsafe fn probe_syscall() {
 }
 
 /// Spins in ring 3 without touching a register until SPIN_ITERATIONS_LEFT runs out,
-/// so only an interrupt can take the task away
+/// so only an interrupt can take the thread away
 #[inline(never)]
 unsafe fn probe_spin() {
     unsafe {
@@ -431,7 +431,7 @@ fn calibrate_spin_iterations(pid: u64, ticks_per_ms: u64) -> u64 {
     CALIBRATION_SPIN_ITERATIONS * SPIN_DURATION_MS * ticks_per_ms / fastest_ticks.max(1)
 }
 
-/// Repeats `probe` until REQUIRED_HANDOFFS of its runs saw another task take the core
+/// Repeats `probe` until REQUIRED_HANDOFFS of its runs saw another thread take the core
 fn run_phase_across_handoffs(phase_name: &[u8], timeout_tsc: u64, mut probe: impl FnMut()) {
     let deadline_tsc = read_tsc() + timeout_tsc;
     let mut probes_with_handoff = 0;
@@ -439,7 +439,7 @@ fn run_phase_across_handoffs(phase_name: &[u8], timeout_tsc: u64, mut probe: imp
     while probes_with_handoff < REQUIRED_HANDOFFS {
         if read_tsc() >= deadline_tsc {
             let mut line = LineBuffer::new();
-            line.push(b"regprobe: no other task ran during ");
+            line.push(b"regprobe: no other thread ran during ");
             line.push(phase_name);
             line.push(b"\n");
             line.write();
