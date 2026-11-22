@@ -32,6 +32,9 @@ fn kernel_max_cores(root: &Path) -> u8 {
     4
 }
 
+const QEMU_TIMEZONE: &str = "Etc/GMT-1";
+const QEMU_RTC_ARGS: [&str; 2] = ["-rtc", "base=localtime"];
+
 fn qemu_smp_arg(root: &Path) -> String {
     let cores = kernel_max_cores(root);
     format!("cores={},threads=1", cores)
@@ -606,6 +609,8 @@ fn run_test_with_timeout(
     let out = Command::new("timeout")
         .arg(timeout_secs)
         .arg("qemu-system-x86_64")
+        .env("TZ", QEMU_TIMEZONE)
+        .args(QEMU_RTC_ARGS)
         .args([
             "-M",
             "q35",
@@ -1384,6 +1389,7 @@ fn run_iso(root: &Path, accel: QemuAccel) {
         kernel_max_cores(root)
     );
     let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.env("TZ", QEMU_TIMEZONE).args(QEMU_RTC_ARGS);
 
     cmd.args([
         "-M",
@@ -1435,6 +1441,7 @@ fn run_nologs(root: &Path) {
         kernel_max_cores(root)
     );
     let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.env("TZ", QEMU_TIMEZONE).args(QEMU_RTC_ARGS);
     cmd.args([
         "-M",
         "q35",

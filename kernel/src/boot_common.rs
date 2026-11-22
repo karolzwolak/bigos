@@ -219,6 +219,7 @@ pub unsafe fn bsp_early_init() {
     }
     // the core 0 timer setup reads the TSC frequency
     unsafe { interrupts::init_tsc_globals() };
+    crate::time::init_wall_clock();
     unsafe { init_core(0) };
 
     serial_println!("Mapping lapic for core 0");

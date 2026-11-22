@@ -34,6 +34,7 @@ pub mod process;
 pub mod process_start;
 pub mod stack_guard;
 pub mod testing;
+pub mod time;
 pub mod trap;
 pub mod util;
 

@@ -702,6 +702,7 @@ pub unsafe fn init_acpi(
 
     serial_println!("AcpiTables initialized");
     crate::power::init_from_acpi(&acpi_tables, &handler);
+    crate::time::init_from_acpi(&acpi_tables);
 
     let acpi_platform: AcpiPlatform<IdentityAcpiHandler> =
         AcpiPlatform::new(acpi_tables, handler).expect("Cannot create AcpiPlatform");
