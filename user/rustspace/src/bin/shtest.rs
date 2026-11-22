@@ -775,7 +775,7 @@ fn check_help_and_system(shell: &mut Shell) {
     shell.run("help");
     check(
         "help lists seeproc",
-        shell.capture.as_str().contains("seeproc <pid>"),
+        shell.capture.as_str().contains("- seeproc <pid>"),
     );
 }
 

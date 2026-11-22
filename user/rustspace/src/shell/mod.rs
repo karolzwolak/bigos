@@ -432,12 +432,8 @@ fn do_for_each_path(
 
 fn help<O: ShellOutput>(out: &mut O) {
     for info in &BUILTINS {
-        let _ = writeln!(out, "{:<22} {}", info.usage, info.summary);
+        let _ = writeln!(out, "- {:<22} {}", info.usage, info.summary);
     }
-    let _ = writeln!(
-        out,
-        "any other word starts the program of that name in /BIN"
-    );
 }
 
 fn cd(state: &mut ShellState, args: &[&str]) -> Result<(), CommandError> {
