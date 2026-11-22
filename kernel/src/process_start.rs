@@ -1,10 +1,11 @@
 use alloc::format;
 use alloc::string::String;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::process::elf_loader::{BIGPROC_ELF, SHELL_ELF, load_elf_from_path};
 use crate::process::process_manager::{BIGPROC_NAME, BIGPROC_PID, NO_PARENT_PID};
 use crate::process::shared_state::init_shared_state;
-use crate::process::{ElfLoadInfo, process_manager::PROCESS_MANAGER};
+use crate::process::{ElfLoadInfo, ProcessState, process_manager::PROCESS_MANAGER};
 use crate::{RUN_SHELL, serial_println};
 
 const SHELL_PATH: &str = "/BIN/shell";
@@ -13,6 +14,9 @@ const SHELL_PRIORITY: u8 = 7;
 const INIT_PARENT_PID: usize = BIGPROC_PID;
 // bigproc only blocks, it never competes for cpu time
 const BIGPROC_PRIORITY: u8 = 0;
+const NO_SHELL_PID: usize = usize::MAX;
+
+static SHELL_PID: AtomicUsize = AtomicUsize::new(NO_SHELL_PID);
 
 fn spawn_from_elf_info(
     elf_info: &ElfLoadInfo,
@@ -75,25 +79,53 @@ pub fn init_userspace() {
     );
 }
 
+fn start_shell() {
+    let started =
+        match create_userspace_process_from_path(SHELL_PATH, INIT_PARENT_PID, SHELL_PRIORITY) {
+            Ok(pid) => {
+                serial_println!("Created shell from {} (PID {})", SHELL_PATH, pid);
+                Ok(pid)
+            }
+            Err(error) => {
+                serial_println!("{}, falling back to the embedded shell", error);
+                create_userspace_process(SHELL_ELF, SHELL_NAME, INIT_PARENT_PID, SHELL_PRIORITY)
+            }
+        };
+
+    match started {
+        Ok(pid) => SHELL_PID.store(pid, Ordering::Release),
+        Err(error) => serial_println!("Shell failed to start: {}", error),
+    }
+}
+
+pub fn is_shell_running() -> bool {
+    let pid = SHELL_PID.load(Ordering::Acquire);
+    if pid == NO_SHELL_PID {
+        return false;
+    }
+
+    PROCESS_MANAGER
+        .lock()
+        .get_process(pid)
+        .is_ok_and(|process| {
+            process.state != ProcessState::Terminated && process.name == SHELL_NAME
+        })
+}
+
+pub fn restart_shell_if_gone() -> bool {
+    if is_shell_running() {
+        return false;
+    }
+
+    start_shell();
+    is_shell_running()
+}
+
 pub fn create_userspace_processes() {
     serial_println!("Creating initial userspace processes");
 
     if RUN_SHELL {
-        match create_userspace_process_from_path(SHELL_PATH, INIT_PARENT_PID, SHELL_PRIORITY) {
-            Ok(pid) => serial_println!("Created shell from {} (PID {})", SHELL_PATH, pid),
-            Err(error) => {
-                serial_println!("{}, falling back to the embedded shell", error);
-                match create_userspace_process(
-                    SHELL_ELF,
-                    SHELL_NAME,
-                    INIT_PARENT_PID,
-                    SHELL_PRIORITY,
-                ) {
-                    Ok(pid) => serial_println!("Created embedded shell (PID {})", pid),
-                    Err(error) => serial_println!("Embedded shell failed: {}", error),
-                }
-            }
-        }
+        start_shell();
     }
 
     serial_println!("Process creation complete");

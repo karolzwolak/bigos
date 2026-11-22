@@ -3,8 +3,9 @@
 
 mod boot;
 
+use core::sync::atomic::Ordering;
 use kernel::bsp_init::wait_for_ap_cores_blocking;
-use kernel::graphics::compositor::{get_compositor, init_compositor};
+use kernel::graphics::compositor::{SHELL_RESTART_REQUESTED, get_compositor, init_compositor};
 use kernel::testing::{QemuExitCode, exit_qemu};
 use kernel::{interrupts, serial_println_core};
 use x86_64::instructions::hlt;
@@ -49,9 +50,14 @@ fn main() -> ! {
         loop {
             //serial_println_core!("loop");
             let time_start = interrupts::system_uptime_ns();
-            let mut compositor = get_compositor();
-            compositor.process_input_events();
-            compositor.compose(fb);
+            {
+                let mut compositor = get_compositor();
+                compositor.process_input_events();
+                compositor.compose(fb);
+            }
+            if SHELL_RESTART_REQUESTED.swap(false, Ordering::AcqRel) {
+                kernel::process_start::restart_shell_if_gone();
+            }
             let time_end = interrupts::system_uptime_ns();
             let _dt: u64 = time_end - time_start;
             // time_elapsed += dt;

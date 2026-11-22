@@ -24,6 +24,8 @@ use x86_64::{PhysAddr, VirtAddr};
 
 static COMPOSITOR: Once<Mutex<Compositor>> = Once::new();
 
+pub static SHELL_RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 pub fn init_compositor(width: u32, height: u32) {
     COMPOSITOR.call_once(|| Mutex::new(Compositor::new(width, height)));
 }
@@ -53,8 +55,9 @@ pub fn get_input_event_buffer() -> &'static EventBuffer {
 const NORMALIZE_Z_INDEX_THRESHOLD: u8 = 250;
 
 const MOUSE_DEBUG_PRINT: bool = false;
-const FOCUS_PREVIOUS_WINDOW_KEY: KeyCode = KeyCode::N;
-const FOCUS_NEXT_WINDOW_KEY: KeyCode = KeyCode::M;
+const FOCUS_PREVIOUS_WINDOW_KEY: KeyCode = KeyCode::A;
+const FOCUS_NEXT_WINDOW_KEY: KeyCode = KeyCode::D;
+const RESTART_SHELL_KEY: KeyCode = KeyCode::T;
 const CURSOR_COLOR_XRGB: u32 = 0xFFAAAAFF;
 const CLEAR_COLOR_XRGB: u32 = 0xFF000000;
 const CURSOR_SIZE_X: i32 = 3;
@@ -443,6 +446,15 @@ impl Compositor {
     }
 
     /// True when a window of the process has input waiting in its event buffer
+    pub fn is_present_pending(&self, window_id: u32) -> bool {
+        self.windows
+            .read()
+            .get(window_id as usize)
+            .is_some_and(|window| {
+                window.is_visible && window.buffer.needs_swap.load(Ordering::Acquire)
+            })
+    }
+
     pub fn process_has_pending_input(&self, pid: PID) -> bool {
         self.windows.read().iter().any(|window| {
             window.owner_pid == pid
@@ -506,7 +518,7 @@ impl Compositor {
 
         // letters reach the compositor only as key states and chars, so focus hotkeys are handled here
         if self.keyboard_state.is_down(KeyCode::LAlt) && state == KeyState::Pressed {
-            self.handle_focus_hotkey(key);
+            self.handle_alt_hotkey(key);
         }
 
         if let Some(event_buffer) = self.get_focused_window_event_buffer() {
@@ -518,8 +530,10 @@ impl Compositor {
         }
     }
 
-    fn handle_focus_hotkey(&mut self, key: u8) {
-        if key == FOCUS_PREVIOUS_WINDOW_KEY as u8 {
+    fn handle_alt_hotkey(&mut self, key: u8) {
+        if key == RESTART_SHELL_KEY as u8 {
+            SHELL_RESTART_REQUESTED.store(true, Ordering::Release);
+        } else if key == FOCUS_PREVIOUS_WINDOW_KEY as u8 {
             let focused_window_id = self.currently_focused_window.load(Ordering::Acquire);
             let new_focused_window_id = focused_window_id.saturating_sub(1);
             self.focus_window(new_focused_window_id);
@@ -712,9 +726,10 @@ impl Compositor {
             Self::clear_framebuffer(framebuffer);
         }
 
+        let mut swapped_any = false;
         for window in visible_windows {
             if window.is_visible {
-                window.buffer.try_swap();
+                swapped_any |= window.buffer.try_swap();
 
                 // serial_println!("Compositing window ID {} at position ({}, {}) with size {}x{}", window.id, window.x, window.y, window.buffer.width, window.buffer.height);
 
@@ -756,6 +771,10 @@ impl Compositor {
                     }
                 }
             }
+        }
+
+        if swapped_any {
+            crate::process::wait::WINDOW_SWAP_WAIT_QUEUE.wake_all();
         }
 
         if self.cursor_visible.load(Ordering::Relaxed) {

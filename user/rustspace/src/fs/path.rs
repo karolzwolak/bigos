@@ -2,16 +2,16 @@ use crate::SyscallError;
 
 pub const MAX_PATH_BYTES: usize = 256;
 const SEPARATOR: u8 = b'/';
-const CURRENT_DIR_DOTS: &str = ".";
-const PARENT_DIR_DOTS: &str = "..";
+pub const CURRENT_DIR_NAME: &str = ".";
+pub const PARENT_DIR_NAME: &str = "..";
 
 #[derive(Clone, Copy)]
-pub struct ShellPath {
+pub struct FsPath {
     pub bytes: [u8; MAX_PATH_BYTES],
     pub len: usize,
 }
 
-impl ShellPath {
+impl FsPath {
     pub const ROOT_DIR_PATH: Self = {
         let mut bytes = [0u8; MAX_PATH_BYTES];
         bytes[0] = SEPARATOR;
@@ -19,7 +19,7 @@ impl ShellPath {
         Self { bytes, len: 1 }
     };
 
-    pub fn resolve_from_cwd(cwd: &ShellPath, input: &str) -> Result<Self, SyscallError> {
+    pub fn resolve_from_cwd(cwd: &FsPath, input: &str) -> Result<Self, SyscallError> {
         debug_assert!(cwd.is_normalized());
 
         let mut path = if input.as_bytes().first() == Some(&SEPARATOR) {
@@ -30,8 +30,8 @@ impl ShellPath {
 
         for component in input.split(SEPARATOR as char) {
             match component {
-                "" | CURRENT_DIR_DOTS => {}
-                PARENT_DIR_DOTS => path.pop_component(),
+                "" | CURRENT_DIR_NAME => {}
+                PARENT_DIR_NAME => path.pop_component(),
                 name => path.push_component(name)?,
             }
         }
@@ -61,7 +61,7 @@ impl ShellPath {
 
     pub fn push_component(&mut self, name: &str) -> Result<(), SyscallError> {
         debug_assert!(!name.is_empty() && !name.contains(SEPARATOR as char));
-        debug_assert!(name != CURRENT_DIR_DOTS && name != PARENT_DIR_DOTS);
+        debug_assert!(name != CURRENT_DIR_NAME && name != PARENT_DIR_NAME);
 
         let separator_len = if self.is_root() { 0 } else { 1 };
         let new_len = self.len + separator_len + name.len();
@@ -100,7 +100,7 @@ impl ShellPath {
     fn is_normalized(&self) -> bool {
         let path = &self.bytes[..self.len];
         let components_ok = path[1..].split(|&byte| byte == SEPARATOR).all(|component| {
-            component != CURRENT_DIR_DOTS.as_bytes() && component != PARENT_DIR_DOTS.as_bytes()
+            component != CURRENT_DIR_NAME.as_bytes() && component != PARENT_DIR_NAME.as_bytes()
         });
 
         path.first() == Some(&SEPARATOR)
@@ -110,13 +110,13 @@ impl ShellPath {
     }
 }
 
-impl core::fmt::Display for ShellPath {
+impl core::fmt::Display for FsPath {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl PartialEq for ShellPath {
+impl PartialEq for FsPath {
     fn eq(&self, other: &Self) -> bool {
         self.as_str().eq_ignore_ascii_case(other.as_str())
     }
